@@ -28,7 +28,7 @@
 //! | Route                  | Answer                                          |
 //! |------------------------|-------------------------------------------------|
 //! | `GET  /v1/status`      | version, Npcap, capture, game window            |
-//! | `GET  /v1/dps`         | the meter's current view (`DpsData`)            |
+//! | `GET  /v1/dps`         | the meter's current view (`DpsData`, plus `targetDead`) |
 //! | `GET  /v1/self`        | your character and its Odyle energy             |
 //! | `GET  /v1/events`      | SSE, see below                                  |
 //! | `GET  /v1/fights`      | saved fights (`FightSummary[]`)                 |
@@ -359,7 +359,15 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let calc = engine.clone();
                 let json = tokio::task::spawn_blocking(move || {
                     let dps = calc.calculator.lock().get_dps();
-                    serde_json::to_string(&dps).unwrap_or_default()
+                    // The game sends no HP after the killing blow: the view
+                    // would stay on the last reading ("1.7 %"). Whether the
+                    // target died is known — said alongside, as targetDead.
+                    let dead = dps.target_id > 0 && calc.storage.is_entity_dead(dps.target_id);
+                    let mut view = serde_json::to_value(&dps).unwrap_or_default();
+                    if let Some(fields) = view.as_object_mut() {
+                        fields.insert("targetDead".into(), dead.into());
+                    }
+                    serde_json::to_string(&view).unwrap_or_default()
                 })
                 .await
                 .unwrap_or_default();
