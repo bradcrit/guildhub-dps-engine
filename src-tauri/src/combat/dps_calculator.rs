@@ -480,10 +480,32 @@ impl DpsCalculator {
                 }
             }
         }
+        let orphan_to_owner: HashMap<i32, i32> = orphan_merges.iter().copied().collect();
         for (orphan, owner) in orphan_merges {
             if let Some(orphan_data) = dps_data.map.remove(&orphan) {
                 if let Some(owner_data) = dps_data.map.get_mut(&owner) {
                     owner_data.merge_from(&orphan_data);
+                }
+            }
+        }
+
+        // Healing done in the fight's window, on the rows the damage made — a
+        // healer and their summons resolved as for damage (`get_target_details`
+        // does the same for HEAL). Healing alone makes no row.
+        let window = target_ids
+            .iter()
+            .filter_map(|tid| combat_data.get(tid))
+            .map(|td| (td.first_damage_time, td.last_damage_time))
+            .reduce(|(f, l), (f2, l2)| (f.min(f2), l.max(l2)));
+        if let Some((from, to)) = window {
+            for (actor_id, healed) in self.data_storage.heal_totals_between(from, to) {
+                let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
+                if raw_uid <= 0 { continue; }
+                let nickname = resolve_nickname(raw_uid, &nickname_data, &summon_data);
+                let uid = *canonical.get(&nickname).unwrap_or(&raw_uid);
+                let uid = *orphan_to_owner.get(&uid).unwrap_or(&uid);
+                if let Some(row) = dps_data.map.get_mut(&uid) {
+                    row.heal += healed as f64;
                 }
             }
         }
@@ -509,6 +531,7 @@ impl DpsCalculator {
                 }
             }
             data.dps = data.amount / bt as f64 * 1000.0;
+            data.hps = data.heal / bt as f64 * 1000.0;
             data.damage_contribution = if total_damage > 0.0 {
                 data.amount / total_damage * 100.0
             } else {

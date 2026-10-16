@@ -34,6 +34,12 @@ pub struct PersonalData {
     /// mark beside the name.
     #[serde(default)]
     pub uses_a2tools: bool,
+    /// Healing done inside the fight's window (its first to last hit), self-heals
+    /// and HoTs included, and that per second of the fight.
+    #[serde(default)]
+    pub heal: f64,
+    #[serde(default)]
+    pub hps: f64,
 }
 
 impl PersonalData {
@@ -49,6 +55,8 @@ impl PersonalData {
             gear_score: 0,
             is_supporter: false,
             uses_a2tools: false,
+            heal: 0.0,
+            hps: 0.0,
         }
     }
 
@@ -64,6 +72,8 @@ impl PersonalData {
             gear_score: 0,
             is_supporter: false,
             uses_a2tools: false,
+            heal: 0.0,
+            hps: 0.0,
         }
     }
 

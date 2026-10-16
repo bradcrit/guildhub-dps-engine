@@ -2066,6 +2066,28 @@ impl DataStorage {
             .collect()
     }
 
+    /// Healing done per healer between `from` and `to` (ms, the capture clock)
+    /// — the meter's rows, which only want totals: no copy of the ticks.
+    pub fn heal_totals_between(&self, from: i64, to: i64) -> HashMap<i32, i64> {
+        let inner = self.inner.read();
+        let mut totals = HashMap::new();
+        for (&id, skills) in &inner.heal_storage {
+            if is_mob(&inner, id) {
+                continue;
+            }
+            let healed: i64 = skills
+                .values()
+                .flat_map(|s| s.ticks.iter())
+                .filter(|(t, _)| *t >= from && *t <= to)
+                .map(|(_, amount)| amount)
+                .sum();
+            if healed > 0 {
+                totals.insert(id, healed);
+            }
+        }
+        totals
+    }
+
     /// The NPC code entity `id` spawned as, if it is a known mob.
     pub fn mob_code(&self, id: i32) -> Option<i32> {
         self.inner.read().mob_storage.get(&id).copied()
