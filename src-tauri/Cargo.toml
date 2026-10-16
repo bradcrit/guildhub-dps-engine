@@ -97,6 +97,13 @@ name = "a2t-inspect"
 path = "tools/a2t_inspect.rs"
 required-features = ["desktop"]
 
+# GuildHub fork: the meter without its windows, driven by GuildHub Companion
+# over a local HTTP connection (tools/gh_engine.rs).
+[[bin]]
+name = "guildhub-dps-engine"
+path = "tools/gh_engine.rs"
+required-features = ["desktop"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
 

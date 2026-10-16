@@ -1,3 +1,15 @@
+> **This is the GuildHub DPS engine — a fork of the [A2Tools DPS Meter](https://github.com/taengu/A2Tools-DPS-Meter) by taengu, licensed GPL-3.0 like the original.**
+>
+> It is the meter without its windows: a separate program that [GuildHub Companion](https://guild-hub.de) starts and reads over a local connection (127.0.0.1) to show its own DPS meter overlay.
+>
+> **What this fork changes** (branch `guildhub`): it adds one binary, `guildhub-dps-engine` (`src-tauri/tools/gh_engine.rs`, plus its entry in `src-tauri/Cargo.toml`). The parser, capture and combat code is upstream's, unchanged, and upstream's updates are merged in as they come. The engine uploads nothing and talks to nothing but the program that started it.
+>
+> All credit for the meter itself goes to taengu and its contributors — for the full meter, use the original: [A2Tools DPS Meter](https://github.com/taengu/A2Tools-DPS-Meter) · [a2tools.app](https://a2tools.app).
+>
+> Build: `cd src-tauri && cargo build --release --bin guildhub-dps-engine` — usage and the local API are described at the top of [`src-tauri/tools/gh_engine.rs`](src-tauri/tools/gh_engine.rs).
+
+---
+
 # A2Tools DPS Meter
 
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
