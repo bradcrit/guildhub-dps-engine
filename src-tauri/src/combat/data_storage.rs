@@ -2067,22 +2067,27 @@ impl DataStorage {
     }
 
     /// Healing done per healer between `from` and `to` (ms, the capture clock)
-    /// — the meter's rows, which only want totals: no copy of the ticks.
-    pub fn heal_totals_between(&self, from: i64, to: i64) -> HashMap<i32, i64> {
+    /// — the meter's rows, which only want totals: no copy of the ticks — and
+    /// the skills it was done with (a healer with no damage gets their class
+    /// from them).
+    pub fn heal_totals_between(&self, from: i64, to: i64) -> HashMap<i32, (i64, Vec<i32>)> {
         let inner = self.inner.read();
         let mut totals = HashMap::new();
         for (&id, skills) in &inner.heal_storage {
             if is_mob(&inner, id) {
                 continue;
             }
-            let healed: i64 = skills
-                .values()
-                .flat_map(|s| s.ticks.iter())
-                .filter(|(t, _)| *t >= from && *t <= to)
-                .map(|(_, amount)| amount)
-                .sum();
+            let mut healed = 0i64;
+            let mut codes = Vec::new();
+            for (&(code, _), s) in skills {
+                let by_skill: i64 = s.ticks.iter().filter(|(t, _)| *t >= from && *t <= to).map(|(_, amount)| amount).sum();
+                if by_skill > 0 {
+                    healed += by_skill;
+                    codes.push(code);
+                }
+            }
             if healed > 0 {
-                totals.insert(id, healed);
+                totals.insert(id, (healed, codes));
             }
         }
         totals

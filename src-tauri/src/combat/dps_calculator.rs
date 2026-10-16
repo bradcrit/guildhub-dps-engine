@@ -491,19 +491,34 @@ impl DpsCalculator {
 
         // Healing done in the fight's window, on the rows the damage made — a
         // healer and their summons resolved as for damage (`get_target_details`
-        // does the same for HEAL). Healing alone makes no row.
+        // does the same for HEAL). A healer who dealt no damage gets a row of
+        // their own when their class is known — from the heal skills, else
+        // from earlier this session; with neither it's no player for sure.
         let window = target_ids
             .iter()
             .filter_map(|tid| combat_data.get(tid))
             .map(|td| (td.first_damage_time, td.last_damage_time))
             .reduce(|(f, l), (f2, l2)| (f.min(f2), l.max(l2)));
         if let Some((from, to)) = window {
-            for (actor_id, healed) in self.data_storage.heal_totals_between(from, to) {
+            let mut heals: Vec<(i32, (i64, Vec<i32>))> = self.data_storage.heal_totals_between(from, to).into_iter().collect();
+            // The player's own entity before their summons, as for damage.
+            heals.sort_unstable_by_key(|&(actor_id, _)| (summon_resolver::resolve(actor_id, &summon_data) != actor_id, actor_id));
+            for (actor_id, (healed, codes)) in heals {
                 let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
                 if raw_uid <= 0 { continue; }
                 let nickname = resolve_nickname(raw_uid, &nickname_data, &summon_data);
                 let uid = *canonical.get(&nickname).unwrap_or(&raw_uid);
                 let uid = *orphan_to_owner.get(&uid).unwrap_or(&uid);
+                if !dps_data.map.contains_key(&uid) {
+                    let job = codes
+                        .iter()
+                        .find_map(|&code| JobClass::convert_from_skill(code))
+                        .map(|j| j.class_name().to_string())
+                        .or_else(|| self.cached_job(&nickname));
+                    let Some(job) = job else { continue };
+                    self.cache_job(&nickname, &job);
+                    dps_data.map.insert(uid, PersonalData::with_job(nickname.clone(), job));
+                }
                 if let Some(row) = dps_data.map.get_mut(&uid) {
                     row.heal += healed as f64;
                 }
