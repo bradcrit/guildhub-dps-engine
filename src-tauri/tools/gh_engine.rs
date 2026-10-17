@@ -39,9 +39,14 @@
 //!
 //! Events: `dps` (the view) and `self` (as `/v1/self`) on every change, each
 //! sent once on connecting; `fight` (`{"id"}`) when a fight is written to
-//! history; `bossKill` (`{"npc","at"}`) when a field boss dies in the open world.
+//! history; `bossKill` (`{"npc","at","server"}`) when a field boss dies in the
+//! open world; `bossMap` (`{"server","map","seenAt","bosses":[{"npc","up","at"}]}`)
+//! when the player opened a map of their own server and it says something new
+//! (or again after 5 minutes): each field boss on it, up since `at` or back at
+//! `at` (unix ms, 0 when the game gives none). `server` is the game's server
+//! id (null for a kill before the game named it).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -53,7 +58,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use a2tools_dps_meter_lib::capture::boss_map::BossMap;
 use a2tools_dps_meter_lib::capture::captured_payload::CapturedPayload;
+use a2tools_dps_meter_lib::capture::field_bosses::FIELD_BOSSES;
 use a2tools_dps_meter_lib::capture::combat_port_detector::CombatPortDetector;
 use a2tools_dps_meter_lib::capture::pcap_capturer::PcapCapturer;
 use a2tools_dps_meter_lib::combat::capture_dispatcher::CaptureDispatcher;
@@ -74,6 +81,10 @@ const DPS_RATE: Duration = Duration::from_millis(200);
 const SAVE_EVERY: Duration = Duration::from_secs(30);
 /// How often your character, Odyle energy and field boss kills are looked at.
 const SELF_RATE: Duration = Duration::from_secs(1);
+/// A map read longer ago than this isn't passed on (waiting for the server).
+const MAP_MAX_AGE_MS: i64 = 10 * 60_000;
+/// The same map, unchanged, is passed on again after this long at the earliest.
+const MAP_RESEND_SAME_MS: i64 = 5 * 60_000;
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEAD: usize = 8 * 1024;
@@ -254,6 +265,21 @@ fn load_resources(dir: &std::path::Path, language: &str) -> (SkillLookup, NpcLoo
     (skills, npcs, dot_ids, abnormals)
 }
 
+/// The `bossMap` event of a map: its field bosses named by their NPC code
+/// (as `bossKill` names them), the ones the meter doesn't know left out —
+/// None when none is left.
+fn boss_map_event(server: u16, map: &BossMap) -> Option<serde_json::Value> {
+    let bosses: Vec<_> = map
+        .bosses
+        .iter()
+        .filter_map(|b| {
+            let &(npc, _) = FIELD_BOSSES.iter().find(|&&(_, id)| id == b.id)?;
+            Some(serde_json::json!({ "npc": npc, "up": b.up, "at": b.time_ms }))
+        })
+        .collect();
+    (!bosses.is_empty()).then(|| serde_json::json!({ "server": server, "map": map.map_id, "seenAt": map.seen_ms, "bosses": bosses }))
+}
+
 fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -378,11 +404,15 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         });
     }
 
-    // Your character and Odyle energy when they change; field boss kills as they happen.
+    // Your character and Odyle energy when they change; field boss kills as
+    // they happen, and the field bosses of a map the player opened.
     {
         let engine = engine.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(SELF_RATE);
+            let mut map_seq = 0u64;
+            // (server, map) -> when sent, and what it said.
+            let mut maps_sent: HashMap<(u16, u32), (i64, String)> = HashMap::new();
             loop {
                 interval.tick().await;
                 engine.apply_screen_name();
@@ -390,10 +420,29 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 if **engine.me.borrow() != *me {
                     engine.me.send_replace(Arc::from(me));
                 }
+                let server = engine.storage.local_profile().server_id;
                 for event in engine.storage.take_boss_events() {
                     let BossEventKind::Killed { at_ms } = event.kind;
-                    let kill = serde_json::json!({ "npc": event.npc, "at": at_ms }).to_string();
+                    let kill = serde_json::json!({ "npc": event.npc, "at": at_ms, "server": (server != 0).then_some(server) }).to_string();
                     let _ = engine.events.send(("bossKill", kill));
+                }
+                // The server isn't known yet (the meter started mid-game): the maps wait for it.
+                if server == 0 {
+                    continue;
+                }
+                let Some((next, maps)) = engine.storage.boss_maps_since(map_seq) else { continue };
+                map_seq = next;
+                let now = a2tools_dps_meter_lib::clock::now_ms();
+                for map in maps.iter().filter(|m| m.header == 0 && now - m.seen_ms <= MAP_MAX_AGE_MS) {
+                    let Some(body) = boss_map_event(server, map) else { continue };
+                    let said = body["bosses"].to_string();
+                    if let Some((at, before)) = maps_sent.get(&(server, map.map_id)) {
+                        if *before == said && now - at < MAP_RESEND_SAME_MS {
+                            continue;
+                        }
+                    }
+                    maps_sent.insert((server, map.map_id), (now, said));
+                    let _ = engine.events.send(("bossMap", body.to_string()));
                 }
             }
         });
@@ -687,5 +736,34 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
         if stream.write_all(frame.as_bytes()).await.is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use a2tools_dps_meter_lib::capture::boss_map::BossOnMap;
+
+    #[test]
+    fn a_map_event_names_the_bosses_by_their_npc_code() {
+        let map = BossMap {
+            map_id: 1010,
+            header: 0,
+            seen_ms: 1_791_993_638_495,
+            bosses: vec![
+                BossOnMap { id: 101_006, up: true, time_ms: 1_791_993_400_000 },
+                BossOnMap { id: 111_024, up: false, time_ms: 1_791_994_085_000 },
+                BossOnMap { id: 9_999_999, up: false, time_ms: 0 },
+            ],
+        };
+        let event = boss_map_event(2313, &map).unwrap();
+        assert_eq!(event["server"], 2313);
+        assert_eq!(event["seenAt"], 1_791_993_638_495_i64);
+        assert_eq!(event["bosses"], serde_json::json!([
+            { "npc": 2100079, "up": true, "at": 1_791_993_400_000_i64 },
+            { "npc": 2400855, "up": false, "at": 1_791_994_085_000_i64 },
+        ]));
+        let unknown = BossMap { bosses: vec![BossOnMap { id: 9_999_999, up: true, time_ms: 0 }], ..map };
+        assert!(boss_map_event(2313, &unknown).is_none());
     }
 }
