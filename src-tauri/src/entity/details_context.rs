@@ -46,6 +46,12 @@ pub struct DetailsActorSummary {
     pub gear_score: i32,
     #[serde(default)]
     pub combat_power: i64,
+    /// The actor's name unmasked (`nickname` is masked for everyone but you,
+    /// `obscure_nickname`) — GuildHub fork: the GuildHub Companion hands it
+    /// to GuildHub, which shows the guild's own members by name and masks
+    /// everyone else before it keeps anything. Empty in older records.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub full_nickname: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

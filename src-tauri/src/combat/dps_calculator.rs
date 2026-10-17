@@ -1065,6 +1065,7 @@ impl DpsCalculator {
                         level: roster.map(|m| m.level).unwrap_or(0),
                         gear_score: roster.map(|m| m.gear_score).unwrap_or(0),
                         combat_power: roster.map(|m| m.combat_power).unwrap_or(0),
+                        full_nickname: nick.clone(),
                     }
                 })
                 .collect();
@@ -1281,6 +1282,7 @@ impl DpsCalculator {
                     level: 0,
                     gear_score: 0,
                     combat_power: 0,
+                    full_nickname: String::new(),
                 }
             })
             .collect();

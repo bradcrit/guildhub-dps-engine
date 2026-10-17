@@ -29,7 +29,7 @@
 //! |------------------------|-------------------------------------------------|
 //! | `GET  /v1/status`      | version, Npcap, capture, game window            |
 //! | `GET  /v1/dps`         | the meter's current view (`DpsData`, plus `targetDead`) |
-//! | `GET  /v1/self`        | your character and its Odyle energy             |
+//! | `GET  /v1/self`        | your character, its Odyle energy, the ping      |
 //! | `GET  /v1/events`      | SSE, see below                                  |
 //! | `GET  /v1/fights`      | saved fights (`FightSummary[]`)                 |
 //! | `GET  /v1/fights/<id>` | one saved fight (`FightRecord`)                 |
@@ -38,7 +38,8 @@
 //! | `POST /v1/character?name=<name>` | the character played, as the parent read it off the game's screen just now |
 //!
 //! Events: `dps` (the view) and `self` (as `/v1/self`) on every change, each
-//! sent once on connecting; `fight` (`{"id"}`) when a fight is written to
+//! sent once on connecting (`self` also carries the game's `ping` in ms);
+//! `fight` (`{"id","killed"}`) when a fight is written to
 //! history; `bossKill` (`{"npc","at","server"}`) when a field boss dies in the
 //! open world; `bossMap` (`{"server","map","seenAt","bosses":[{"npc","up","at"}]}`)
 //! when the player opened a map of their own server and it says something new
@@ -136,6 +137,8 @@ struct Engine {
     /// entity once the core has found it, until the game's own self record
     /// names you (`apply_screen_name`).
     screen_name: Mutex<Option<String>>,
+    /// The game's round trip, for `self`'s `ping`.
+    ping: Arc<PingTracker>,
 }
 
 impl Engine {
@@ -143,7 +146,10 @@ impl Engine {
         for record in records {
             match self.history.save_fight(&record) {
                 Ok(()) => {
-                    let _ = self.events.send(("fight", serde_json::json!({ "id": record.id }).to_string()));
+                    // Whether its target has died yet: the same fight is saved
+                    // again every 30 s while it lasts.
+                    let killed = self.storage.is_entity_dead(record.target_id);
+                    let _ = self.events.send(("fight", serde_json::json!({ "id": record.id, "killed": killed }).to_string()));
                 }
                 Err(e) => tracing::warn!("Could not save fight {}: {e}", record.id),
             }
@@ -194,6 +200,7 @@ impl Engine {
             "class": profile.class.map(class_key),
             "level": profile.level,
             "odyle": odyle,
+            "ping": self.ping.current_ping_ms(),
         })
         .to_string()
     }
@@ -344,6 +351,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         me,
         events,
         screen_name: Mutex::new(None),
+        ping: ping.clone(),
     });
 
     {

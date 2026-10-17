@@ -439,6 +439,7 @@ mod tests {
                     level: 0,
                     gear_score: 0,
                     combat_power: 0,
+                    full_nickname: String::new(),
                 })
                 .collect(),
             is_train: false,
