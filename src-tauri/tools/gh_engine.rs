@@ -18,6 +18,10 @@
 //!
 //! - `GH_ENGINE_TOKEN` (environment, required): the shared secret every
 //!   request has to carry, as `Authorization: Bearer <token>` or `?token=`.
+//! - `GH_ENGINE_SAVE_PACKETS=1` (environment, optional): the raw game traffic
+//!   is written to `<data-dir>/packets/packets_*.txt`, as the meter's "save raw
+//!   packets" setting does — captures to find new records in
+//!   (`tests/find_value_packets.rs`). The parent passes its own environment on.
 //! - The first line on stdout is `{"event":"ready","port":N,"version":"..."}`;
 //!   the server listens on `127.0.0.1:N` only.
 //! - When stdin closes (the parent process is gone) the engine saves the open
@@ -316,6 +320,11 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
     let _ = std::fs::create_dir_all(&args.data_dir);
+    if std::env::var("GH_ENGINE_SAVE_PACKETS").is_ok_and(|v| v == "1") {
+        let dir = args.data_dir.join("packets");
+        let _ = std::fs::create_dir_all(&dir);
+        a2tools_dps_meter_lib::logging::logger::set_packet_log_enabled(true, &dir);
+    }
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
