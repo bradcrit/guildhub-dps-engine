@@ -44,8 +44,12 @@
 //! open world; `bossMap` (`{"server","map","seenAt","bosses":[{"npc","up","at"}]}`)
 //! when the player opened a map of their own server and it says something new
 //! (or again after 5 minutes): each field boss on it, up since `at` or back at
-//! `at` (unix ms, 0 when the game gives none). `server` is the game's server
-//! id (null for a kill before the game named it).
+//! `at` (unix ms, 0 when the game gives none); `bossHp`
+//! (`{"server","at","bosses":[{"npc","hp","reset"}]}`, every 3 s at most) with
+//! the field bosses in the open world whose HP changed, and the ones still
+//! fought once a minute — `hp` whole percent left, `reset` when it came back
+//! up. `server` is the game's server id (null for a kill before the game
+//! named it).
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -82,6 +86,8 @@ const DPS_RATE: Duration = Duration::from_millis(200);
 const SAVE_EVERY: Duration = Duration::from_secs(30);
 /// How often your character, Odyle energy and field boss kills are looked at.
 const SELF_RATE: Duration = Duration::from_secs(1);
+/// How often field boss HP is looked at (as upstream's sender does).
+const BOSS_HP_EVERY: Duration = Duration::from_secs(3);
 /// A map read longer ago than this isn't passed on (waiting for the server).
 const MAP_MAX_AGE_MS: i64 = 10 * 60_000;
 /// The same map, unchanged, is passed on again after this long at the earliest.
@@ -419,6 +425,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(SELF_RATE);
             let mut map_seq = 0u64;
+            let mut last_hp = std::time::Instant::now();
             // (server, map) -> when sent, and what it said.
             let mut maps_sent: HashMap<(u16, u32), (i64, String)> = HashMap::new();
             loop {
@@ -437,6 +444,22 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 // The server isn't known yet (the meter started mid-game): the maps wait for it.
                 if server == 0 {
                     continue;
+                }
+                // Field boss HP, every BOSS_HP_EVERY: the bosses whose percent
+                // changed, and the ones still fought once a minute.
+                if last_hp.elapsed() >= BOSS_HP_EVERY {
+                    last_hp = std::time::Instant::now();
+                    let now = a2tools_dps_meter_lib::clock::now_ms();
+                    let bosses: Vec<_> = engine
+                        .storage
+                        .take_boss_hp(now)
+                        .into_iter()
+                        .map(|b| serde_json::json!({ "npc": b.npc, "hp": b.percent, "reset": b.reset }))
+                        .collect();
+                    if !bosses.is_empty() {
+                        let body = serde_json::json!({ "server": server, "at": now, "bosses": bosses });
+                        let _ = engine.events.send(("bossHp", body.to_string()));
+                    }
                 }
                 let Some((next, maps)) = engine.storage.boss_maps_since(map_seq) else { continue };
                 map_seq = next;
