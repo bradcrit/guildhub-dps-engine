@@ -75,3 +75,30 @@ fn nightmare_shugo_abyss_as_the_windows_showed() {
     assert_eq!(run.items.get(&930_100_017), Some(&7_260), "Nightmare coins after the run");
     assert_eq!(run.owner, login.owner);
 }
+
+/// A second character, 2026-10-18 01:34: the top bar showed 321,520 (Kina and
+/// Kina (Bound) together) and 1,920 (Kina).
+///
+///   A2_LISTS_CAPTURE_ALT=…/packets_20261018_013448.txt cargo test --test game_lists_replay
+#[test]
+fn kina_and_kina_bound_apart() {
+    let Ok(path) = std::env::var("A2_LISTS_CAPTURE_ALT") else {
+        eprintln!("A2_LISTS_CAPTURE_ALT unset; skipping");
+        return;
+    };
+    let text = std::fs::read_to_string(path).expect("capture readable");
+    let lines: Vec<(String, Vec<u8>)> = text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut parts = l.splitn(3, '|');
+            let ts = parts.next()?.to_string();
+            let _stream = parts.next()?;
+            Some((ts, decode_hex(parts.next()?)?))
+        })
+        .collect();
+    let lists = replay(&lines, "");
+    assert!(lists.items_whole);
+    assert_eq!(lists.items.get(&930_100_031), Some(&1_920), "Kina");
+    assert_eq!(lists.items.get(&930_100_001), Some(&319_600), "Kina (Bound)");
+}

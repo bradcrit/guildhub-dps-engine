@@ -121,6 +121,8 @@ fn dungeon_of_map(roster_dungeon: i32, map: Option<i32>) -> i32 {
 pub struct GameLists {
     pub counts: std::collections::BTreeMap<u32, EntryCount>,
     pub items: std::collections::BTreeMap<u32, u64>,
+    /// The whole inventory was seen (a login): a currency not in `items` is at 0.
+    pub items_whole: bool,
     pub owner: Option<String>,
     awaits_self_record: bool,
 }
@@ -1304,6 +1306,7 @@ impl DataStorage {
             ListUpdate::Items { items, whole } => {
                 if whole {
                     lists.items.clear();
+                    lists.items_whole = true;
                 }
                 for (id, amount) in items {
                     if lists.items.insert(id, amount) != Some(amount) {

@@ -28,8 +28,12 @@
 
 /// The currencies looked for: the game's item id, and the name the engine
 /// gives it.
+///
+/// The game's top bar shows Kina and, before it, Kina plus Kina (Bound): one
+/// character had 1,920 and 319,600 here, the bar 1,920 and 321,520.
 pub const CURRENCIES: &[(u32, &str)] = &[
     (930_100_031, "kinah"),
+    (930_100_001, "kinahBound"),
     (930_100_003, "abyssPoints"),
     (930_100_017, "nightmareCoins"),
     (930_100_011, "shugoCoins"),
