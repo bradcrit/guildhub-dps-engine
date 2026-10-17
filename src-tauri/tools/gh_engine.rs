@@ -33,7 +33,7 @@
 //! |------------------------|-------------------------------------------------|
 //! | `GET  /v1/status`      | version, Npcap, capture, game window            |
 //! | `GET  /v1/dps`         | the meter's current view (`DpsData`, plus `targetDead`) |
-//! | `GET  /v1/self`        | your character, its Odyle energy, the ping      |
+//! | `GET  /v1/self`        | your character, its Odyle energy, entry counts and currencies (`lists`), the ping |
 //! | `GET  /v1/events`      | SSE, see below                                  |
 //! | `GET  /v1/fights`      | saved fights (`FightSummary[]`)                 |
 //! | `GET  /v1/fights/<id>` | one saved fight (`FightRecord`)                 |
@@ -70,6 +70,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use a2tools_dps_meter_lib::capture::boss_map::BossMap;
 use a2tools_dps_meter_lib::capture::captured_payload::CapturedPayload;
 use a2tools_dps_meter_lib::capture::field_bosses::FIELD_BOSSES;
+use a2tools_dps_meter_lib::capture::game_lists::CURRENCIES;
 use a2tools_dps_meter_lib::capture::combat_port_detector::CombatPortDetector;
 use a2tools_dps_meter_lib::capture::pcap_capturer::PcapCapturer;
 use a2tools_dps_meter_lib::combat::capture_dispatcher::CaptureDispatcher;
@@ -204,12 +205,28 @@ impl Engine {
         // Only the name the game's own self record stated: one the parent sent
         // (`screen_name`) or a loot vote picked is no news to the parent.
         let name = profile.name.filter(|_| self.storage.local_identity_from_self_record());
+        // Entry counts by the game's id as [first, second, ms] (see
+        // `capture::game_lists`), currencies by name — whose, as the Odyle energy.
+        let lists = self.storage.game_lists();
+        let lists = (!lists.counts.is_empty() || !lists.items.is_empty()).then(|| {
+            let counts: serde_json::Map<String, serde_json::Value> = lists
+                .counts
+                .values()
+                .map(|e| (e.id.to_string(), serde_json::json!([e.first, e.second, e.ms])))
+                .collect();
+            let items: serde_json::Map<String, serde_json::Value> = CURRENCIES
+                .iter()
+                .filter_map(|(id, key)| lists.items.get(id).map(|amount| (key.to_string(), (*amount).into())))
+                .collect();
+            serde_json::json!({ "owner": lists.owner, "counts": counts, "items": items })
+        });
         serde_json::json!({
             "name": name,
             "serverId": profile.server_id,
             "class": profile.class.map(class_key),
             "level": profile.level,
             "odyle": odyle,
+            "lists": lists,
             "ping": self.ping.current_ping_ms(),
         })
         .to_string()

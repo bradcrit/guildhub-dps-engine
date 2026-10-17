@@ -5,6 +5,7 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 
 use crate::capture::abnormal;
+use crate::capture::game_lists::{EntryCount, ListUpdate};
 
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
@@ -113,6 +114,16 @@ fn dungeon_of_map(roster_dungeon: i32, map: Option<i32>) -> i32 {
 }
 
 // ───── Aggregate data structures ─────
+
+/// Your entry counts and currencies by id, as the game last sent them, and
+/// whose they are (see `DataStorage::note_game_list`).
+#[derive(Debug, Clone, Default)]
+pub struct GameLists {
+    pub counts: std::collections::BTreeMap<u32, EntryCount>,
+    pub items: std::collections::BTreeMap<u32, u64>,
+    pub owner: Option<String>,
+    awaits_self_record: bool,
+}
 
 /// Healing done, aggregated per (healer actor, skill, is_hot). Healing is keyed by
 /// the HEALER (not the boss target), since the meter shows "healing done" per player.
@@ -635,6 +646,8 @@ struct Inner {
     /// the character before a switch.
     odyle_owner: Option<String>,
     odyle_awaits_self_record: bool,
+    /// Your entry counts and currencies (`capture::game_lists`).
+    game_lists: GameLists,
 
     // Local player
     local_player_id: Option<i64>,
@@ -747,6 +760,7 @@ impl DataStorage {
                 odyle_energy: None,
                 odyle_owner: None,
                 odyle_awaits_self_record: false,
+                game_lists: GameLists::default(),
                 local_player_id: None,
                 supporters: std::sync::Arc::new(crate::supporters::Roster::default()),
                 local_character_name: None,
@@ -903,6 +917,11 @@ impl DataStorage {
         if inner.odyle_energy.is_some() && (inner.odyle_awaits_self_record || inner.odyle_owner.is_none()) {
             inner.odyle_owner = name.clone();
             inner.odyle_awaits_self_record = false;
+        }
+        let lists = &mut inner.game_lists;
+        if (!lists.counts.is_empty() || !lists.items.is_empty()) && (lists.awaits_self_record || lists.owner.is_none()) {
+            lists.owner = name.clone();
+            lists.awaits_self_record = false;
         }
         set_game_identity(&mut inner, id, name);
         changed
@@ -1262,6 +1281,49 @@ impl DataStorage {
 
     pub fn odyle_energy(&self) -> Option<(u32, u32)> {
         self.inner.read().odyle_energy
+    }
+
+    /// Entry counts or currencies the game sent. Whole lists come at login,
+    /// before the self record naming who logged in — whose they are waits for
+    /// it, as the Odyle energy's (`set_odyle_energy`).
+    pub fn note_game_list(&self, update: ListUpdate) {
+        let mut inner = self.inner.write();
+        let identified = inner.local_identity_from_game;
+        let name = inner.local_character_name.clone();
+        let lists = &mut inner.game_lists;
+        let whole = match update {
+            ListUpdate::Counts { entries, whole } => {
+                if whole {
+                    lists.counts.clear();
+                }
+                for e in entries {
+                    lists.counts.insert(e.id, e);
+                }
+                whole
+            }
+            ListUpdate::Items { items, whole } => {
+                if whole {
+                    lists.items.clear();
+                }
+                for (id, amount) in items {
+                    if lists.items.insert(id, amount) != Some(amount) {
+                        tracing::info!("Currency {id}: {amount}");
+                    }
+                }
+                whole
+            }
+        };
+        if whole {
+            lists.owner = None;
+            lists.awaits_self_record = true;
+        } else if lists.owner.is_none() && !lists.awaits_self_record && identified {
+            // A meter started mid-session: the game named you already.
+            lists.owner = name;
+        }
+    }
+
+    pub fn game_lists(&self) -> GameLists {
+        self.inner.read().game_lists.clone()
     }
 
     /// The game server the locked connection reads from (see `game_host`).

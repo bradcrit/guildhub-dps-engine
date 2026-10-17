@@ -285,6 +285,10 @@ impl StreamProcessor {
         if let Some(map) = crate::capture::boss_map::parse(packet, crate::clock::now_ms()) {
             self.data_storage.note_boss_map(map);
         }
+        // Your entry counts and currencies (Homework).
+        if let Some(update) = crate::capture::game_lists::parse(packet) {
+            self.data_storage.note_game_list(update);
+        }
 
         if !parsed_damage && !parsed_name && !parsed_summon && !parsed_ownership && !parsed_hp {
             self.parse_dot_packet(packet);
