@@ -27,7 +27,8 @@ use a2tools_dps_meter_lib::share;
 
 /// How far into a packet's body a field is looked for, from either end.
 const MAX_OFFSET: usize = 512;
-const WIDTHS: [usize; 4] = [1, 2, 4, 8];
+/// Field widths in bytes; 0 is a varint (from the start only).
+const WIDTHS: [usize; 5] = [0, 1, 2, 4, 8];
 /// A candidate that changed more often than this is a counter or a timer.
 const MAX_CHANGES: usize = 40;
 
@@ -56,6 +57,10 @@ struct Field {
 
 impl Field {
     fn read(&self, body: &[u8]) -> Option<u64> {
+        if self.width == 0 {
+            let v = read_varint(body, self.offset);
+            return (self.anchor == Anchor::Start && v.length > 0 && v.value >= 0).then_some(v.value as u64);
+        }
         let start = match self.anchor {
             Anchor::Start => self.offset,
             Anchor::End => body.len().checked_sub(self.offset + self.width)?,
@@ -182,7 +187,7 @@ fn which_fields_held_these_values() {
 
     if let Some(opcode) = std::env::var("A2_OPCODE").ok().as_deref().and_then(parse_opcode) {
         for p in packets.iter().filter(|p| p.opcode == opcode) {
-            println!("{}  {:>4} B  {}", clock(p.at_ms), p.body.len(), hex(&p.body, 200));
+            println!("{}  {:>4} B  {}", clock(p.at_ms), p.body.len(), hex(&p.body, 4000));
         }
         return;
     }
@@ -204,6 +209,9 @@ fn which_fields_held_these_values() {
         for &width in &WIDTHS {
             for offset in 0..n.min(MAX_OFFSET) {
                 for anchor in [Anchor::Start, Anchor::End] {
+                    if width == 0 && anchor == Anchor::End {
+                        continue;
+                    }
                     let field = Field { opcode: p.opcode, anchor, offset, width };
                     if let Some(v) = field.read(&p.body) {
                         if wanted.contains(&v) {
@@ -247,7 +255,7 @@ fn which_fields_held_these_values() {
             field.opcode[1],
             field.anchor,
             field.offset,
-            field.width * 8,
+            if field.width == 0 { "varint".to_string() } else { format!("u{}", field.width * 8) },
         );
         for (at, v) in story.iter().take(12) {
             println!("    {}  {v}", clock(*at));
@@ -266,5 +274,101 @@ fn which_fields_held_these_values() {
              when its window opens, or as a varint — open the window in game before and \
              after the change, and capture from login."
         );
+    }
+}
+
+/// The bytes a number can be sent as: little-endian u16/u32/u64 and a varint.
+fn encodings(v: u64) -> Vec<(&'static str, Vec<u8>)> {
+    let mut out = Vec::new();
+    if v <= u16::MAX as u64 {
+        out.push(("u16", (v as u16).to_le_bytes().to_vec()));
+    }
+    if v <= u32::MAX as u64 {
+        out.push(("u32", (v as u32).to_le_bytes().to_vec()));
+    }
+    out.push(("u64", v.to_le_bytes().to_vec()));
+    let (mut rest, mut varint) = (v, Vec::new());
+    loop {
+        let b = (rest & 0x7F) as u8;
+        rest >>= 7;
+        if rest == 0 {
+            varint.push(b);
+            break;
+        }
+        varint.push(b | 0x80);
+    }
+    out.push(("varint", varint));
+    out
+}
+
+/// Where a number appears at all, at any position: for records whose fields
+/// move (lists, a variable head), which the fixed-field search can't follow.
+///
+///   A2_REPLAY_CAPTURE=… A2_FIND=82325,72325 cargo test --release --test find_value_packets where_does -- --ignored --nocapture
+#[test]
+#[ignore = "diagnostic"]
+fn where_does_this_number_appear() {
+    let (Ok(capture), Ok(find)) = (std::env::var("A2_REPLAY_CAPTURE"), std::env::var("A2_FIND")) else {
+        eprintln!("A2_REPLAY_CAPTURE and A2_FIND must both be set — skipping");
+        return;
+    };
+    let packets = all_packets(&capture);
+    for v in find.split(',').filter_map(|n| n.trim().parse::<u64>().ok()) {
+        println!("\n{v}:");
+        let mut lines = 0;
+        for p in &packets {
+            for (name, bytes) in encodings(v) {
+                // A u64 holding a small number is mostly zeros: only the widest
+                // match per spot, and u16/varint only when they are 2+ bytes.
+                if bytes.len() < 2 {
+                    continue;
+                }
+                if let Some(at) = p.body.windows(bytes.len()).position(|w| w == bytes.as_slice()) {
+                    println!(
+                        "  {}  {:02X} {:02X}  +{at} {name}  ({} B)  {}",
+                        clock(p.at_ms),
+                        p.opcode[0],
+                        p.opcode[1],
+                        p.body.len(),
+                        hex(&p.body[at.saturating_sub(16)..], 64)
+                    );
+                    lines += 1;
+                }
+            }
+            if lines >= 40 {
+                break;
+            }
+        }
+        if lines == 0 {
+            println!("  nowhere");
+        }
+    }
+}
+
+/// The rare packets of a stretch of capture: what the game sent around a
+/// moment noted in game (a window opened, a run started), minus the traffic
+/// that runs all the time.
+///
+///   A2_REPLAY_CAPTURE=… A2_BETWEEN=00:57:00-00:58:30 [A2_RARE=30] cargo test --release --test find_value_packets rare -- --ignored --nocapture
+#[test]
+#[ignore = "diagnostic"]
+fn rare_packets_between() {
+    let (Ok(capture), Ok(between)) = (std::env::var("A2_REPLAY_CAPTURE"), std::env::var("A2_BETWEEN")) else {
+        eprintln!("A2_REPLAY_CAPTURE and A2_BETWEEN must both be set — skipping");
+        return;
+    };
+    let rare: usize = std::env::var("A2_RARE").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let (from, to) = between.split_once('-').expect("A2_BETWEEN as HH:MM:SS-HH:MM:SS");
+    let packets = all_packets(&capture);
+    let mut count: HashMap<[u8; 2], usize> = HashMap::new();
+    for p in &packets {
+        *count.entry(p.opcode).or_default() += 1;
+    }
+    for p in &packets {
+        let at = clock(p.at_ms);
+        if at.as_str() < from || at.as_str() > to || count[&p.opcode] > rare {
+            continue;
+        }
+        println!("{}  {:02X} {:02X} ×{:<4} {:>5} B  {}", &at[..12], p.opcode[0], p.opcode[1], count[&p.opcode], p.body.len(), hex(&p.body, 90));
     }
 }
