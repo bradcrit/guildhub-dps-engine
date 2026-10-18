@@ -2,7 +2,8 @@
 //!
 //! `packets_20261018_212409.txt` (A2_KILL_CAPTURE), 2026-10-18: the meter
 //! starts with Bradcrit already in the Abyss — no self record, so no faction,
-//! until he leaves. He kills Yasiumaru (21:25:25, his hit the last before
+//! until he leaves; the engine has the one he had last time (factions.json,
+//! 2 since 17:01 that day), as here. He kills Yasiumaru (21:25:25, his hit the last before
 //! HP 0) and Morgulia (21:25:38, another player's 75 and then his 522).
 
 use std::sync::Arc;
@@ -22,6 +23,7 @@ fn both_kills_in_the_abyss_with_the_last_hit_yours() {
     let storage = Arc::new(DataStorage::new());
     let mut processor =
         StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+    storage.guess_self_faction(2);
     let mut acc = PacketAccumulator::new();
     let mut in_sight = 0;
     for p in read_capture(std::path::Path::new(&path)).unwrap() {

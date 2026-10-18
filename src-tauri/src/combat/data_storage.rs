@@ -809,13 +809,36 @@ impl DataStorage {
         if damage <= 0 || actor == target {
             return;
         }
+        let (actor_is_player, party) = {
+            let inner = self.inner.read();
+            // No PvP in a dungeon: everything between players there is your party's.
+            if inner.current_dungeon_id > 0 {
+                return;
+            }
+            let resolved = summon_resolver::resolve(actor, &inner.summon_storage);
+            let party: (HashSet<String>, HashSet<i32>) =
+                (inner.party_members.keys().cloned().collect(), inner.loot_identity.party_scope.iter().copied().collect());
+            (inner.known_player_ids.contains(&resolved), party)
+        };
         let mut nearby = self.nearby.lock();
         nearby.set_me(me as i32);
+        nearby.guess_faction_from_party(|p| party.0.contains(&p.name) || party.1.contains(&p.id));
         if i64::from(target) == me {
-            nearby.hit_on_me(actor, damage as u64, skill, now_ms());
+            nearby.hit_on_me(actor, damage as u64, skill, actor_is_player, now_ms());
         } else {
-            nearby.hit_on_player(target, actor, damage as u64, skill, now_ms());
+            nearby.hit_on_player(target, actor, damage as u64, skill, actor_is_player, now_ms());
         }
+    }
+
+    /// Your faction as known — from your self record, or guessed.
+    pub fn self_faction(&self) -> Option<u8> {
+        self.nearby.lock().self_faction()
+    }
+
+    /// Your faction until your self record says it: the one this character
+    /// had last time (`NearbyPlayers::guess_self_faction`).
+    pub fn guess_self_faction(&self, faction: u8) {
+        self.nearby.lock().guess_self_faction(faction);
     }
 
     /// Your last kills and assists of enemy players (`NearbyPlayers::kills`).

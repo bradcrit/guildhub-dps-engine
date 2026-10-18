@@ -168,6 +168,12 @@ struct Engine {
     ping: Arc<PingTracker>,
     /// Skill names, for the death recap.
     skills: Arc<SkillLookup>,
+    /// Each character's faction as last known (`<data-dir>/factions.json`):
+    /// your self record, which says it, comes only with a zone load — a meter
+    /// started in the Abyss would know no enemies until you left
+    /// (`remember_faction`).
+    factions: Mutex<HashMap<String, u8>>,
+    factions_path: PathBuf,
 }
 
 impl Engine {
@@ -258,6 +264,29 @@ impl Engine {
     /// parent's name was read off the game's menu just now, so it's taken like
     /// one the player typed into the A2Tools meter (its `set_character_name`
     /// with `manual`): on the entity known as you, until the game says itself.
+    /// Your faction, once known, is kept for this character; until it is
+    /// known, the one it had last time stands in.
+    fn remember_faction(&self) {
+        let Some(name) = self.storage.local_profile().name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) else {
+            return;
+        };
+        let mut factions = self.factions.lock();
+        match self.storage.self_faction() {
+            Some(faction) if factions.get(&name) != Some(&faction) => {
+                factions.insert(name, faction);
+                if let Ok(text) = serde_json::to_string(&*factions) {
+                    let _ = std::fs::write(&self.factions_path, text);
+                }
+            }
+            None => {
+                if let Some(&faction) = factions.get(&name) {
+                    self.storage.guess_self_faction(faction);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn apply_screen_name(&self) {
         let Some(name) = self.screen_name.lock().clone() else { return };
         if self.storage.local_identity_from_self_record() {
@@ -471,6 +500,13 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         screen_name: Mutex::new(None),
         ping: ping.clone(),
         skills: skills.clone(),
+        factions: Mutex::new(
+            std::fs::read_to_string(args.data_dir.join("factions.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default(),
+        ),
+        factions_path: args.data_dir.join("factions.json"),
     });
 
     {
@@ -544,6 +580,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
             loop {
                 interval.tick().await;
                 engine.apply_screen_name();
+                engine.remember_faction();
                 let me = engine.self_json();
                 if **engine.me.borrow() != *me {
                     engine.me.send_replace(Arc::from(me));

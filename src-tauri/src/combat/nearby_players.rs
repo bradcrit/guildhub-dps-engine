@@ -8,7 +8,13 @@
 //! so there is no distance: the view orders by attack and by last seen.
 //!
 //! The damage between you and them comes from the hits (`DataStorage::
-//! append_damage`): what you dealt each, what each dealt you. The hits of the
+//! append_damage`): what you dealt each, what each dealt you. A "hit" from
+//! one player on another is a heal or a buff just as often — the game sends
+//! both alike, and the meter takes every one between players for healing —
+//! so only one between the two factions counts here; between players of one
+//! faction, or with a faction not known, it is left out (a party Cleric's
+//! Radiant Recovery was taken for the hits that killed you, in a dungeon on
+//! 2026-10-18). The hits of the
 //! last `RECAP_WINDOW_MS` on you and on each player in sight are kept, so that
 //! when you die the death recap can say who killed you, with what — and when
 //! an enemy you hit dies, it is your kill (the last hit yours) or assist.
@@ -215,15 +221,34 @@ impl NearbyPlayers {
         self.self_faction = Some(faction);
     }
 
-    /// Until your self record says it, your faction is the other one of a
-    /// player you hit or who hit you. The record comes only with a zone load:
-    /// a meter started in the Abyss (21:24 on 2026-10-18) had none until you
-    /// left, so it saw no enemies and none of your two kills there. A duel
-    /// with your own faction before the record would get it wrong, until it.
-    fn infer_faction(&mut self, theirs: u8) {
-        if self.self_faction.is_none() && matches!(theirs, 1 | 2) {
-            self.self_faction = Some(3 - theirs);
+    pub fn self_faction(&self) -> Option<u8> {
+        self.self_faction
+    }
+
+    /// Your faction until your self record says it — the one you had last
+    /// time, or a party member's in sight. The record comes only with a zone
+    /// load: a meter started in the Abyss (21:24 on 2026-10-18) had none until
+    /// you left, so it saw no enemies and none of your two kills there.
+    pub fn guess_self_faction(&mut self, faction: u8) {
+        if self.self_faction.is_none() && matches!(faction, 1 | 2) {
+            self.self_faction = Some(faction);
         }
+    }
+
+    /// `guess_self_faction` from the first player in sight `in_party` says is
+    /// in your party.
+    pub fn guess_faction_from_party(&mut self, in_party: impl Fn(&NearbyPlayer) -> bool) {
+        if self.self_faction.is_none() {
+            if let Some(faction) = self.players.values().find(|p| in_party(p)).map(|p| p.faction) {
+                self.guess_self_faction(faction);
+            }
+        }
+    }
+
+    /// Whether a "hit" between players of these factions is one — not a heal
+    /// or a buff between players of one faction.
+    fn across_factions(a: Option<u8>, b: Option<u8>) -> bool {
+        matches!((a, b), (Some(a), Some(b)) if a != b)
     }
 
     /// Your entity id.
@@ -279,28 +304,44 @@ impl NearbyPlayers {
         }
     }
 
-    /// Anyone hit you for `damage` with `skill`: your HP goes down by it, and
-    /// a player in sight is attacking you (`attacked_me`).
-    pub fn hit_on_me(&mut self, id: i32, damage: u64, skill: i32, now_ms: i64) {
+    /// `actor` hit you for `damage` with `skill` — a mob, or a player
+    /// (`actor_is_player`): your HP goes down by it, and an enemy player in
+    /// sight is attacking you (`attacked_me`). From a player of your faction,
+    /// one not in sight or while your faction isn't known, it's left out.
+    pub fn hit_on_me(&mut self, actor: i32, damage: u64, skill: i32, actor_is_player: bool, now_ms: i64) {
         self.settle(now_ms);
+        let from_player = actor_is_player || self.players.contains_key(&actor);
+        if from_player && !Self::across_factions(self.self_faction, self.players.get(&actor).map(|p| p.faction)) {
+            return;
+        }
         if let Some(at) = self.my_vitals.hit(damage, now_ms) {
             self.died(at);
         }
-        self.attacked_me(id, damage, skill, now_ms);
+        self.attacked_me(actor, damage, skill, now_ms);
     }
 
     /// `actor` hit a player in sight for `damage` with `skill`: their HP goes
-    /// down by it, and when `actor` is you, it is your damage on them.
-    pub fn hit_on_player(&mut self, id: i32, actor: i32, damage: u64, skill: i32, now_ms: i64) {
+    /// down by it, and when `actor` is you, it is your damage on them. From a
+    /// player of their own faction (a heal, a buff) or one whose faction
+    /// isn't known, it's left out.
+    pub fn hit_on_player(&mut self, id: i32, actor: i32, damage: u64, skill: i32, actor_is_player: bool, now_ms: i64) {
         self.settle(now_ms);
-        let Some(p) = self.players.get_mut(&id) else { return };
-        if Some(actor) == self.me {
-            p.dealt += damage;
-            let faction = p.faction;
-            self.infer_faction(faction);
+        let Some(target_faction) = self.players.get(&id).map(|p| p.faction) else { return };
+        let mine = Some(actor) == self.me;
+        let actor_faction = if mine { self.self_faction } else { self.players.get(&actor).map(|p| p.faction) };
+        let from_player = mine || actor_is_player || actor_faction.is_some();
+        if from_player && !Self::across_factions(actor_faction, Some(target_faction)) {
+            return;
+        }
+        if mine {
+            if let Some(p) = self.players.get_mut(&id) {
+                p.dealt += damage;
+            }
         }
         let foe = self.foes.entry(id).or_default();
-        push_hit(&mut foe.hits, Hit { at_ms: now_ms, actor, skill, damage });
+        if from_player {
+            push_hit(&mut foe.hits, Hit { at_ms: now_ms, actor, skill, damage });
+        }
         if let Some(at) = foe.vitals.hit(damage, now_ms) {
             self.player_died(id, at);
         }
@@ -324,8 +365,6 @@ impl NearbyPlayers {
         p.attacked_me_ms = Some(now_ms);
         p.last_seen_ms = p.last_seen_ms.max(now_ms);
         p.taken += damage;
-        let faction = p.faction;
-        self.infer_faction(faction);
         push_hit(&mut self.hits_on_me, Hit { at_ms: now_ms, actor: id, skill, damage });
     }
 
@@ -480,7 +519,7 @@ mod tests {
         let mut n = NearbyPlayers::default();
         n.set_self_faction(2);
         n.my_hp(400, 0);
-        n.hit_on_me(9, 500, 1, 0);
+        n.hit_on_me(9, 500, 1, false, 0);
         assert!(!n.contains(9));
         assert!(n.last_death(5_000).is_none(), "a mob killed you: no recap");
     }
@@ -493,14 +532,14 @@ mod tests {
         n.set_abyss(true);
         n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, 0);
         n.spawn(2, "HuK", Some(JobClass::Gladiator), None, 1, 0);
-        n.hit_on_me(1, 900, 11, 1_000); // long before: not in the recap
-        n.hit_on_player(1, 100, 4_000, 31, 1_000);
-        n.hit_on_player(7, 100, 4_000, 31, 1_000); // no player in sight
+        n.hit_on_me(1, 900, 11, true, 1_000); // long before: not in the recap
+        n.hit_on_player(1, 100, 4_000, 31, true, 1_000);
+        n.hit_on_player(7, 100, 4_000, 31, true, 1_000); // no player in sight
         n.my_hp(5_000, 19_000);
-        n.hit_on_me(2, 3_000, 21, 20_000);
-        n.hit_on_me(1, 1_000, 12, 21_000);
-        n.hit_on_me(1, 1_500, 13, 22_000); // 5 000 HP gone: dead
-        n.hit_on_me(2, 500, 22, 22_100); // on its way already
+        n.hit_on_me(2, 3_000, 21, true, 20_000);
+        n.hit_on_me(1, 1_000, 12, true, 21_000);
+        n.hit_on_me(1, 1_500, 13, true, 22_000); // 5 000 HP gone: dead
+        n.hit_on_me(2, 500, 22, true, 22_100); // on its way already
         n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, 22_200); // a second copy keeps the damage
         let ranger = n.enemies(22_200).into_iter().find(|p| p.id == 1).unwrap();
         assert_eq!((ranger.dealt, ranger.taken), (4_000, 3_400));
@@ -525,10 +564,10 @@ mod tests {
         n.set_self_faction(2);
         n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, 0);
         n.my_hp(1_000, 0);
-        n.hit_on_me(1, 3_000, 11, 100);
+        n.hit_on_me(1, 3_000, 11, true, 100);
         n.my_hp(900, 400); // the HP after: a shield took most of it
         assert!(n.last_death(10_000).is_none());
-        n.hit_on_me(1, 2_000, 11, 11_000);
+        n.hit_on_me(1, 2_000, 11, true, 11_000);
         assert!(n.last_death(12_600).is_some(), "no HP after this one: dead");
     }
 
@@ -541,23 +580,24 @@ mod tests {
         n.spawn(2, "HuK", None, None, 1, 0);
         n.spawn(3, "Friend", None, None, 2, 0);
         n.spawn(4, "Stranger", None, None, 1, 0);
+        n.spawn(200, "Mate", None, None, 2, 0);
 
         // Ranger: HP 0 after your last hit, a party member's before it.
         n.player_hp(1, 5_000, 1_000);
-        n.hit_on_player(1, 200, 2_000, 41, 2_000);
-        n.hit_on_player(1, 100, 1_000, 31, 2_100);
-        n.hit_on_player(1, 100, 2_500, 32, 2_200);
+        n.hit_on_player(1, 200, 2_000, 41, true, 2_000);
+        n.hit_on_player(1, 100, 1_000, 31, true, 2_100);
+        n.hit_on_player(1, 100, 2_500, 32, true, 2_200);
         n.player_hp(1, 0, 2_250);
         // HuK: your hits, then another's; out of sight, with no HP: dead.
         n.player_hp(2, 3_000, 3_000);
-        n.hit_on_player(2, 100, 2_000, 31, 3_100);
-        n.hit_on_player(2, 200, 1_500, 41, 3_200);
+        n.hit_on_player(2, 100, 2_000, 31, true, 3_100);
+        n.hit_on_player(2, 200, 1_500, 41, true, 3_200);
         n.despawn(2);
         // Your own faction, and one you never hit: no kill.
         n.player_hp(3, 1_000, 4_000);
-        n.hit_on_player(3, 100, 2_000, 31, 4_100);
+        n.hit_on_player(3, 100, 2_000, 31, true, 4_100);
         n.player_hp(4, 1_000, 4_000);
-        n.hit_on_player(4, 200, 2_000, 41, 4_100);
+        n.hit_on_player(4, 200, 2_000, 41, true, 4_100);
 
         let kills = n.kills(10_000);
         let rows: Vec<_> =
@@ -567,17 +607,43 @@ mod tests {
     }
 
     #[test]
-    fn your_faction_not_known_yet_is_the_other_one_of_a_player_you_hit() {
+    fn a_heal_from_your_own_faction_is_no_hit() {
+        // A party Cleric's Radiant Recovery comes as a "hit" on you, as on a
+        // party member: no attack, no HP lost, no death recap.
+        let mut n = NearbyPlayers::default();
+        n.set_self_faction(2);
+        n.set_me(100);
+        n.spawn(1, "Mirajane23", Some(JobClass::Cleric), None, 2, 0);
+        n.spawn(2, "Okk", None, None, 2, 0);
+        n.my_hp(5_000, 0);
+        n.hit_on_me(1, 7_640, 41, true, 100);
+        n.hit_on_me(77, 9_000, 41, true, 100); // a player not in sight: can't tell
+        n.player_hp(2, 1_000, 0);
+        n.hit_on_player(2, 1, 3_000, 41, true, 100);
+        n.hit_on_player(2, 100, 3_000, 31, true, 100);
+        assert!(n.last_death(5_000).is_none());
+        assert!(n.kills(5_000).is_empty());
+        assert!(n.players.values().all(|p| p.attacked_me_ms.is_none() && p.dealt == 0));
+    }
+
+    #[test]
+    fn your_faction_not_known_yet_counts_no_hit_and_a_party_member_tells_it() {
         // No self record since the meter started (it comes with a zone load).
         let mut n = NearbyPlayers::default();
         n.set_me(100);
         n.spawn(1, "Ranger", None, None, 1, 0);
-        n.spawn(3, "Friend", None, None, 2, 0);
-        assert!(n.enemies(0).is_empty());
+        n.spawn(3, "Mate", None, None, 2, 0);
         n.player_hp(1, 1_000, 0);
-        n.hit_on_player(1, 100, 1_500, 31, 100);
-        let names: Vec<_> = n.enemies(200).into_iter().map(|p| p.name).collect();
+        n.hit_on_player(1, 100, 500, 31, true, 100);
+        assert!(n.enemies(200).is_empty());
+        assert_eq!(n.players[&1].dealt, 0, "a heal for all it knows");
+        n.guess_faction_from_party(|p| p.name == "Mate");
+        assert_eq!(n.self_faction(), Some(2));
+        n.hit_on_player(1, 100, 1_500, 31, true, 300);
+        let names: Vec<_> = n.enemies(400).into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Ranger"]);
         assert_eq!(n.kills(2_000).len(), 1, "and the kill counts");
+        n.set_self_faction(1); // the self record has the last word
+        assert_eq!(n.self_faction(), Some(1));
     }
 }
