@@ -946,6 +946,7 @@ impl StreamProcessor {
                 roster.dungeon_id
             );
             self.data_storage.set_current_dungeon(roster.dungeon_id);
+            self.data_storage.note_party_size(roster.party_size);
             self.data_storage.set_party_roster(roster.members, roster.complete);
         }
     }
@@ -2394,7 +2395,7 @@ fn parse_party_roster_at(data: &[u8], at: usize) -> Option<Roster> {
     if members.is_empty() {
         return None;
     }
-    Some(Roster { members, complete, dungeon_id, name_fields })
+    Some(Roster { members, complete, dungeon_id, party_size, name_fields })
 }
 
 /// Find a little-endian `u16` equal to `wanted` in `data[from..to]`.
@@ -3014,6 +3015,8 @@ struct Roster {
     members: Vec<(String, crate::combat::data_storage::PartyMember)>,
     complete: bool,
     dungeon_id: i32,
+    /// The party's places: 5 for a party, 10 in the Ludra raid.
+    party_size: usize,
     /// Each member's name field, in member order.
     name_fields: Vec<std::ops::Range<usize>>,
 }

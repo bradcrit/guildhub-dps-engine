@@ -556,6 +556,8 @@ struct Inner {
     /// When the last roster arrived, and whether its members who have not
     /// fought should still get rows. See `party_placeholders_wanted`.
     party_roster_at_ms: i64,
+    /// The party's places, from its last roster (`note_party_size`).
+    party_size: Option<usize>,
     party_placeholders_hidden: bool,
     /// Damage records since `bind_roster_names_by_class` last ran. Counted in
     /// records rather than time so a replay names players where a live meter
@@ -739,6 +741,7 @@ impl DataStorage {
                 low_id_entities: HashSet::new(),
                 party_members: HashMap::new(),
                 party_roster_at_ms: 0,
+                party_size: None,
                 damage_since_roster_bind: 0,
                 party_placeholders_hidden: false,
                 current_dungeon_id: 0,
@@ -1914,10 +1917,29 @@ impl DataStorage {
         if complete {
             inner.party_members.clear();
         }
+        // A partial roster only updates the members it decoded, so whoever
+        // left stayed: a party of five showed seven on the meter, the two
+        // others from an earlier party with no damage (2026-10-18). Someone
+        // in a member's slot now takes it over, and a party can't have more
+        // than its places: past them, whoever this roster doesn't name goes.
+        for (name, member) in &members {
+            if member.slot > 0 {
+                inner.party_members.retain(|other, m| other == name || m.slot != member.slot);
+            }
+        }
+        let named: HashSet<String> = members.iter().map(|(name, _)| name.clone()).collect();
         for (name, member) in members {
             inner.party_members.insert(name, member);
         }
+        if inner.party_size.is_some_and(|size| inner.party_members.len() > size) {
+            inner.party_members.retain(|name, _| named.contains(name));
+        }
         bind_roster_names_by_class(&mut inner);
+    }
+
+    /// How many places the party has, as its roster says.
+    pub fn note_party_size(&self, size: usize) {
+        self.inner.write().party_size = Some(size);
     }
 
     /// You are no longer in a party: drop the roster rows and ask for a
@@ -3114,6 +3136,36 @@ mod tests {
 
     fn member(slot: u8) -> PartyMember {
         PartyMember { slot, level: 45, gear_score: 3000, combat_power: 39_000, ..Default::default() }
+    }
+
+    #[test]
+    fn a_partial_roster_drops_whoever_left_by_slot_and_by_size() {
+        let s = DataStorage::new();
+        s.note_party_size(5);
+        let party: Vec<_> = ["Bradcrit", "Okk", "KAELIS", "MetoH", "Mozzarella"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.to_string(), member(i as u8 + 1)))
+            .collect();
+        s.set_party_roster(party, true);
+        // Hyponus and Mirajane23 took KAELIS' and MetoH's slots.
+        s.set_party_roster(vec![("Hyponus".into(), member(3)), ("Mirajane23".into(), member(4))], false);
+        let mut names: Vec<_> = s.get_party_members().into_keys().collect();
+        names.sort();
+        assert_eq!(names, ["Bradcrit", "Hyponus", "Mirajane23", "Mozzarella", "Okk"]);
+
+        // No slots to go by, but more than five: only the roster's own stay.
+        s.inner.write().party_members.insert("Ghost".into(), member(0));
+        s.set_party_roster(vec![("Okk".into(), member(0))], false);
+        assert!(s.get_party_members().len() <= 5);
+
+        // The Ludra raid has ten places: ten stay.
+        let s = DataStorage::new();
+        s.note_party_size(10);
+        let raid: Vec<_> = (1..=10).map(|i| (format!("P{i}"), member(i))).collect();
+        s.set_party_roster(raid, true);
+        s.set_party_roster(vec![("P3".into(), member(3))], false);
+        assert_eq!(s.get_party_members().len(), 10);
     }
 
     #[test]
