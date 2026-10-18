@@ -6,7 +6,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::capture::abnormal;
 use crate::capture::game_lists::{EntryCount, ListUpdate};
-use crate::combat::nearby_players::{NearbyPlayer, NearbyPlayers};
+use crate::combat::nearby_players::{DeathRecap, NearbyPlayer, NearbyPlayers};
 
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
@@ -799,14 +799,33 @@ impl DataStorage {
         self.nearby.lock().seen(id, now_ms());
     }
 
-    /// `actor` hit `target` for `damage`: an attack on you when `target` is
-    /// you and `actor` a player in sight. Only damage counts — a skill aimed
-    /// at you is a Chanter's buff or a Cleric's heal just as often.
-    pub fn note_nearby_attack(&self, actor: i32, target: i32, damage: i32) {
-        if damage <= 0 || actor == target || self.local_player_id() != Some(target as i64) {
+    /// `actor` hit `target` for `damage` with `skill`: an attack on you when
+    /// `target` is you and `actor` a player in sight, your damage on them when
+    /// it's the other way round. Only damage counts — a skill aimed at you is
+    /// a Chanter's buff or a Cleric's heal just as often.
+    pub fn note_nearby_damage(&self, actor: i32, target: i32, damage: i32, skill: i32) {
+        let Some(me) = self.local_player_id() else { return };
+        if damage <= 0 || actor == target {
             return;
         }
-        self.nearby.lock().attacked_me(actor, now_ms());
+        if i64::from(target) == me {
+            self.nearby.lock().hit_on_me(actor, damage as u64, skill, now_ms());
+        } else if i64::from(actor) == me {
+            self.nearby.lock().hit_by_me(target, damage as u64);
+        }
+    }
+
+    /// Your equipment item level, from the party roster — None out of a party:
+    /// your own self record doesn't state it.
+    pub fn self_item_level(&self) -> Option<u32> {
+        let inner = self.inner.read();
+        let name = inner.local_character_name.as_deref()?.trim();
+        inner.party_members.get(name).map(|m| m.gear_score).filter(|&g| g > 0).map(|g| g as u32)
+    }
+
+    /// The recap of your last death by players' hands (`NearbyPlayers::died`).
+    pub fn last_pvp_death(&self) -> Option<DeathRecap> {
+        self.nearby.lock().last_death(now_ms()).cloned()
     }
 
     pub fn note_nearby_despawn(&self, id: i32) {
@@ -1414,7 +1433,7 @@ impl DataStorage {
     }
 
     pub fn append_damage(&self, pdp: ParsedDamagePacket) {
-        self.note_nearby_attack(pdp.actor_id(), pdp.target_id(), if pdp.heal_amount() > 0 { 0 } else { pdp.damage() });
+        self.note_nearby_damage(pdp.actor_id(), pdp.target_id(), if pdp.heal_amount() > 0 { 0 } else { pdp.damage() }, pdp.skill_code());
         let mut inner = self.inner.write();
         let skill_code = pdp.skill_code();
         let actor_id = pdp.actor_id();
@@ -1678,6 +1697,11 @@ impl DataStorage {
             if let Some(death) = inner.death_log.iter_mut().rev().find(|d| d.0 == entity_id && d.2.is_none()) {
                 death.2 = Some(now);
             }
+        }
+        // Yours, for the PvP view's death recap (`NearbyPlayers::my_hp`).
+        if inner.local_player_id == Some(i64::from(entity_id)) {
+            drop(inner);
+            self.nearby.lock().my_hp(i64::from(hp), now_ms());
         }
     }
 

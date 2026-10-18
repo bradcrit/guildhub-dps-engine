@@ -54,11 +54,16 @@
 //! fought once a minute — `hp` whole percent left, `reset` when it came back
 //! up. `server` is the game's server id (null for a kill before the game
 //! named it). `pvp` (`{"players":[{"id","name","class","itemLevel","seenAt",
-//! "attackedAt"}],"abyss"}`) on every change and once on connecting: the players of
-//! the other faction in sight, attacking you first (latest attack first),
-//! then the one seen last first — `seenAt`/`attackedAt` unix ms, `attackedAt`
-//! null for one who hasn't, `class` and `itemLevel` null while not known;
-//! `abyss` while the map you are on is the Abyss.
+//! "attackedAt","dealt","taken"}],"abyss","death"}`) on every change and once on
+//! connecting: the players of the other faction in sight, attacking you first
+//! (latest attack first), then the one seen last first — `seenAt`/`attackedAt`
+//! unix ms, `attackedAt` null for one who hasn't hit you, `class` and
+//! `itemLevel` null while not known, `dealt`/`taken` the damage you dealt them
+//! and they dealt you since they came into sight; `abyss` while the map you
+//! are on is the Abyss; `death` the recap of your last death by players' hands
+//! (`{"at","killer","skill","attackers":[{"name","class","damage","hits","skill"}]}`,
+//! most damage first, `skill` a name, "" when the game's isn't known) or null.
+//! `self` also has your `itemLevel` while a party roster states it.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -157,6 +162,8 @@ struct Engine {
     screen_name: Mutex<Option<String>>,
     /// The game's round trip, for `self`'s `ping`.
     ping: Arc<PingTracker>,
+    /// Skill names, for the death recap.
+    skills: Arc<SkillLookup>,
 }
 
 impl Engine {
@@ -233,6 +240,7 @@ impl Engine {
             "serverId": profile.server_id,
             "class": profile.class.map(class_key),
             "level": profile.level,
+            "itemLevel": self.storage.self_item_level(),
             "odyle": odyle,
             "lists": lists,
             "ping": self.ping.current_ping_ms(),
@@ -276,10 +284,33 @@ impl Engine {
                     "itemLevel": p.item_level,
                     "seenAt": p.last_seen_ms,
                     "attackedAt": p.attacked_me_ms,
+                    "dealt": p.dealt,
+                    "taken": p.taken,
                 })
             })
             .collect();
-        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss() }).to_string()
+        let death = self.storage.last_pvp_death().map(|d| {
+            let attackers: Vec<_> = d
+                .attackers
+                .iter()
+                .map(|a| {
+                    serde_json::json!({
+                        "name": a.name,
+                        "class": a.class.map(class_key),
+                        "damage": a.damage,
+                        "hits": a.hits,
+                        "skill": self.skills.lookup_skill_name(a.top_skill),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "at": d.at_ms,
+                "killer": d.killer,
+                "skill": self.skills.lookup_skill_name(d.killing_skill),
+                "attackers": attackers,
+            })
+        });
+        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss(), "death": death }).to_string()
     }
 
     fn status(&self) -> serde_json::Value {
@@ -414,6 +445,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         events,
         screen_name: Mutex::new(None),
         ping: ping.clone(),
+        skills: skills.clone(),
     });
 
     {

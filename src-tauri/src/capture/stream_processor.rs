@@ -3555,9 +3555,9 @@ mod tests {
         let enemies = storage.nearby_enemies();
         assert_eq!(enemies.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["MILFSHAKE"]);
         assert!(enemies[0].attacked_me_ms.is_none());
-        storage.note_nearby_attack(14199, 15567, 0);
+        storage.note_nearby_damage(14199, 15567, 0, 0);
         assert!(storage.nearby_enemies()[0].attacked_me_ms.is_none(), "no damage, no attack");
-        storage.note_nearby_attack(14199, 15567, 1_250);
+        storage.note_nearby_damage(14199, 15567, 1_250, 0);
         assert!(storage.nearby_enemies()[0].attacked_me_ms.is_some());
         sp.parse_nearby_player_packet(&framed(&hex_bytes("47 36 F7 6E 01 00")));
         assert!(storage.nearby_enemies().is_empty());

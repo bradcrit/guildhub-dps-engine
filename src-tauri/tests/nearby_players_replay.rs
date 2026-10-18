@@ -3,6 +3,7 @@
 //! `packets_20261018_170140.txt` (A2_PVP_CAPTURE), 2026-10-18: Bradcrit logs
 //! in, inspects two players, teleports to the Abyss and is killed there by
 //! Ranger at 17:05:32, with MILFSHAKE and HuK, all three of the other faction.
+//! No HP 0 came for him: his last was 625, then hits, then his revive.
 
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ fn the_players_who_killed_you_are_the_attackers_on_top() {
     let mut acc = PacketAccumulator::new();
     let mut before_abyss = None;
     let mut at_death = None;
+    let mut recap = None;
     for p in read_capture(std::path::Path::new(&path)).unwrap() {
         a2tools_dps_meter_lib::clock::set_override(Some(p.captured_at_ms));
         processor.set_override_timestamp(Some(p.captured_at_ms));
@@ -39,6 +41,8 @@ fn the_players_who_killed_you_are_the_attackers_on_top() {
             assert!(!storage.in_abyss(), "the home map");
             before_abyss = Some(storage.nearby_enemies());
         }
+        // The engine asks every half second or so; the revive's HP came 24 s on.
+        recap = recap.or_else(|| storage.last_pvp_death());
         if at_death.is_none() && hms.as_str() >= "17:05:31" {
             assert!(storage.in_abyss(), "teleported to the Abyss at 17:04:22");
             at_death = Some(storage.nearby_enemies());
@@ -57,4 +61,12 @@ fn the_players_who_killed_you_are_the_attackers_on_top() {
     let ranger = enemies.iter().find(|p| p.name == "Ranger").unwrap();
     assert_eq!(ranger.class, Some(JobClass::Ranger));
     assert!(enemies.iter().all(|p| p.faction == 1));
+    assert!(enemies.iter().filter(|p| p.attacked_me_ms.is_some()).all(|p| p.taken > 0));
+
+    // The death recap: who killed you, and with what.
+    let recap = recap.expect("a death recap");
+    let mut names: Vec<_> = recap.attackers.iter().map(|a| a.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["HuK", "MILFSHAKE", "Ranger"]);
+    assert_eq!(recap.killer, "Ranger");
 }
