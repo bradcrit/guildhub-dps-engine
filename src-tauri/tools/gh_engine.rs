@@ -61,8 +61,12 @@
 //! `itemLevel` null while not known, `dealt`/`taken` the damage you dealt them
 //! and they dealt you since they came into sight; `abyss` while the map you
 //! are on is the Abyss; `death` the recap of your last death by players' hands
-//! (`{"at","killer","skill","attackers":[{"name","class","damage","hits","skill"}]}`,
-//! most damage first, `skill` a name, "" when the game's isn't known) or null.
+//! (`{"at","killer","skill","abyss","attackers":[{"name","class","damage","hits","skill"}]}`,
+//! most damage first, `skill` a name, "" when the game's isn't known) or null;
+//! `kills` your last 50 kills and assists of enemy players, oldest first
+//! (`{"at","name","class","itemLevel","killingBlow","damage","hits","skill",
+//! "total","helpers","abyss"}`: the last hit yours, your damage, hits and top
+//! skill, everyone's damage and how many others hit them, in the 15 s before).
 //! `self` also has your `itemLevel` while a party roster states it.
 
 use std::collections::{HashMap, HashSet};
@@ -307,10 +311,31 @@ impl Engine {
                 "at": d.at_ms,
                 "killer": d.killer,
                 "skill": self.skills.lookup_skill_name(d.killing_skill),
+                "abyss": d.abyss,
                 "attackers": attackers,
             })
         });
-        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss(), "death": death }).to_string()
+        let kills: Vec<_> = self
+            .storage
+            .pvp_kills()
+            .into_iter()
+            .map(|k| {
+                serde_json::json!({
+                    "at": k.at_ms,
+                    "name": k.name,
+                    "class": k.class.map(class_key),
+                    "itemLevel": k.item_level,
+                    "killingBlow": k.killing_blow,
+                    "damage": k.damage,
+                    "hits": k.hits,
+                    "skill": self.skills.lookup_skill_name(k.top_skill),
+                    "total": k.total,
+                    "helpers": k.helpers,
+                    "abyss": k.abyss,
+                })
+            })
+            .collect();
+        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss(), "death": death, "kills": kills }).to_string()
     }
 
     fn status(&self) -> serde_json::Value {

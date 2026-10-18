@@ -6,7 +6,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::capture::abnormal;
 use crate::capture::game_lists::{EntryCount, ListUpdate};
-use crate::combat::nearby_players::{DeathRecap, NearbyPlayer, NearbyPlayers};
+use crate::combat::nearby_players::{DeathRecap, KillRecord, NearbyPlayer, NearbyPlayers};
 
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
@@ -800,19 +800,27 @@ impl DataStorage {
     }
 
     /// `actor` hit `target` for `damage` with `skill`: an attack on you when
-    /// `target` is you and `actor` a player in sight, your damage on them when
-    /// it's the other way round. Only damage counts — a skill aimed at you is
-    /// a Chanter's buff or a Cleric's heal just as often.
+    /// `target` is you and `actor` a player in sight; on a player in sight,
+    /// their HP going down (and your damage on them, when `actor` is you).
+    /// Only damage counts — a skill aimed at you is a Chanter's buff or a
+    /// Cleric's heal just as often.
     pub fn note_nearby_damage(&self, actor: i32, target: i32, damage: i32, skill: i32) {
         let Some(me) = self.local_player_id() else { return };
         if damage <= 0 || actor == target {
             return;
         }
+        let mut nearby = self.nearby.lock();
+        nearby.set_me(me as i32);
         if i64::from(target) == me {
-            self.nearby.lock().hit_on_me(actor, damage as u64, skill, now_ms());
-        } else if i64::from(actor) == me {
-            self.nearby.lock().hit_by_me(target, damage as u64);
+            nearby.hit_on_me(actor, damage as u64, skill, now_ms());
+        } else {
+            nearby.hit_on_player(target, actor, damage as u64, skill, now_ms());
         }
+    }
+
+    /// Your last kills and assists of enemy players (`NearbyPlayers::kills`).
+    pub fn pvp_kills(&self) -> Vec<KillRecord> {
+        self.nearby.lock().kills(now_ms())
     }
 
     /// Your equipment item level, from the party roster — None out of a party:
@@ -1938,7 +1946,11 @@ impl DataStorage {
     /// what says where the player is; see `dungeon_of_map`.
     pub fn note_map_load(&self, map_id: i32) {
         // New entity ids: the players in sight are spawned again.
-        self.nearby.lock().clear();
+        {
+            let mut nearby = self.nearby.lock();
+            nearby.clear();
+            nearby.set_abyss(crate::combat::nearby_players::ABYSS_MAPS.contains(&map_id));
+        }
         let mut inner = self.inner.write();
         // A load hands out new entity ids: counts of the old ones would name
         // an entity that is gone.
@@ -2154,6 +2166,8 @@ impl DataStorage {
         if hp < 0 {
             return;
         }
+        // A player in sight's HP: their death, for your kills.
+        self.nearby.lock().player_hp(id, i64::from(hp), now_ms());
         let mut inner = self.inner.write();
         inner.mob_current_hp.insert(id, hp);
         if hp == 1 {
