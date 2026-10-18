@@ -817,6 +817,11 @@ impl DataStorage {
         self.nearby.lock().set_self_faction(faction);
     }
 
+    /// The map the last zone load named is the Abyss (`nearby_players::ABYSS_MAPS`).
+    pub fn in_abyss(&self) -> bool {
+        self.inner.read().current_map_id.is_some_and(|map| crate::combat::nearby_players::ABYSS_MAPS.contains(&map))
+    }
+
     /// The players of the other faction in sight, attackers first (see `NearbyPlayers::enemies`).
     pub fn nearby_enemies(&self) -> Vec<NearbyPlayer> {
         self.nearby.lock().enemies(now_ms())

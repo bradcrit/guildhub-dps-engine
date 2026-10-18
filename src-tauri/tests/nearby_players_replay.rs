@@ -36,9 +36,11 @@ fn the_players_who_killed_you_are_the_attackers_on_top() {
         let clock = chrono::DateTime::from_timestamp_millis(p.captured_at_ms).unwrap().with_timezone(&chrono::FixedOffset::east_opt(7200).unwrap());
         let hms = clock.format("%H:%M:%S").to_string();
         if before_abyss.is_none() && hms.as_str() >= "17:04:00" {
+            assert!(!storage.in_abyss(), "the home map");
             before_abyss = Some(storage.nearby_enemies());
         }
         if at_death.is_none() && hms.as_str() >= "17:05:31" {
+            assert!(storage.in_abyss(), "teleported to the Abyss at 17:04:22");
             at_death = Some(storage.nearby_enemies());
         }
     }

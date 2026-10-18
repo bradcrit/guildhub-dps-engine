@@ -11,6 +11,10 @@ use std::collections::HashMap;
 
 use crate::entity::job_class::JobClass;
 
+/// The Abyss: map 20 in the map loads (`21 36`) of both trips there on
+/// 2026-10-18 (01:29 and 17:04), the home map 1110 before and after.
+pub const ABYSS_MAPS: [i32; 1] = [20];
+
 /// Nothing heard of a player for this long: gone, though no despawn came (it
 /// can be missed, mid-capture or in a lost packet).
 pub const FORGET_AFTER_MS: i64 = 10 * 60_000;

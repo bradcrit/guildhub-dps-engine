@@ -54,10 +54,11 @@
 //! fought once a minute — `hp` whole percent left, `reset` when it came back
 //! up. `server` is the game's server id (null for a kill before the game
 //! named it). `pvp` (`{"players":[{"id","name","class","itemLevel","seenAt",
-//! "attackedAt"}]}`) on every change and once on connecting: the players of
+//! "attackedAt"}],"abyss"}`) on every change and once on connecting: the players of
 //! the other faction in sight, attacking you first (latest attack first),
 //! then the one seen last first — `seenAt`/`attackedAt` unix ms, `attackedAt`
-//! null for one who hasn't, `class` and `itemLevel` null while not known.
+//! null for one who hasn't, `class` and `itemLevel` null while not known;
+//! `abyss` while the map you are on is the Abyss.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -278,7 +279,7 @@ impl Engine {
                 })
             })
             .collect();
-        serde_json::json!({ "players": players }).to_string()
+        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss() }).to_string()
     }
 
     fn status(&self) -> serde_json::Value {
