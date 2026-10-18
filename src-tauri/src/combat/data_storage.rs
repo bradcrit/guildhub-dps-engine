@@ -799,10 +799,11 @@ impl DataStorage {
         self.nearby.lock().seen(id, now_ms());
     }
 
-    /// `actor` used a skill on `target` or hit it: an attack on you when
-    /// `target` is you and `actor` a player in sight.
-    pub fn note_nearby_attack(&self, actor: i32, target: i32) {
-        if actor == target || self.local_player_id() != Some(target as i64) {
+    /// `actor` hit `target` for `damage`: an attack on you when `target` is
+    /// you and `actor` a player in sight. Only damage counts — a skill aimed
+    /// at you is a Chanter's buff or a Cleric's heal just as often.
+    pub fn note_nearby_attack(&self, actor: i32, target: i32, damage: i32) {
+        if damage <= 0 || actor == target || self.local_player_id() != Some(target as i64) {
             return;
         }
         self.nearby.lock().attacked_me(actor, now_ms());
@@ -822,9 +823,18 @@ impl DataStorage {
         self.inner.read().current_map_id.is_some_and(|map| crate::combat::nearby_players::ABYSS_MAPS.contains(&map))
     }
 
-    /// The players of the other faction in sight, attackers first (see `NearbyPlayers::enemies`).
+    /// The players of the other faction in sight, attackers first (see
+    /// `NearbyPlayers::enemies`). None in a dungeon, where there is no PvP,
+    /// and never one of your party: in a dungeon a party Chanter showed as
+    /// an enemy attacking you (2026-10-18).
     pub fn nearby_enemies(&self) -> Vec<NearbyPlayer> {
-        self.nearby.lock().enemies(now_ms())
+        let mut enemies = self.nearby.lock().enemies(now_ms());
+        let inner = self.inner.read();
+        if inner.current_dungeon_id > 0 {
+            return Vec::new();
+        }
+        enemies.retain(|p| !inner.party_members.contains_key(&p.name) && !inner.loot_identity.party_scope.contains(&p.id));
+        enemies
     }
 
     /// Each stacking abnormal's stack limit (`abnormal::stack_limits`), so a
@@ -1404,7 +1414,7 @@ impl DataStorage {
     }
 
     pub fn append_damage(&self, pdp: ParsedDamagePacket) {
-        self.note_nearby_attack(pdp.actor_id(), pdp.target_id());
+        self.note_nearby_attack(pdp.actor_id(), pdp.target_id(), if pdp.heal_amount() > 0 { 0 } else { pdp.damage() });
         let mut inner = self.inner.write();
         let skill_code = pdp.skill_code();
         let actor_id = pdp.actor_id();

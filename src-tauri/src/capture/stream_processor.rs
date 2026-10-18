@@ -974,7 +974,9 @@ impl StreamProcessor {
 
     /// What the PvP view follows of the players in sight: they move (the
     /// `37` family below, `<len> <opcode> <entity varint> ...`), use a skill
-    /// (`02 38`, on you: an attack) and leave sight (`47 36`).
+    /// (`02 38`) and leave sight (`47 36`). An attack on you is a hit
+    /// (`DataStorage::append_damage`), not a skill aimed at you: that is a
+    /// buff or a heal as often.
     ///
     /// The movement opcodes each carried a position right after the entity
     /// id in the captures of 2026-10-18 and were sent for players and mobs,
@@ -999,12 +1001,7 @@ impl StreamProcessor {
         match (op, family) {
             (op, 0x37) if MOVES.contains(&op) => self.data_storage.note_nearby_seen(id.value),
             (0x47, 0x36) => self.data_storage.note_nearby_despawn(id.value),
-            (0x02, 0x38) => {
-                self.data_storage.note_nearby_seen(id.value);
-                if let Some(target) = skill_target(packet, offset + 2) {
-                    self.data_storage.note_nearby_attack(id.value, target);
-                }
-            }
+            (0x02, 0x38) => self.data_storage.note_nearby_seen(id.value),
             _ => {}
         }
     }
@@ -3012,24 +3009,6 @@ fn spawn_profile(data: &[u8], after: usize) -> Option<SpawnProfile> {
     Some(SpawnProfile { class: JobClass::from_roster_class(class), faction, item_level })
 }
 
-/// The target of a skill use, `02 38`, from `at`, just past the opcode:
-/// `<caster varint> 00 <skill u32> <seq u8> <flags u8> <target varint> ...`
-/// (and, with flags 02, a heading and the target's position). MILFSHAKE,
-/// Ranger and HuK used skills on Bradcrit in the seconds before he died
-/// (17:05:28, 2026-10-18).
-fn skill_target(packet: &[u8], at: usize) -> Option<i32> {
-    let caster = read_varint(packet, at);
-    if caster.length <= 0 {
-        return None;
-    }
-    let after_caster = at + caster.length as usize;
-    if *packet.get(after_caster)? != 0x00 {
-        return None;
-    }
-    let target = read_varint(packet, after_caster + 7);
-    (target.length > 0 && target.value > 0).then_some(target.value)
-}
-
 /// A party roster as `StreamProcessor::scan_party_roster` reads it.
 struct Roster {
     members: Vec<(String, crate::combat::data_storage::PartyMember)>,
@@ -3560,20 +3539,7 @@ mod tests {
     }
 
     #[test]
-    fn a_skill_names_its_target() {
-        // MILFSHAKE (14199, f7 6e) on Bradcrit (15567, cf 79), 17:05:28.926.
-        let on_you = hex_bytes("02 38 F7 6E 00 60 D3 C6 00 31 02 CF 79 D7 DA 2C C3 48 A6 6A C6 3F 73 F8 C6 0D E4 00 47 FE 68 02 00");
-        assert_eq!(skill_target(&on_you, 2), Some(15567));
-        // On themselves (a buff), 17:05:28.975.
-        let on_self = hex_bytes("02 38 F7 6E 00 9F D2 C6 00 32 00 F7 6E 81 FA 44 43 FE 68 02 00");
-        assert_eq!(skill_target(&on_self, 2), Some(14199));
-        let mut not_one = on_you.clone();
-        not_one[4] = 0x05;
-        assert_eq!(skill_target(&not_one, 2), None);
-    }
-
-    #[test]
-    fn players_in_sight_spawn_move_attack_you_and_leave() {
+    fn players_in_sight_spawn_attack_you_and_leave() {
         let storage = Arc::new(DataStorage::new());
         let sp = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
         storage.note_self_faction(2);
@@ -3581,14 +3547,33 @@ mod tests {
         storage.note_nearby_spawn(14199, "MILFSHAKE", None, None, 1);
         storage.note_nearby_spawn(11788, "Kikay", None, None, 2);
         let framed = |body: &[u8]| [vec![(body.len() + 1) as u8], body.to_vec()].concat();
+        // MILFSHAKE's skill on Bradcrit (17:05:28.926): seen, but no attack —
+        // a skill aimed at you is as often a buff or a heal.
         sp.parse_nearby_player_packet(&framed(&hex_bytes(
             "02 38 F7 6E 00 60 D3 C6 00 31 02 CF 79 D7 DA 2C C3 48 A6 6A C6 3F 73 F8 C6 0D E4 00 47 FE 68 02 00",
         )));
         let enemies = storage.nearby_enemies();
         assert_eq!(enemies.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["MILFSHAKE"]);
-        assert!(enemies[0].attacked_me_ms.is_some());
+        assert!(enemies[0].attacked_me_ms.is_none());
+        storage.note_nearby_attack(14199, 15567, 0);
+        assert!(storage.nearby_enemies()[0].attacked_me_ms.is_none(), "no damage, no attack");
+        storage.note_nearby_attack(14199, 15567, 1_250);
+        assert!(storage.nearby_enemies()[0].attacked_me_ms.is_some());
         sp.parse_nearby_player_packet(&framed(&hex_bytes("47 36 F7 6E 01 00")));
         assert!(storage.nearby_enemies().is_empty());
+    }
+
+    #[test]
+    fn no_enemies_in_a_dungeon_and_never_your_party() {
+        let storage = Arc::new(DataStorage::new());
+        storage.note_self_faction(2);
+        storage.note_nearby_spawn(3001, "Chantress", Some(JobClass::Chanter), None, 1);
+        storage.note_nearby_spawn(3002, "Stranger", None, None, 1);
+        storage.note_party_scope(3001);
+        let names: Vec<_> = storage.nearby_enemies().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Stranger"], "a party member is no enemy");
+        storage.set_current_dungeon(600_101);
+        assert!(storage.nearby_enemies().is_empty(), "no PvP in a dungeon");
     }
 
     /// A roster with slots 1 and 5 filled and 2-4 vacant (bytes from a
