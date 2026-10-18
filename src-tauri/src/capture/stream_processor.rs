@@ -281,6 +281,7 @@ impl StreamProcessor {
         self.parse_death_packet(packet);
         self.parse_zone_change_packet(packet);
         self.parse_map_load_packet(packet);
+        self.parse_nearby_player_packet(packet);
         // The field bosses on a map the player opened (boss timers).
         if let Some(map) = crate::capture::boss_map::parse(packet, crate::clock::now_ms()) {
             self.data_storage.note_boss_map(map);
@@ -886,6 +887,12 @@ impl StreamProcessor {
                     .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                     .filter(|l| (1..=99).contains(l));
                 self.data_storage.note_self_profile(&sanitized, job, level);
+                // Your faction, the byte before the level (as in another
+                // player's spawn, after the class): 2 for both characters
+                // of 2026-10-18, whose Abyss foes' spawns said 1.
+                if let Some(&faction) = job.and(data.get(after + 6)).filter(|f| matches!(f, 1 | 2)) {
+                    self.data_storage.note_self_faction(faction);
+                }
                 if let Some(cp) = record.combat_power {
                     self.data_storage.note_self_combat_power(&sanitized, cp);
                 }
@@ -950,7 +957,7 @@ impl StreamProcessor {
     /// than hunting for the literal `0x07` that older builds happened to put in
     /// the `mask2` slot.
     fn parse_player_spawn_name(&self, data: &[u8], offset_after_opcode: usize) {
-        let Some((actor_id, sanitized, _)) = player_spawn_at(data, offset_after_opcode) else {
+        let Some((actor_id, sanitized, field)) = player_spawn_at(data, offset_after_opcode) else {
             return;
         };
         // 45/44 36 player spawn is an authoritative id↔name source.
@@ -958,6 +965,48 @@ impl StreamProcessor {
         self.data_storage.note_player_spawn(actor_id);
         self.data_storage
             .append_nickname_authoritative(actor_id, &sanitized);
+        if let Some(profile) = spawn_profile(data, field.end) {
+            self.data_storage.note_nearby_spawn(actor_id, &sanitized, profile.class, profile.item_level, profile.faction);
+        }
+    }
+
+    // ===== PLAYERS IN SIGHT (movement, 02 38, 47 36) =====
+
+    /// What the PvP view follows of the players in sight: they move (the
+    /// `37` family below, `<len> <opcode> <entity varint> ...`), use a skill
+    /// (`02 38`, on you: an attack) and leave sight (`47 36`).
+    ///
+    /// The movement opcodes each carried a position right after the entity
+    /// id in the captures of 2026-10-18 and were sent for players and mobs,
+    /// never for you: 1c 37 the most (3130 in five minutes), the others
+    /// as players start, stop, turn and jump.
+    ///
+    /// `47 36 <entity varint> <u8> <u8>`: of 88 players it was sent for in a
+    /// capture (01:22, 2026-10-18), 85 were not heard of again but for a new
+    /// spawn.
+    fn parse_nearby_player_packet(&self, packet: &[u8]) {
+        const MOVES: [u8; 14] = [0x1A, 0x1B, 0x1C, 0x1E, 0x1F, 0x20, 0x24, 0x25, 0x28, 0x29, 0x2A, 0x2B, 0x2E, 0x2F];
+        let length_info = read_varint(packet, 0);
+        if length_info.length <= 0 {
+            return;
+        }
+        let offset = length_info.length as usize;
+        let Some(&[op, family]) = packet.get(offset..offset + 2) else { return };
+        let id = read_varint(packet, offset + 2);
+        if id.length <= 0 {
+            return;
+        }
+        match (op, family) {
+            (op, 0x37) if MOVES.contains(&op) => self.data_storage.note_nearby_seen(id.value),
+            (0x47, 0x36) => self.data_storage.note_nearby_despawn(id.value),
+            (0x02, 0x38) => {
+                self.data_storage.note_nearby_seen(id.value);
+                if let Some(target) = skill_target(packet, offset + 2) {
+                    self.data_storage.note_nearby_attack(id.value, target);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ===== SUMMON PACKET (40 36) =====
@@ -2925,6 +2974,62 @@ fn player_spawn_at(data: &[u8], offset_after_opcode: usize) -> Option<(i32, Stri
     Some((actor_id, name, field))
 }
 
+/// What a player's spawn says of them besides the name.
+#[derive(Debug, PartialEq)]
+struct SpawnProfile {
+    class: Option<JobClass>,
+    faction: u8,
+    item_level: Option<u32>,
+}
+
+/// The player's class, faction and item level in their spawn, from `after`,
+/// the end of its name field.
+///
+/// `<class u32> <faction u8> ...`: the class in the party roster's encoding
+/// (raas 24, an Elementalist, as she showed inspected), the faction 1 or 2
+/// (2 for everyone around Bradcrit but the three Abyss foes who killed him,
+/// at 01:30 and 17:05 on 2026-10-18). Further on, where the record's
+/// variable middle has ended:
+/// `<level u32> 00 00 00 00 <item level u32> [<u32>] de 02 0c` — 2254 for
+/// raas, 2240 for Balyone, as the game showed them inspected (17:03). The
+/// first such run within the record's usual length.
+fn spawn_profile(data: &[u8], after: usize) -> Option<SpawnProfile> {
+    let class = data.get(after..after + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
+    let faction = *data.get(after + 4).filter(|f| matches!(f, 1 | 2))?;
+    let window = data.get(after..data.len().min(after + 2048))?;
+    let u32_at = |at: usize| u32::from_le_bytes(window[at..at + 4].try_into().unwrap());
+    let item_level = (16..window.len().saturating_sub(2)).find_map(|i| {
+        if window[i..i + 3] != [0xDE, 0x02, 0x0C] {
+            return None;
+        }
+        // Without and with the u32 between item level and the marker.
+        [i - 12, i - 16].into_iter().find_map(|level_at| {
+            let level = u32_at(level_at);
+            let item_level = u32_at(level_at + 8);
+            ((1..=99).contains(&level) && u32_at(level_at + 4) == 0 && (1..=9999).contains(&item_level)).then_some(item_level)
+        })
+    });
+    Some(SpawnProfile { class: JobClass::from_roster_class(class), faction, item_level })
+}
+
+/// The target of a skill use, `02 38`, from `at`, just past the opcode:
+/// `<caster varint> 00 <skill u32> <seq u8> <flags u8> <target varint> ...`
+/// (and, with flags 02, a heading and the target's position). MILFSHAKE,
+/// Ranger and HuK used skills on Bradcrit in the seconds before he died
+/// (17:05:28, 2026-10-18).
+fn skill_target(packet: &[u8], at: usize) -> Option<i32> {
+    let caster = read_varint(packet, at);
+    if caster.length <= 0 {
+        return None;
+    }
+    let after_caster = at + caster.length as usize;
+    if *packet.get(after_caster)? != 0x00 {
+        return None;
+    }
+    let target = read_varint(packet, after_caster + 7);
+    (target.length > 0 && target.value > 0).then_some(target.value)
+}
+
 /// A party roster as `StreamProcessor::scan_party_roster` reads it.
 struct Roster {
     members: Vec<(String, crate::combat::data_storage::PartyMember)>,
@@ -3430,6 +3535,60 @@ mod tests {
         let mut differs = bradcrit.clone();
         differs[15] = 0xDC;
         assert_eq!(self_record_combat_power(&differs, 0), None);
+    }
+
+    #[test]
+    fn a_spawn_states_class_faction_and_item_level() {
+        // raas's spawn (17:02:34, 2026-10-18) from the end of her name: her
+        // class and faction, a stretch of the record, the item-level run.
+        let head = hex_bytes("18 00 00 00 02 02 00 92 C0 7B 2C 48 48 5B 29 48 00 62 BA 46");
+        let tail = hex_bytes("27 02 48 F4 FF FF 2D 00 00 00 00 00 00 00 CE 08 00 00 DE 02 0C 64 64 64");
+        let record = [head.clone(), vec![0x11; 900], tail.clone()].concat();
+        let raas = SpawnProfile { class: Some(JobClass::Elementalist), faction: 2, item_level: Some(2254) };
+        assert_eq!(spawn_profile(&record, 0), Some(raas));
+        // Her spawn at 01:29 had a u32 between the item level and the marker.
+        let later = hex_bytes("2D 00 00 00 00 00 00 00 C9 08 00 00 4F 00 00 00 DE 02 0C");
+        let record = [head.clone(), vec![0x11; 900], later].concat();
+        assert_eq!(spawn_profile(&record, 0).and_then(|p| p.item_level), Some(2249));
+        // No run: no item level, still the class.
+        let record = [head.clone(), vec![0x11; 900]].concat();
+        assert_eq!(spawn_profile(&record, 0).map(|p| (p.class, p.item_level)), Some((Some(JobClass::Elementalist), None)));
+        // A faction byte that is none: not a spawn read right.
+        let mut bad = head;
+        bad[4] = 7;
+        assert_eq!(spawn_profile(&bad, 0), None);
+    }
+
+    #[test]
+    fn a_skill_names_its_target() {
+        // MILFSHAKE (14199, f7 6e) on Bradcrit (15567, cf 79), 17:05:28.926.
+        let on_you = hex_bytes("02 38 F7 6E 00 60 D3 C6 00 31 02 CF 79 D7 DA 2C C3 48 A6 6A C6 3F 73 F8 C6 0D E4 00 47 FE 68 02 00");
+        assert_eq!(skill_target(&on_you, 2), Some(15567));
+        // On themselves (a buff), 17:05:28.975.
+        let on_self = hex_bytes("02 38 F7 6E 00 9F D2 C6 00 32 00 F7 6E 81 FA 44 43 FE 68 02 00");
+        assert_eq!(skill_target(&on_self, 2), Some(14199));
+        let mut not_one = on_you.clone();
+        not_one[4] = 0x05;
+        assert_eq!(skill_target(&not_one, 2), None);
+    }
+
+    #[test]
+    fn players_in_sight_spawn_move_attack_you_and_leave() {
+        let storage = Arc::new(DataStorage::new());
+        let sp = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        storage.note_self_faction(2);
+        storage.set_local_identity_from_game(15567, Some("Bradcrit".into()));
+        storage.note_nearby_spawn(14199, "MILFSHAKE", None, None, 1);
+        storage.note_nearby_spawn(11788, "Kikay", None, None, 2);
+        let framed = |body: &[u8]| [vec![(body.len() + 1) as u8], body.to_vec()].concat();
+        sp.parse_nearby_player_packet(&framed(&hex_bytes(
+            "02 38 F7 6E 00 60 D3 C6 00 31 02 CF 79 D7 DA 2C C3 48 A6 6A C6 3F 73 F8 C6 0D E4 00 47 FE 68 02 00",
+        )));
+        let enemies = storage.nearby_enemies();
+        assert_eq!(enemies.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["MILFSHAKE"]);
+        assert!(enemies[0].attacked_me_ms.is_some());
+        sp.parse_nearby_player_packet(&framed(&hex_bytes("47 36 F7 6E 01 00")));
+        assert!(storage.nearby_enemies().is_empty());
     }
 
     /// A roster with slots 1 and 5 filled and 2-4 vacant (bytes from a

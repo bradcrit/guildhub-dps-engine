@@ -6,6 +6,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::capture::abnormal;
 use crate::capture::game_lists::{EntryCount, ListUpdate};
+use crate::combat::nearby_players::{NearbyPlayer, NearbyPlayers};
 
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
@@ -492,6 +493,9 @@ pub struct DataStorage {
     /// yet. Its own lock: it is fed every packet, and nothing here needs it
     /// together with `inner`.
     abnormals: Mutex<AbnormalLog>,
+    /// The players in sight, for the PvP view (`combat::nearby_players`).
+    /// Its own lock, as `abnormals`.
+    nearby: Mutex<NearbyPlayers>,
 }
 
 /// The timeline and when it was last pruned.
@@ -781,7 +785,41 @@ impl DataStorage {
             combat_reset_requested: AtomicBool::new(false),
             before_reset: RwLock::new(None),
             abnormals: Mutex::new(AbnormalLog { timeline: abnormal::Timeline::default(), pruned_ms: NEVER_MS }),
+            nearby: Mutex::new(NearbyPlayers::default()),
         }
+    }
+
+    /// A player spawned in sight, with what their spawn says of them.
+    pub fn note_nearby_spawn(&self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8) {
+        self.nearby.lock().spawn(id, name, class, item_level, faction, now_ms());
+    }
+
+    /// An entity moved or used a skill; only players in sight are kept.
+    pub fn note_nearby_seen(&self, id: i32) {
+        self.nearby.lock().seen(id, now_ms());
+    }
+
+    /// `actor` used a skill on `target` or hit it: an attack on you when
+    /// `target` is you and `actor` a player in sight.
+    pub fn note_nearby_attack(&self, actor: i32, target: i32) {
+        if actor == target || self.local_player_id() != Some(target as i64) {
+            return;
+        }
+        self.nearby.lock().attacked_me(actor, now_ms());
+    }
+
+    pub fn note_nearby_despawn(&self, id: i32) {
+        self.nearby.lock().despawn(id);
+    }
+
+    /// Your faction, from your self record.
+    pub fn note_self_faction(&self, faction: u8) {
+        self.nearby.lock().set_self_faction(faction);
+    }
+
+    /// The players of the other faction in sight, attackers first (see `NearbyPlayers::enemies`).
+    pub fn nearby_enemies(&self) -> Vec<NearbyPlayer> {
+        self.nearby.lock().enemies(now_ms())
     }
 
     /// Each stacking abnormal's stack limit (`abnormal::stack_limits`), so a
@@ -1361,6 +1399,7 @@ impl DataStorage {
     }
 
     pub fn append_damage(&self, pdp: ParsedDamagePacket) {
+        self.note_nearby_attack(pdp.actor_id(), pdp.target_id());
         let mut inner = self.inner.write();
         let skill_code = pdp.skill_code();
         let actor_id = pdp.actor_id();
@@ -1859,6 +1898,8 @@ impl DataStorage {
     /// A zone load named the map it loads (`21 36`). The map, once known, is
     /// what says where the player is; see `dungeon_of_map`.
     pub fn note_map_load(&self, map_id: i32) {
+        // New entity ids: the players in sight are spawned again.
+        self.nearby.lock().clear();
         let mut inner = self.inner.write();
         // A load hands out new entity ids: counts of the old ones would name
         // an entity that is gone.

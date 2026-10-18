@@ -53,7 +53,11 @@
 //! the field bosses in the open world whose HP changed, and the ones still
 //! fought once a minute — `hp` whole percent left, `reset` when it came back
 //! up. `server` is the game's server id (null for a kill before the game
-//! named it).
+//! named it). `pvp` (`{"players":[{"id","name","class","itemLevel","seenAt",
+//! "attackedAt"}]}`) on every change and once on connecting: the players of
+//! the other faction in sight, attacking you first (latest attack first),
+//! then the one seen last first — `seenAt`/`attackedAt` unix ms, `attackedAt`
+//! null for one who hasn't, `class` and `itemLevel` null while not known.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -142,6 +146,8 @@ struct Engine {
     dps: watch::Sender<Arc<str>>,
     /// Your character as JSON (`self_json`).
     me: watch::Sender<Arc<str>>,
+    /// The players of the other faction in sight as JSON (`pvp_json`).
+    pvp: watch::Sender<Arc<str>>,
     /// One-off events for the stream: (name, JSON).
     events: broadcast::Sender<(&'static str, String)>,
     /// The character name the parent read off the game's screen — put on your
@@ -253,6 +259,26 @@ impl Engine {
             tracing::info!("screen name '{name}' on entity {id}");
             self.storage.set_permanent_nickname(id as i32, &name);
         }
+    }
+
+    /// The PvP view's players (see the top of this file).
+    fn pvp_json(&self) -> String {
+        let players: Vec<_> = self
+            .storage
+            .nearby_enemies()
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "class": p.class.map(class_key),
+                    "itemLevel": p.item_level,
+                    "seenAt": p.last_seen_ms,
+                    "attackedAt": p.attacked_me_ms,
+                })
+            })
+            .collect();
+        serde_json::json!({ "players": players }).to_string()
     }
 
     fn status(&self) -> serde_json::Value {
@@ -370,6 +396,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (tx, rx) = mpsc::channel::<CapturedPayload>(4096);
     let (dps, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (me, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let (pvp, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (events, _) = broadcast::channel(64);
     let engine = Arc::new(Engine {
         token,
@@ -382,6 +409,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         saving: Mutex::new(()),
         dps,
         me,
+        pvp,
         events,
         screen_name: Mutex::new(None),
         ping: ping.clone(),
@@ -461,6 +489,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let me = engine.self_json();
                 if **engine.me.borrow() != *me {
                     engine.me.send_replace(Arc::from(me));
+                }
+                let pvp = engine.pvp_json();
+                if **engine.pvp.borrow() != *pvp {
+                    engine.pvp.send_replace(Arc::from(pvp));
                 }
                 let server = engine.storage.local_profile().server_id;
                 for event in engine.storage.take_boss_events() {
@@ -757,11 +789,13 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     }
     let mut dps = engine.dps.subscribe();
     let mut me = engine.me.subscribe();
+    let mut pvp = engine.pvp.subscribe();
     let mut events = engine.events.subscribe();
     let mut beat = tokio::time::interval(HEARTBEAT_EVERY);
     beat.tick().await;
     dps.mark_changed();
     me.mark_changed();
+    pvp.mark_changed();
     loop {
         let frame = tokio::select! {
             changed = dps.changed() => {
@@ -783,6 +817,16 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
                     continue;
                 }
                 format!("event: self\ndata: {current}\n\n")
+            }
+            changed = pvp.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let current = pvp.borrow_and_update().clone();
+                if current.is_empty() {
+                    continue;
+                }
+                format!("event: pvp\ndata: {current}\n\n")
             }
             event = events.recv() => match event {
                 Ok((name, data)) => format!("event: {name}\ndata: {data}\n\n"),
