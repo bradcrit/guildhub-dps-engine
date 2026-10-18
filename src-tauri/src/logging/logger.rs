@@ -208,7 +208,7 @@ fn open_packet_file(log_dir: &std::path::Path) -> Option<(std::io::BufWriter<std
         .ok()?;
     let mut writer = std::io::BufWriter::new(file);
     let header = format!(
-        "# Packet capture started at {}\n# Format: TIMESTAMP|STREAMKEY|HEX_DATA\n\n",
+        "# Packet capture started at {}\n# Format: TIMESTAMP|STREAMKEY|HEX_DATA\n# Sent by the client: #SENT|TIMESTAMP|STREAMKEY|HEX_DATA (a comment to every reader)\n\n",
         now.format("%+")
     );
     writer.write_all(header.as_bytes()).ok()?;
@@ -289,6 +289,18 @@ pub fn is_packet_log_enabled() -> bool {
 }
 
 pub fn log_packet(cap: &CapturedPayload) {
+    write_packet_line(cap, "");
+}
+
+/// A packet the game client sent to the server. Nothing parses these; they
+/// are kept to find records only the client states, such as your own
+/// position (the server never echoes your movement back). Written as a
+/// comment line, so every replay and test reading captures skips them.
+pub fn log_sent_packet(cap: &CapturedPayload) {
+    write_packet_line(cap, "#SENT|");
+}
+
+fn write_packet_line(cap: &CapturedPayload, prefix: &str) {
     if !PACKET_LOG_ENABLED.load(Ordering::Relaxed) { return; }
     let mut guard = PACKET_LOGGER.lock();
     if let Some(ref mut logger) = *guard {
@@ -298,9 +310,13 @@ pub fn log_packet(cap: &CapturedPayload) {
         use chrono::TimeZone;
         let captured = cap.capture_time_ms().and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single());
         let ts = captured.unwrap_or_else(chrono::Local::now).format("%+");
-        let key = crate::capture::captured_payload::stream_key(cap.src_port, cap.dst_port);
+        // A sent packet goes from the client port, so its ports swap: both
+        // directions of one connection share a stream key.
+        let (server_port, client_port) =
+            if prefix.is_empty() { (cap.src_port, cap.dst_port) } else { (cap.dst_port, cap.src_port) };
+        let key = crate::capture::captured_payload::stream_key(server_port, client_port);
         let hex: String = cap.data.iter().map(|b| format!("{:02X}", b)).collect();
-        let line = format!("{}|{}|{}\n", ts, key, hex);
+        let line = format!("{}{}|{}|{}\n", prefix, ts, key, hex);
         if logger.writer.write_all(line.as_bytes()).is_ok() {
             // Flushed per packet on purpose: a capture is usually being taken
             // because something is going wrong, and the tail is the part that

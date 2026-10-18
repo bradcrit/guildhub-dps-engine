@@ -313,6 +313,10 @@ impl CaptureDispatcher {
             // Only parse server->client (src == locked port)
             if let Some(port) = current_port {
                 if cap.src_port != port {
+                    // What the client sent: into the capture only, never parsed.
+                    if cap.dst_port == port {
+                        crate::logging::logger::log_sent_packet(&cap);
+                    }
                     continue;
                 }
                 if cap.src_ip.is_some() && cap.src_ip != last_game_host {
