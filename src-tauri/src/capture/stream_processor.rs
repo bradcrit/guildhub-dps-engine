@@ -886,6 +886,9 @@ impl StreamProcessor {
                     .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                     .filter(|l| (1..=99).contains(l));
                 self.data_storage.note_self_profile(&sanitized, job, level);
+                if let Some(cp) = record.combat_power {
+                    self.data_storage.note_self_combat_power(&sanitized, cp);
+                }
             } else {
                 tracing::debug!("player record: '{}' -> entity {}", sanitized, id);
             }
@@ -2792,6 +2795,30 @@ struct MaskedRecord {
     name: Option<String>,
     /// Your server and class, in a self record.
     profile: Option<(u16, Option<JobClass>)>,
+    /// Your combat power, in a self record — see `self_record_combat_power`.
+    combat_power: Option<i64>,
+}
+
+/// Your combat power in your self record (`33 36`), searched from its name
+/// field's end `from`: a u64 stated twice in a row, right before a group that
+/// reads `05 01 ?? ?? 02 00 00 03 ?? ?? 04 00 00 05 00 00`. Matched the game's
+/// value for two characters (88 027 Bradcrit, 11 521 Cplusplus, 2026-10-18)
+/// in every copy of five captures — sent on each zone load. Found by its
+/// shape: how far it sits from the name or the record's end varies, and the
+/// bytes before the opcode aren't always the record's length (a self record
+/// inside a `1d 37` one). The first such pair; None when there is none.
+fn self_record_combat_power(data: &[u8], from: usize) -> Option<i64> {
+    const SEARCH: usize = 8192;
+    let window = data.get(from..data.len().min(from + SEARCH))?;
+    let read = |at: usize| u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
+    (16..window.len().saturating_sub(15))
+        .filter(|&p| {
+            let g = &window[p..p + 16];
+            g[..2] == [0x05, 0x01] && g[4..8] == [0x02, 0x00, 0x00, 0x03] && g[10..] == [0x04, 0x00, 0x00, 0x05, 0x00, 0x00]
+        })
+        .map(|p| (read(p - 16), read(p - 8)))
+        .find(|&(a, b)| a == b && (1..100_000_000).contains(&a))
+        .map(|(a, _)| a as i64)
 }
 
 /// Every masked identity record in `data`:
@@ -2841,7 +2868,7 @@ fn masked_records(data: &[u8]) -> Vec<MaskedRecord> {
         // and keeping the previous character's name would be wrong.
         if is_self && is_placeholder_name(raw) {
             i = field.end;
-            out.push(MaskedRecord { id: id.value, field, name: None, profile: None });
+            out.push(MaskedRecord { id: id.value, field, name: None, profile: None, combat_power: None });
             continue;
         }
         // The whole field must be one clean name; otherwise we landed
@@ -2864,8 +2891,9 @@ fn masked_records(data: &[u8]) -> Vec<MaskedRecord> {
         } else {
             None
         };
+        let combat_power = if is_self { self_record_combat_power(data, field.end) } else { None };
         i = field.end;
-        out.push(MaskedRecord { id: id.value, field, name: Some(sanitized), profile });
+        out.push(MaskedRecord { id: id.value, field, name: Some(sanitized), profile, combat_power });
     }
     out
 }
@@ -3378,6 +3406,31 @@ fn scanned_name_fields(data: &[u8], out: &mut Vec<NameField>) {
 mod tests {
     use super::*;
     use crate::combat::data_storage::SkillCombatData;
+
+    fn hex_bytes(s: &str) -> Vec<u8> {
+        s.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn self_record_combat_power_is_found_by_its_shape() {
+        // The tails of two self records (2026-10-18): Bradcrit 88 027 with more
+        // after the group, Cplusplus 11 521 followed by a second, empty group.
+        let bradcrit = hex_bytes(
+            "00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 DB 57 01 00 00 00 00 00 DB 57 01 00 00 00 00 00 \
+             05 01 96 01 02 00 00 03 00 00 04 00 00 05 00 00 05 01 0E 01 02 00 00 03 02 00 04 00 00 05 00 00 \
+             02 01 00 00 00 12 00 00 00 02 00 00 00 01 00 00 00",
+        );
+        assert_eq!(self_record_combat_power(&bradcrit, 0), Some(88_027));
+        let cplusplus = hex_bytes(
+            "00 00 00 00 00 00 00 00 01 2D 00 00 00 00 00 00 01 2D 00 00 00 00 00 00 05 01 17 00 02 00 00 03 \
+             00 00 04 00 00 05 00 00 05 01 00 00 02 00 00 03 00 00 04 00 00 05 00 00",
+        );
+        assert_eq!(self_record_combat_power(&cplusplus, 0), Some(11_521));
+        // The group without a doubled value before it is not one.
+        let mut differs = bradcrit.clone();
+        differs[15] = 0xDC;
+        assert_eq!(self_record_combat_power(&differs, 0), None);
+    }
 
     /// A roster with slots 1 and 5 filled and 2-4 vacant (bytes from a
     /// 2026-08-15 capture, rearranged). The walk used to stop at slot 2.

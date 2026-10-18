@@ -533,7 +533,12 @@ impl DpsCalculator {
             // Combat power joins on the character name: the roster carries an
             // account-level dbid, not the session entity id keyed here.
             let member = party_members.get(&data.nickname);
-            data.combat_power = member.map(|m| m.combat_power).unwrap_or(0);
+            // Yours from your own self record when there's no roster (solo, or
+            // a meter started after the party formed).
+            data.combat_power = member
+                .map(|m| m.combat_power)
+                .filter(|&cp| cp > 0)
+                .unwrap_or_else(|| self.data_storage.self_combat_power(&data.nickname));
             data.gear_score = member.map(|m| m.gear_score).unwrap_or(0);
             if data.job.is_empty() {
                 if local_ids.as_ref().is_some_and(|ids| ids.contains(&uid)) {
@@ -1064,7 +1069,10 @@ impl DpsCalculator {
                         ),
                         level: roster.map(|m| m.level).unwrap_or(0),
                         gear_score: roster.map(|m| m.gear_score).unwrap_or(0),
-                        combat_power: roster.map(|m| m.combat_power).unwrap_or(0),
+                        combat_power: roster
+                            .map(|m| m.combat_power)
+                            .filter(|&cp| cp > 0)
+                            .unwrap_or_else(|| self.data_storage.self_combat_power(nick)),
                         full_nickname: nick.clone(),
                     }
                 })

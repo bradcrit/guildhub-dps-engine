@@ -679,6 +679,8 @@ struct Inner {
     /// The class and level your own self record last stated, with the name it
     /// was for, so a character switch does not carry the last one's over.
     self_profile: Option<(String, Option<JobClass>, Option<u32>)>,
+    /// Your combat power, as your own self record states it (name, value).
+    self_combat_power: Option<(String, i64)>,
 }
 
 #[derive(Default)]
@@ -771,6 +773,7 @@ impl DataStorage {
                 player_servers: HashMap::new(),
                 self_server: 0,
                 self_profile: None,
+                self_combat_power: None,
             }),
             damage_generation: AtomicI64::new(0),
             last_damage_ms: AtomicI64::new(NEVER_MS),
@@ -1164,6 +1167,20 @@ impl DataStorage {
             _ => (None, None),
         };
         inner.self_profile = Some((name.to_string(), class.or(old_class), level.or(old_level)));
+    }
+
+    /// Your combat power, as your own self record states it.
+    pub fn note_self_combat_power(&self, name: &str, combat_power: i64) {
+        self.inner.write().self_combat_power = Some((name.trim().to_string(), combat_power));
+    }
+
+    /// `name`'s combat power when `name` is you and your self record stated
+    /// it; else 0. Party members have theirs from the roster.
+    pub fn self_combat_power(&self, name: &str) -> i64 {
+        match &self.inner.read().self_combat_power {
+            Some((n, cp)) if n == name.trim() => *cp,
+            _ => 0,
+        }
     }
 
     /// Who you are playing, as far as the game has said: name, server, class
