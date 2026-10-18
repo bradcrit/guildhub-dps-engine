@@ -215,6 +215,17 @@ impl NearbyPlayers {
         self.self_faction = Some(faction);
     }
 
+    /// Until your self record says it, your faction is the other one of a
+    /// player you hit or who hit you. The record comes only with a zone load:
+    /// a meter started in the Abyss (21:24 on 2026-10-18) had none until you
+    /// left, so it saw no enemies and none of your two kills there. A duel
+    /// with your own faction before the record would get it wrong, until it.
+    fn infer_faction(&mut self, theirs: u8) {
+        if self.self_faction.is_none() && matches!(theirs, 1 | 2) {
+            self.self_faction = Some(3 - theirs);
+        }
+    }
+
     /// Your entity id.
     pub fn set_me(&mut self, id: i32) {
         self.me = Some(id);
@@ -285,6 +296,8 @@ impl NearbyPlayers {
         let Some(p) = self.players.get_mut(&id) else { return };
         if Some(actor) == self.me {
             p.dealt += damage;
+            let faction = p.faction;
+            self.infer_faction(faction);
         }
         let foe = self.foes.entry(id).or_default();
         push_hit(&mut foe.hits, Hit { at_ms: now_ms, actor, skill, damage });
@@ -311,6 +324,8 @@ impl NearbyPlayers {
         p.attacked_me_ms = Some(now_ms);
         p.last_seen_ms = p.last_seen_ms.max(now_ms);
         p.taken += damage;
+        let faction = p.faction;
+        self.infer_faction(faction);
         push_hit(&mut self.hits_on_me, Hit { at_ms: now_ms, actor: id, skill, damage });
     }
 
@@ -549,5 +564,20 @@ mod tests {
             kills.iter().map(|k| (k.name.as_str(), k.at_ms, k.killing_blow, k.damage, k.hits, k.top_skill, k.total, k.helpers)).collect();
         assert_eq!(rows, [("Ranger", 2_250, true, 3_500, 2, 32, 5_500, 1), ("HuK", 3_200, false, 2_000, 1, 31, 3_500, 1)]);
         assert_eq!(kills[0].item_level, Some(2300));
+    }
+
+    #[test]
+    fn your_faction_not_known_yet_is_the_other_one_of_a_player_you_hit() {
+        // No self record since the meter started (it comes with a zone load).
+        let mut n = NearbyPlayers::default();
+        n.set_me(100);
+        n.spawn(1, "Ranger", None, None, 1, 0);
+        n.spawn(3, "Friend", None, None, 2, 0);
+        assert!(n.enemies(0).is_empty());
+        n.player_hp(1, 1_000, 0);
+        n.hit_on_player(1, 100, 1_500, 31, 100);
+        let names: Vec<_> = n.enemies(200).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Ranger"]);
+        assert_eq!(n.kills(2_000).len(), 1, "and the kill counts");
     }
 }
