@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::combat::data_storage::{DataStorage, TargetCombatData};
+use crate::combat::data_storage::{DataStorage, PartyMember, TargetCombatData};
 use crate::combat::ping_tracker::PingTracker;
 use crate::entity::details_context::*;
 use crate::entity::dps_data::DpsData;
@@ -18,6 +18,27 @@ const PARTY_ROW_ID_BASE: i32 = 90_000_000;
 /// A death this long after a fight's last hit still belongs to it: in a
 /// wipe the last of the party can fall after the boss's last damage.
 const DEATH_GRACE_MS: i64 = 5_000;
+
+/// The roster is of a party you are no longer in: others fight with you, and
+/// nobody on the roster but you does. Going from a finder party straight into
+/// an open-world one sends neither a new roster nor a "party left", so the
+/// old party's placeholder rows sat under the new one's (2026-10-19, Thamon:
+/// five fighting, three with 0 from the Vakron run before).
+fn roster_outdated(dps_data: &DpsData, roster: &HashMap<String, PartyMember>) -> bool {
+    let local = dps_data.local_player_id;
+    let mut strangers = false;
+    for (&id, d) in &dps_data.map {
+        let name = d.nickname.trim();
+        if local == Some(i64::from(id)) || name.is_empty() || name == id.to_string() {
+            continue;
+        }
+        if roster.keys().any(|n| n.trim() == name) {
+            return false;
+        }
+        strangers = true;
+    }
+    strangers
+}
 
 /// The local player's ids (theirs and their summons'), the party's names,
 /// and what resolves an actor to a name: what `DpsCalculator::fight_is_ours`
@@ -652,7 +673,7 @@ impl DpsCalculator {
             return;
         }
         let party_members = self.data_storage.get_party_members();
-        if party_members.is_empty() {
+        if party_members.is_empty() || roster_outdated(dps_data, &party_members) {
             return;
         }
         let present: HashSet<String> = dps_data
@@ -2374,5 +2395,28 @@ mod tests {
         assert_eq!(shown.map[&2259].amount, 500.0);
         storage.append_damage(hit(2259, 50_000, 140_000));
         assert_eq!(calc.get_dps().detail_target_ids, vec![50_000, 60_000]);
+    }
+
+    #[test]
+    fn an_old_roster_gets_no_rows_once_others_fight_without_it() {
+        let row = |name: &str| PersonalData::new(name.to_string());
+        let roster: HashMap<String, PartyMember> = ["Bradcrit", "Sakame", "sooz"]
+            .into_iter()
+            .map(|n| (n.to_string(), PartyMember::default()))
+            .collect();
+        let mut view = DpsData::new();
+        view.local_player_id = Some(7070);
+        view.map.insert(7070, row("Bradcrit"));
+        // Only you so far, or someone not yet named: the roster stands.
+        assert!(!roster_outdated(&view, &roster));
+        view.map.insert(4100, row("4100"));
+        assert!(!roster_outdated(&view, &roster));
+        // The new party fights, nobody of the old one: the roster is gone.
+        view.map.insert(4200, row("HolyMom"));
+        view.map.insert(4300, row("panadoL"));
+        assert!(roster_outdated(&view, &roster));
+        // One of the roster fights too: it is this party's.
+        view.map.insert(4400, row("sooz"));
+        assert!(!roster_outdated(&view, &roster));
     }
 }
