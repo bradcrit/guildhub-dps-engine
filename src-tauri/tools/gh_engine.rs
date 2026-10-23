@@ -80,9 +80,11 @@
 //! one kill can feed several pets; `petLevel` (`{"server","at","pet","level"}`)
 //! when a pet reaches a level (the game resets its souls to 0 then, and
 //! doesn't send this for every step). `pet` is the game's pet id (1001 …).
-//! `npcs` (`{"npcs":[{"npc","count"}]}`) on every change and once on
+//! `npcs` (`{"npcs":[{"npc","count"}],"target"}`) on every change and once on
 //! connecting: the living mobs in sight by NPC code, from their spawn until
 //! they die, despawn or a zone load — what the pet tracker farms nearby.
+//! `target` is the NPC code of the mob you fight (the one in sight you hit
+//! directly last, within TARGET_HIT_MS), else null.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -123,6 +125,8 @@ const DPS_RATE: Duration = Duration::from_millis(200);
 const SAVE_EVERY: Duration = Duration::from_secs(30);
 /// How often your character, Odyle energy and field boss kills are looked at.
 const SELF_RATE: Duration = Duration::from_secs(1);
+/// The mob you hit last counts as the one you fight for this long (`npcs`).
+const TARGET_HIT_MS: i64 = 15_000;
 /// How often field boss HP is looked at (as upstream's sender does).
 const BOSS_HP_EVERY: Duration = Duration::from_secs(3);
 /// A map read longer ago than this isn't passed on (waiting for the server).
@@ -240,7 +244,8 @@ impl Engine {
             .into_iter()
             .map(|(npc, count)| serde_json::json!({ "npc": npc, "count": count }))
             .collect();
-        serde_json::json!({ "npcs": npcs }).to_string()
+        let target = self.storage.my_target(TARGET_HIT_MS);
+        serde_json::json!({ "npcs": npcs, "target": target }).to_string()
     }
 
     /// The pet records ready to be passed on, oldest first, as (event, JSON):

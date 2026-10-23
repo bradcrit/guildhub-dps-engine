@@ -611,6 +611,8 @@ struct Inner {
     /// The mobs in sight: entity -> NPC code, from their spawn until they
     /// die, despawn or a zone load (`mobs_in_sight`).
     mobs_in_sight: HashMap<i32, i32>,
+    /// The mob in sight you hit directly last, and when (`my_target`).
+    my_last_hit: Option<(i32, i64)>,
     /// Power-scalar values observed per actor in its damage records. A summon
     /// inherits its owner's, so this links the two when no spawn packet (and
     /// therefore no `parent_key`) ever arrives — the case for a Cleric's Divine
@@ -803,6 +805,7 @@ impl DataStorage {
                 roster_dungeon_id: 0,
                 current_map_id: None,
                 mobs_in_sight: HashMap::new(),
+                my_last_hit: None,
                 actor_power_scalars: HashMap::new(),
                 hostile_target_ids: HashSet::new(),
                 dead_entity_ids: HashSet::new(),
@@ -942,6 +945,18 @@ impl DataStorage {
             *counts.entry(code).or_insert(0) += 1;
         }
         counts
+    }
+
+    /// The NPC code of the mob you are fighting: the one in sight you hit
+    /// directly last, at most `max_age_ms` ago — None once it died, left
+    /// sight or you stopped hitting it.
+    pub fn my_target(&self, max_age_ms: i64) -> Option<i32> {
+        let inner = self.inner.read();
+        let (entity, at) = inner.my_last_hit?;
+        if now_ms() - at > max_age_ms {
+            return None;
+        }
+        inner.mobs_in_sight.get(&entity).copied()
     }
 
     /// The map the last zone load named (`21 36`), None before one.
@@ -1763,6 +1778,10 @@ impl DataStorage {
         let resolved = summon_resolver::resolve(actor_id, &inner.summon_storage);
         if inner.known_player_ids.contains(&resolved) {
             inner.hostile_target_ids.insert(target_id);
+        }
+        // Your own direct hit (or your summon's) on a mob in sight: the one you fight (`my_target`).
+        if !pdp.is_dot() && inner.local_player_id == Some(resolved as i64) && inner.mobs_in_sight.contains_key(&target_id) {
+            inner.my_last_hit = Some((target_id, now_ms()));
         }
 
         // Track actor job
