@@ -283,6 +283,10 @@ impl StreamProcessor {
         self.parse_zone_change_packet(packet);
         self.parse_map_load_packet(packet);
         self.parse_nearby_player_packet(packet);
+        // Where you and the mobs are (the pet tracker's distances).
+        if let Some(spotted) = crate::capture::positions::parse(packet) {
+            self.data_storage.note_spotted(spotted);
+        }
         // The field bosses on a map the player opened (boss timers).
         if let Some(map) = crate::capture::boss_map::parse(packet, crate::clock::now_ms()) {
             self.data_storage.note_boss_map(map);

@@ -84,7 +84,10 @@
 //! connecting: the living mobs in sight by NPC code, from their spawn until
 //! they die, despawn or a zone load — what the pet tracker farms nearby.
 //! `target` is the NPC code of the mob you fight (the one in sight you hit
-//! directly last, within TARGET_HIT_MS), else null.
+//! directly last, within TARGET_HIT_MS), else null. Each npc has `metres`, how
+//! far the closest of them is from you, while your spot is known and at most
+//! SELF_POS_MAX_AGE_MS old (`capture::positions`), else null; `posAge` (ms)
+//! is how old your spot is (null: none yet).
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -127,6 +130,8 @@ const SAVE_EVERY: Duration = Duration::from_secs(30);
 const SELF_RATE: Duration = Duration::from_secs(1);
 /// The mob you hit last counts as the one you fight for this long (`npcs`).
 const TARGET_HIT_MS: i64 = 15_000;
+/// Distances (`npcs`) from your spot while it is at most this old.
+const SELF_POS_MAX_AGE_MS: i64 = 60_000;
 /// How often field boss HP is looked at (as upstream's sender does).
 const BOSS_HP_EVERY: Duration = Duration::from_secs(3);
 /// A map read longer ago than this isn't passed on (waiting for the server).
@@ -240,12 +245,14 @@ impl Engine {
     fn npcs_json(&self) -> String {
         let npcs: Vec<_> = self
             .storage
-            .mobs_in_sight()
+            .mobs_in_sight(SELF_POS_MAX_AGE_MS)
             .into_iter()
-            .map(|(npc, count)| serde_json::json!({ "npc": npc, "count": count }))
+            .map(|(npc, (count, metres))| serde_json::json!({ "npc": npc, "count": count, "metres": metres.map(|m| m.round() as u32) }))
             .collect();
         let target = self.storage.my_target(TARGET_HIT_MS);
-        serde_json::json!({ "npcs": npcs, "target": target }).to_string()
+        // In whole seconds, so the event isn't new every second for nothing.
+        let pos_age = self.storage.self_position().map(|(_, age)| age / 1000 * 1000);
+        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age }).to_string()
     }
 
     /// The pet records ready to be passed on, oldest first, as (event, JSON):

@@ -9,6 +9,7 @@ use crate::capture::game_lists::{EntryCount, ListUpdate};
 use crate::combat::nearby_players::{DeathRecap, KillRecord, NearbyPlayer, NearbyPlayers};
 use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow};
 
+use crate::capture::positions::{Position, Spotted};
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
 use crate::entity::special_damage::SpecialDamage;
@@ -613,6 +614,11 @@ struct Inner {
     mobs_in_sight: HashMap<i32, i32>,
     /// The mob in sight you hit directly last, and when (`my_target`).
     my_last_hit: Option<(i32, i64)>,
+    /// Your last known spot and when it was told (`capture::positions`).
+    self_position: Option<(Position, i64)>,
+    /// The last known spot of the other entities in sight, until they die,
+    /// despawn or a zone load.
+    entity_positions: HashMap<i32, Position>,
     /// Power-scalar values observed per actor in its damage records. A summon
     /// inherits its owner's, so this links the two when no spawn packet (and
     /// therefore no `parent_key`) ever arrives — the case for a Cleric's Divine
@@ -806,6 +812,8 @@ impl DataStorage {
                 current_map_id: None,
                 mobs_in_sight: HashMap::new(),
                 my_last_hit: None,
+                self_position: None,
+                entity_positions: HashMap::new(),
                 actor_power_scalars: HashMap::new(),
                 hostile_target_ids: HashSet::new(),
                 dead_entity_ids: HashSet::new(),
@@ -931,6 +939,7 @@ impl DataStorage {
 
     pub fn note_nearby_despawn(&self, id: i32) {
         self.nearby.lock().despawn(id);
+        self.inner.write().entity_positions.remove(&id);
     }
 
     /// Your faction, from your self record.
@@ -938,13 +947,42 @@ impl DataStorage {
         self.nearby.lock().set_self_faction(faction);
     }
 
-    /// The living mobs in sight by NPC code: how many of each.
-    pub fn mobs_in_sight(&self) -> std::collections::BTreeMap<i32, u32> {
-        let mut counts = std::collections::BTreeMap::new();
-        for &code in self.inner.read().mobs_in_sight.values() {
-            *counts.entry(code).or_insert(0) += 1;
+    /// The living mobs in sight by NPC code: how many of each, and how far
+    /// the closest is from you (metres) — while your spot is at most
+    /// `self_max_age_ms` old and its spot known.
+    pub fn mobs_in_sight(&self, self_max_age_ms: i64) -> std::collections::BTreeMap<i32, (u32, Option<f32>)> {
+        let inner = self.inner.read();
+        let me = inner.self_position.filter(|(_, at)| now_ms() - at <= self_max_age_ms).map(|(pos, _)| pos);
+        let mut mobs = std::collections::BTreeMap::new();
+        for (entity, &code) in &inner.mobs_in_sight {
+            let (count, nearest) = mobs.entry(code).or_insert((0, None::<f32>));
+            *count += 1;
+            if let (Some(me), Some(pos)) = (me, inner.entity_positions.get(entity)) {
+                let metres = me.metres_to(pos);
+                *nearest = Some(nearest.map_or(metres, |n| n.min(metres)));
+            }
         }
-        counts
+        mobs
+    }
+
+    /// A spot the game told of (`capture::positions`): yours, or another entity's.
+    pub fn note_spotted(&self, spotted: Spotted) {
+        let mut inner = self.inner.write();
+        let me = inner.local_player_id;
+        match spotted {
+            Spotted::You(pos) => inner.self_position = Some((pos, now_ms())),
+            Spotted::Entity(id, pos) if me == Some(id as i64) => inner.self_position = Some((pos, now_ms())),
+            Spotted::Entity(id, pos) => {
+                if !inner.dead_entity_ids.contains(&id) {
+                    inner.entity_positions.insert(id, pos);
+                }
+            }
+        }
+    }
+
+    /// Your last known spot and how long ago it was told (ms).
+    pub fn self_position(&self) -> Option<(Position, i64)> {
+        self.inner.read().self_position.map(|(pos, at)| (pos, now_ms() - at))
     }
 
     /// The NPC code of the mob you are fighting: the one in sight you hit
@@ -1957,6 +1995,7 @@ impl DataStorage {
         self.stagger.lock().note_gone(entity_id, now_ms(), true);
         inner.dead_entity_ids.insert(entity_id);
         inner.mobs_in_sight.remove(&entity_id);
+        inner.entity_positions.remove(&entity_id);
         inner.hp_floored_ids.remove(&entity_id);
         inner.death_log.push_back((entity_id, now_ms(), None));
         while inner.death_log.len() > MAX_DEATHS {
@@ -2069,6 +2108,7 @@ impl DataStorage {
         self.stagger.lock().note_gone(id, now_ms(), false);
         let mut inner = self.inner.write();
         inner.mobs_in_sight.remove(&id);
+        inner.entity_positions.remove(&id);
         if inner.summon_storage.contains_key(&id) {
             inner.despawned_summon_ids.insert(id);
         }
@@ -2299,6 +2339,7 @@ impl DataStorage {
         inner.loot_identity.scope_counts.clear();
         let from = inner.current_map_id.replace(map_id);
         inner.mobs_in_sight.clear();
+        inner.entity_positions.clear();
         inner.zone_generation += 1;
         if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
             inner.instance_generation += 1;
