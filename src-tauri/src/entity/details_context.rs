@@ -1,5 +1,52 @@
 use serde::{Deserialize, Serialize};
 
+use crate::entity::special_damage::SpecialDamage;
+
+/// How a player met the monsters' hits they took, from each hit's flags (the
+/// game's damage plotter), for a tank's or a shield class's rates (Megashield,
+/// 2026-10-22). A Perfect Block (0x40) comes with the Shield Block or Parry it
+/// perfected: counted here as a perfect block or a perfect parry, and in its
+/// shield block or parry too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceivedHits {
+    #[serde(default)]
+    pub shield_block: i32,
+    #[serde(default)]
+    pub perfect_block: i32,
+    #[serde(default)]
+    pub parry: i32,
+    #[serde(default)]
+    pub perfect_parry: i32,
+    #[serde(default)]
+    pub iron_wall: i32,
+}
+
+impl ReceivedHits {
+    /// One hit taken, by its flags.
+    pub fn note(&mut self, specials: &[SpecialDamage]) {
+        let has = |s: SpecialDamage| specials.contains(&s);
+        let perfect = has(SpecialDamage::PerfectBlock);
+        if has(SpecialDamage::ShieldBlock) {
+            self.shield_block += 1;
+            self.perfect_block += i32::from(perfect);
+        }
+        if has(SpecialDamage::Parry) {
+            self.parry += 1;
+            self.perfect_parry += i32::from(perfect);
+        }
+        self.iron_wall += i32::from(has(SpecialDamage::IronWall));
+    }
+
+    pub fn add(&mut self, other: ReceivedHits) {
+        self.shield_block += other.shield_block;
+        self.perfect_block += other.perfect_block;
+        self.parry += other.parry;
+        self.perfect_parry += other.perfect_parry;
+        self.iron_wall += other.iron_wall;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailsActorSummary {
@@ -18,6 +65,10 @@ pub struct DetailsActorSummary {
     pub damage_received: i64,
     #[serde(default)]
     pub hits_received: i32,
+    /// How those hits were met. None in fights recorded before the meter
+    /// counted it (2.0.76), so "none blocked" isn't claimed for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received: Option<ReceivedHits>,
     /// Roster id for this actor, or 0 when the party roster never named them
     /// (solo play, or a player who joined before the roster packet arrived).
     ///
@@ -178,5 +229,32 @@ mod tests {
         assert_eq!((row.parry, row.regeneration, row.perfect_block, row.shield_block, row.miss), (1, 5, 6, 0, 0));
         let json = serde_json::to_string(&row).unwrap();
         assert!(json.contains(r#""regeneration":5"#) && json.contains(r#""perfectBlock":6"#) && !json.contains("smite"));
+    }
+}
+
+#[cfg(test)]
+mod received_tests {
+    use super::ReceivedHits;
+    use crate::entity::special_damage::from_hit_flags;
+
+    /// The flags of hits taken, as the game sends them (stream_processor's
+    /// `hit_flags_of_received_hits`): a perfect block counts with what it
+    /// perfected.
+    #[test]
+    fn hits_taken_are_counted_by_how_they_were_met() {
+        let mut r = ReceivedHits::default();
+        for flags in [0x01, 0x41, 0x02, 0x42, 0x10, 0x00, 0x20] {
+            r.note(&from_hit_flags(flags));
+        }
+        assert_eq!(r, ReceivedHits { shield_block: 2, perfect_block: 1, parry: 2, perfect_parry: 1, iron_wall: 1 });
+    }
+
+    /// A record from before the meter counted them keeps no counts, rather
+    /// than counts of 0.
+    #[test]
+    fn older_records_have_none() {
+        let old: super::DetailsActorSummary = serde_json::from_str(r#"{"actorId":1,"nickname":"A","damageReceived":5,"hitsReceived":2}"#).unwrap();
+        assert_eq!(old.received, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("received\":"));
     }
 }

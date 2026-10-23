@@ -7,7 +7,17 @@
       "ariaDps": "Mostrando DPS",
       "ariaDamage": "Mostrando dano total",
       "both": "AMBOS",
-      "ariaBoth": "Mostrando DPS e dano total"
+      "ariaBoth": "Mostrando DPS e dano total",
+      "hps": "HPS",
+      "totalHeal": "HEAL",
+      "stagger": "ATORD",
+      "ariaHps": "Mostrando cura por segundo",
+      "ariaHeal": "Mostrando cura total",
+      "ariaStagger": "Mostrando o atordoamento causado à barra do chefe"
+    },
+    "updates": {
+      "meter": "A2Tools DPS Meter {version} está disponível",
+      "plugins": "Atualizações de plugins: {list}"
     }
   },
   "details": {
@@ -117,7 +127,12 @@
       "deaths": "Mortes",
       "avgDps": "DPS médio",
       "peakDps": "DPS máximo",
-      "peakDpsTip": "O maior DPS em qualquer trecho de 5 segundos da luta"
+      "peakDpsTip": "O maior DPS em qualquer trecho de 5 segundos da luta",
+      "blockedTaken": "Bloqueado (Perfeito)",
+      "blockedTakenTip": "Dos golpes recebidos: bloqueados com escudo e, entre parênteses, bloqueados perfeitamente",
+      "parriedTaken": "Aparado (Perfeito)",
+      "parriedTakenTip": "Dos golpes recebidos: aparados e, entre parênteses, aparados perfeitamente",
+      "parryRateTip": "Dos seus golpes: a parte que o alvo aparou"
     },
     "titleFor": "de",
     "titleVs": "contra",
@@ -168,7 +183,40 @@
         "replaced": "Substituído por um novo nível"
       }
     },
+    "stagger": {
+      "title": "Atordoamento",
+      "unknownActor": "Desconhecido",
+      "unknownSkill": "Habilidade desconhecida",
+      "older": "Sem dados de atordoamento para este combate (gravado por uma versão anterior).",
+      "loading": "Carregando...",
+      "none": "Nenhuma barra de atordoamento foi reduzida neste combate.",
+      "incomplete": "O início não foi visto: falta o atordoamento anterior.",
+      "ambiguous": "Pode ser de outro jogador: outra pessoa acertou ao mesmo tempo.",
+      "ambiguousCount": "{n} golpe(s) podem ser de outro jogador.",
+      "value": "{n} de atordoamento",
+      "ended": {
+        "break": "Quebrada após {secs} s",
+        "reset": "Falhou: restavam {missing} de {max}",
+        "death": "Derrotado antes da quebra: restavam {missing} de {max}",
+        "despawn": "Sumiu antes da quebra: restavam {missing} de {max}",
+        "fightEnd": "Ainda aberta no fim do combate: restavam {missing} de {max}"
+      }
+    },
     "fightTimeline": "Linha do tempo da luta",
+    "replay": {
+      "label": "Replay",
+      "title": "Replay",
+      "play": "Reproduzir replay",
+      "pause": "Pausar",
+      "speed": "Velocidade de reprodução",
+      "position": "Posição do replay",
+      "positionText": "{at} de {total}",
+      "exit": "Encerrar replay (mostrar a luta inteira)",
+      "wholeFightNote": "Dano recebido, Mín / Máx e buffs: luta inteira.",
+      "moreSkills": "+{n} a mais, visíveis ao pausar",
+      "noHealTiming": "A cura desta luta não tem horários (salva por uma versão anterior): mostra a luta inteira.",
+      "unavailable": "Esta luta foi salva sem os horários dos acertos, por isso não pode ser reproduzida"
+    },
     "casts": "Conjurações",
     "resize": "Arraste para redimensionar",
     "healTimingNote": "Esta luta não tem tempos de cura (gravada por uma versão anterior).",
@@ -254,10 +302,14 @@
     "showOdyle": "Mostrar energia de Odyle",
     "odyleEnergy": "Energia de Odyle",
     "showTtk": "Mostrar tempo estimado para matar",
+    "showHealModes": "Mostrar cura no botão DPS/DMG",
+    "showStaggerMode": "Mostrar atordoamento no botão DPS/DMG",
     "showTotalDps": "Mostrar total do grupo",
     "roundDps": "Abreviar DPS em milhares (13k)",
     "showDpsSuffix": "Adicionar /s ao DPS",
     "autoHideMeter": "Ocultar quando o AION2 não estiver em foco",
+    "hideWhenGameClosed": "Ocultar enquanto o AION2 estiver fechado",
+    "hideWhenSolo": "Mostrar só em grupo",
     "showSuspendBtn": "Mostrar botão de pausar captura",
     "showLockBtn": "Mostrar botão de bloqueio (clique através)",
     "playerLimit": {
@@ -265,12 +317,15 @@
     },
     "partyPresence": "Mostrar usuários do A2Tools no meu grupo",
     "shareBossTimers": "Compartilhar timers de chefes de campo",
+    "shareSupplyRequests": "Compartilhar pedidos de suprimentos",
     "debugLogging": "Registro de depuração",
     "quit": "Sair",
     "discord": {
       "title": "Discord",
       "activity": "Mostrar no Discord o que estou jogando",
-      "activityHint": "Enquanto o AION2 estiver aberto, seu status do Discord mostra o nome do seu personagem, classe, nível e servidor, e o chefe que você está enfrentando. Isso passa pelo aplicativo do Discord neste computador; não é preciso conta."
+      "activityHint": "Enquanto o AION2 estiver aberto, seu status do Discord mostra o nome do seu personagem, classe, nível e servidor, e o chefe que você está enfrentando. Isso passa pelo aplicativo do Discord neste computador; não é preciso conta. Com um Número no Discord escolhido, ele também mostra seu poder de combate ou sua pontuação de equipamento.",
+      "stat": "Número no Discord",
+      "statHint": "O número que seu status do Discord mostra depois do seu nível."
     },
     "streamOverlay": {
       "title": "Transmissão",
@@ -292,6 +347,14 @@
       "displayNamePlaceholder": "Nome do seu personagem"
     },
     "version": "Versão",
+    "update": {
+      "check": "Procurar atualizações",
+      "checking": "Verificando…",
+      "current": "Atualizado",
+      "installing": "Atualizando…",
+      "available": "A {version} saiu",
+      "failed": "Não foi possível verificar. Tente mais tarde."
+    },
     "theme": {
       "label": "Tema de cores",
       "options": {
@@ -312,6 +375,44 @@
         "varian": "Varian"
       }
     },
+    "settingsTheme": {
+      "label": "Cores das configurações",
+      "tip": "As cores desta janela de configurações. O medidor mantém o próprio tema.",
+      "options": {
+        "meter": "Tema do medidor",
+        "midnight": "Meia-noite",
+        "graphite": "Grafite",
+        "violet": "Violeta",
+        "forest": "Floresta",
+        "crimson": "Carmesim",
+        "ocean": "Oceano",
+        "sapphire": "Safira",
+        "indigo": "Índigo",
+        "rose": "Rosa",
+        "sunset": "Pôr do sol",
+        "amber": "Âmbar",
+        "copper": "Cobre",
+        "lime": "Lima",
+        "ice": "Gelo",
+        "slate": "Ardósia",
+        "onyx": "Ônix"
+      }
+    },
+    "font": {
+      "label": "Fonte",
+      "tip": "A fonte do medidor, das configurações, do histórico de combates e dos detalhes.",
+      "options": {
+        "meter": "Fonte do medidor",
+        "system": "Fonte do sistema",
+        "inter": "Inter",
+        "exo2": "Exo 2",
+        "oxanium": "Oxanium",
+        "jetbrains": "JetBrains Mono (números de mesma largura)",
+        "atkinson": "Atkinson Hyperlegible (letras e números nítidos)",
+        "lexend": "Lexend (leitura mais fácil)",
+        "andika": "Andika (para dislexia)"
+      }
+    },
     "textureOffset": "Deslocar texturas",
     "barTexture": {
       "label": "Textura das barras",
@@ -329,17 +430,28 @@
         "aura": "Aura"
       }
     },
+    "appearanceGroups": {
+      "general": "Geral",
+      "colours": "Cores",
+      "layout": "Layout",
+      "opacity": "Opacidade"
+    },
     "language": {
       "label": "Idioma"
     },
     "windowOpacity": {
       "label": "Opacidade do fundo"
     },
+    "titleOpacity": {
+      "label": "Opacidade da barra de título"
+    },
     "meterOpacity": {
       "label": "Opacidade das barras"
     },
     "barPreview": "Pré-visualização",
-    "meterSaturation": {"label": "Intensidade da cor"},
+    "meterSaturation": {
+      "label": "Intensidade da cor"
+    },
     "bossNameSize": {
       "label": "Tamanho do título"
     },
@@ -377,8 +489,13 @@
       "reload": "Recarregar dados",
       "toggle": "Mostrar/ocultar janela",
       "pressKeys": "Pressione as teclas...",
-      "needModifiers": "São necessários 2+ modificadores",
-      "lock": "Bloquear/desbloquear sobreposição"
+      "tooManyKeys": "No máximo 3 teclas",
+      "plugins": "Trazer de volta as janelas de plugins",
+      "notSet": "Não definido",
+      "restoreDefaults": "Restaurar padrões",
+      "hint": "Clique num atalho e pressione de 1 a 3 teclas. Esc cancela.",
+      "lock": "Bloquear/desbloquear sobreposição",
+      "openDesktop": "Atalhos da área de trabalho"
     },
     "defaultMeterMode": {
       "label": "Modo de alvo ao iniciar"
@@ -437,11 +554,14 @@
       "autoHideMeter": "O medidor some enquanto outra janela está na frente do jogo e volta com ele.",
       "detailsMonitor": "Abre a janela de detalhes na tela escolhida e a mantém lá.",
       "showTtk": "Ao lado do cronômetro, uma estimativa de quanto durará toda a luta contra o chefe.",
+      "showHealModes": "O botão DPS/DMG do medidor também alterna para cura por segundo e cura total.",
+      "showStaggerMode": "O botão DPS/DMG do medidor também mostra quanto cada jogador reduziu a barra de atordoamento do chefe.",
       "showTotalDps": "Uma barra sob as linhas com o DPS e o dano de todo o grupo.",
       "roundDps": "13.412 aparece como 13k.",
       "showSuspendBtn": "Um botão no medidor que para de ler o tráfego do jogo até você apertar de novo.",
       "showLockBtn": "Um botão que faz o medidor ignorar o mouse, para os cliques irem ao jogo.",
       "windowOpacity": "Quão transparente é o fundo do medidor. Barras e texto não mudam.",
+      "titleOpacity": "O quanto a barra de título do medidor é transparente, separada do fundo abaixo. Até você mexer, ela segue o fundo.",
       "meterOpacity": "Quão sólidas são as barras coloridas de dano.",
       "meterSaturation": "A intensidade das cores das barras: menor para mais suave, maior para mais vívido.",
       "bossNameSize": "Tamanho do nome do chefe ou alvo acima das barras.",
@@ -453,10 +573,15 @@
       "updateRate": "Com que frequência os números do medidor atualizam. Mais rápido mostra os golpes antes, mas usa mais CPU.",
       "partyPresence": "Membros do grupo que também usam o A2Tools veem uma pequena etiqueta A2 ao lado do seu nome, e você vê a deles. Qualquer pessoa do grupo usando o A2Tools pode vê-la e saberá que você usa um medidor de terceiros. Só são enviados hashes de nomes de personagem e servidores.",
       "shareBossTimers": "Compartilha os timers de chefes de campo com outros jogadores pelo a2tools.app (e seu parceiro Aion 2 Timers): os chefes do seu mapa ao abri-lo e os chefes de campo que você vê morrer, e o PV deles enquanto você luta contra eles. Só o servidor, os chefes, os horários e o PV são enviados.",
+      "shareSupplyRequests": "Compartilha os quadros de pedidos de suprimentos do seu servidor com o Profiteer do a2tools.app quando mudam (após cada reset): o servidor, os quadros e seus pedidos. Nada sobre seu personagem ou progresso é enviado.",
       "debugLogging": "Grava um registro de diagnóstico que o desenvolvedor pode usar para encontrar problemas.",
       "saveRawPackets": "Grava o tráfego bruto do jogo para relatórios de erro. O registro de depuração liga junto.",
       "globalHotkeys": "As teclas abaixo funcionam em qualquer lugar, mesmo com o jogo em primeiro plano. Desligado, ficam livres para outros programas. No Linux, o ambiente de trabalho as registra e pode pedir que você as aprove.",
-      "pluginDevMode": "Carrega plugins de pastas deste computador, para criá-los e testá-los. Eles não são revisados, então carregue apenas plugins em que você confia."
+      "pluginDevMode": "Carrega plugins de pastas deste computador, para criá-los e testá-los. Eles não são revisados, então carregue apenas plugins em que você confia.",
+      "showMeter": "Desligado: só os seus plugins aparecem. O medidor continua registrando combates e enviando em segundo plano. Mostre-o de novo aqui, com o atalho de mostrar/ocultar ou com o botão do medidor numa janela de plugin.",
+      "clearOnZone": "Quando o último combate sai do medidor após a mudança de zona. Todo combate fica no Histórico de qualquer forma.",
+      "hideWhenGameClosed": "O medidor se oculta enquanto o jogo não está aberto e volta quando ele inicia.",
+      "hideWhenSolo": "O medidor se oculta enquanto você não está em um grupo e volta quando você entra em um. O atalho de mostrar/ocultar ainda o exibe."
     },
     "globalHotkeys": "Usar atalhos de teclado",
     "hotkeyConsent": {
@@ -468,6 +593,8 @@
     },
     "keybindTaken": "Outro programa já usa essas teclas. Escolha outras.",
     "keybindShared": "Outra ação usa essas teclas. Escolha outras.",
+    "keybindUnset": "Sua área de trabalho ainda não atribuiu uma tecla a isto. Defina em Atalhos da área de trabalho.",
+    "keybindAssigned": "Sua área de trabalho usa {key}. Altere em Atalhos da área de trabalho.",
     "plugins": {
       "title": "Plugins",
       "devMode": "Modo de desenvolvedor de plugins",
@@ -505,12 +632,28 @@
       "permStorage": "Salvar os próprios dados neste computador",
       "permNotify": "Mostrar mensagens curtas na sua janela",
       "permWindow": "Mostrar e ocultar a própria janela, sem tirar o foco do jogo",
+      "permWidgets": "Mostrar janelas pequenas próprias, que você pode mover para qualquer lugar e travar",
       "permBossTimers": "Ler os timers de chefes de campo que os jogadores compartilham pelo a2tools.app",
       "permCharacter": "Ver nome, servidor, classe e nível do seu personagem",
       "permDecoder": "Ler seus próprios dados do jogo: {name}",
       "permNone": "Nada além de mostrar sua janela",
       "enabled": "Ativado",
-      "enabledTip": "Ligado: inicia com o medidor. Desligado: continua instalado, mas não é executado."
+      "enabledTip": "Ligado: inicia com o medidor. Desligado: continua instalado, mas não é executado.",
+      "showMeter": "Mostrar o medidor de DPS",
+      "hideClosed": "Ocultar enquanto o AION2 estiver fechado",
+      "hideUnfocused": "Ocultar quando o AION2 não estiver em foco",
+      "inDock": "No dock de plugins (desligado: janela própria)",
+      "search": "Pesquisar",
+      "noMatch": "Nenhum plugin corresponde.",
+      "permsTitle": "Ele pode:"
+    },
+    "clearOnZone": {
+      "label": "Limpar o medidor",
+      "options": {
+        "instance": "Ao entrar ou sair de uma masmorra",
+        "any": "Em qualquer mudança de zona",
+        "never": "Nunca (manter o último combate)"
+      }
     }
   },
   "support": {
@@ -550,7 +693,8 @@
   "meter": {
     "identifyingPlayer": "#{id}",
     "a2toolsUser": "Usa o A2Tools",
-    "dpsSuffix": "/s"
+    "dpsSuffix": "/s",
+    "others": "Outros"
   },
   "skills": {
     "fallback": "Habilidade {code}",
@@ -598,6 +742,8 @@
   },
   "presence": {
     "level": "Nv. {level}",
+    "combatPower": "CP {cp}",
+    "gearScore": "GS {gs}",
     "fighting": "Enfrentando {boss}",
     "inGame": "Em jogo",
     "elyos": "Elyos",
@@ -640,5 +786,22 @@
     "alsoAsks": "A nova versão também pede para:",
     "updateNow": "Atualizar agora?",
     "failed": "Não foi possível atualizar:"
+  },
+  "pluginDock": {
+    "tabs": "Mostrar os plugins em abas",
+    "stack": "Empilhar os plugins",
+    "fold": "Recolher o dock",
+    "unfold": "Expandir o dock",
+    "hideControls": "Ocultar os controles",
+    "showControls": "Mostrar os controles",
+    "popOut": "Abrir em janela própria",
+    "pluginSettings": "Configurações de plugins",
+    "hide": "Ocultar (o plugin continua rodando)",
+    "close": "Ocultar o dock (os plugins continuam rodando)",
+    "hideMeter": "Ocultar o medidor de DPS",
+    "showMeter": "Mostrar o medidor de DPS",
+    "settings": "Configurações do medidor",
+    "opacity": "Opacidade do fundo",
+    "failed": "Este plugin não pôde iniciar: {error}"
   }
 }

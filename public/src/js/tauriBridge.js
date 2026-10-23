@@ -399,11 +399,16 @@
       }
     },
 
-    // The live fight's buffs and debuffs on a target: { targetId, startTimeMs,
-    // durationMs, buffs }, or null.
+    // The live fight's buffs and debuffs on a target, and the stagger windows
+    // of every target Details shows with it: { targetId, startTimeMs,
+    // durationMs, buffs, stagger }, or null.
     async getFightBuffs(targetId) {
       try {
-        return await invoke("get_fight_buffs", { targetId: Number(targetId) });
+        // The targets Details shows together, as getBattleDetail reads them.
+        const dps = cachedDpsJson ? JSON.parse(cachedDpsJson) : null;
+        const targetIds = [...new Set((Array.isArray(dps?.detailTargetIds)
+          ? dps.detailTargetIds : [dps?.targetId]).map(Number).filter((id) => id > 0))];
+        return await invoke("get_fight_buffs", { targetId: Number(targetId), targetIds });
       } catch (e) {
         console.error("[A2Tools] getFightBuffs error:", e);
         return null;
@@ -752,7 +757,26 @@
     getCurrentLockHotKey() {
       return this.getSetting("dpsMeter.lockHotkey") || "Ctrl+Alt+L";
     },
-    // Each key's registration: { reload|toggle|lock: "ok" | "taken" }.
+    // No default: "" until one is set.
+    getCurrentPluginWindowsHotKey() {
+      return this.getSetting("dpsMeter.pluginWindowsHotkey") || "";
+    },
+    setPluginWindowsHotkey(mods, vk) {
+      this.setSetting("dpsMeter.pluginWindowsHotkey", this._buildHotkeyLabel(mods, vk));
+    },
+    // Every keybind back to its default (app.rs, HOTKEY_DEFAULTS).
+    // Linux: the desktop's own shortcut settings (KDE, GNOME, or the portal's).
+    openDesktopShortcuts() {
+      return invoke("open_desktop_shortcuts");
+    },
+    restoreDefaultHotkeys() {
+      this.setSetting("dpsMeter.hotkey", "Ctrl+Alt+R");
+      this.setSetting("dpsMeter.toggleWindowHotkey", "Ctrl+Alt+Up");
+      this.setSetting("dpsMeter.lockHotkey", "Ctrl+Alt+L");
+      this.setSetting("dpsMeter.pluginWindowsHotkey", "");
+    },
+    // Each key's registration: { <key>: "ok" | "taken" | "unset", and on
+    // Linux "<key>.assigned": the key the desktop gave it }.
     getHotkeyStatus() {
       return invoke("get_hotkey_status").catch(() => ({}));
     },
@@ -763,6 +787,14 @@
     // backend can keep the lock button clickable here.
     overlayLockSupported() {
       return invoke("overlay_lock_supported").catch(() => false);
+    },
+    // The pointer in this window, in CSS pixels, or null where it can't be
+    // read (a native Wayland window).
+    async pointerInWindow() {
+      const at = await invoke("pointer_in_window").catch(() => null);
+      if (!Array.isArray(at)) return null;
+      const scale = window.devicePixelRatio || 1;
+      return { x: at[0] / scale, y: at[1] / scale };
     },
     setOverlayLocked(locked) {
       invoke("set_overlay_locked", { locked: !!locked }).catch(() => {});
@@ -787,6 +819,7 @@
       if (mods & 0x02) parts.push("Ctrl");
       if (mods & 0x01) parts.push("Alt");
       if (mods & 0x04) parts.push("Shift");
+      if (mods & 0x08) parts.push("Win");
       // Map common VK codes to names
       const vkNames = {
         0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x1B: "Esc",
@@ -855,8 +888,15 @@
       return invoke("load_fight", { id }).then((r) => JSON.stringify(r)).catch(() => null);
     },
 
+    // Asked by the account line and the supporter check together on every
+    // window's start: one request to the site answers both.
     accountStatus() {
-      return invoke("account_status");
+      if (!this._accountStatus) {
+        this._accountStatus = invoke("account_status").finally(() => {
+          this._accountStatus = null;
+        });
+      }
+      return this._accountStatus;
     },
 
     discordActivityAvailable() {
@@ -935,6 +975,16 @@
         }
       }
       return null;
+    },
+    // The cached icon, once read from disk (null when there is none).
+    readCachedIconAsync(key) {
+      if (!key) return Promise.resolve(null);
+      if (window._iconCache?.[key] !== undefined) return Promise.resolve(window._iconCache[key]);
+      return invoke("read_cached_icon", { key }).then((data) => {
+        if (!window._iconCache) window._iconCache = {};
+        window._iconCache[key] = data ?? null;
+        return data ?? null;
+      }).catch(() => null);
     },
     readCachedIcon(key) {
       // Synchronous read from Rust via cached map
@@ -1106,6 +1156,8 @@
           meter.style.width = style.width;
           meter.style.minHeight = style.height;
           meter.style.height = "";
+          // Kept across restarts (core.js bindResizeHandle).
+          if (!operation.cancel) window.dispatchEvent(new Event("meter-resized"));
         }
       }
       nativeResize = null;

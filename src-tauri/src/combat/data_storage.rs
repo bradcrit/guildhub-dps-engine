@@ -7,6 +7,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::capture::abnormal;
 use crate::capture::game_lists::{EntryCount, ListUpdate};
 use crate::combat::nearby_players::{DeathRecap, KillRecord, NearbyPlayer, NearbyPlayers};
+use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow};
 
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
@@ -296,6 +297,16 @@ pub struct LocalProfile {
     pub server_id: u16,
     pub class: Option<JobClass>,
     pub level: Option<u32>,
+    /// Equipment item level: your own entry in the party roster, else the last
+    /// self record's.
+    pub gear_score: Option<i32>,
+    /// Combat power, from the same two places.
+    pub combat_power: Option<i64>,
+}
+
+/// A value the self record gave, if it was for this character.
+fn stated_for<T: Copy>(stated: &Option<(String, T)>, me: Option<&str>) -> Option<T> {
+    stated.as_ref().filter(|(name, _)| Some(name.trim()) == me).map(|(_, v)| *v)
 }
 
 /// One entry of the party roster packet (`0x9702`). Keyed by character name,
@@ -336,6 +347,8 @@ pub struct ActorCombatData {
     pub regen: i64,
     pub damage_received: i64,
     pub hits_received: i32,
+    /// How the hits taken were met (shield blocks, parries...).
+    pub received: crate::entity::details_context::ReceivedHits,
     pub last_damage_time: i64,
     pub job: Option<JobClass>,
     /// Skills keyed by (raw_skill_code, is_dot)
@@ -350,6 +363,7 @@ impl ActorCombatData {
         self.regen += other.regen;
         self.damage_received += other.damage_received;
         self.hits_received += other.hits_received;
+        self.received.add(other.received);
         self.last_damage_time = self.last_damage_time.max(other.last_damage_time);
         self.job = self.job.or(other.job);
         for (key, skill) in other.skills {
@@ -369,6 +383,7 @@ impl ActorCombatData {
             regen: 0,
             damage_received: 0,
             hits_received: 0,
+            received: Default::default(),
             last_damage_time: 0,
             job: None,
             skills: HashMap::new(),
@@ -396,6 +411,7 @@ impl TargetCombatData {
                 regen: actor.regen,
                 damage_received: actor.damage_received,
                 hits_received: actor.hits_received,
+                received: actor.received,
                 last_damage_time: actor.last_damage_time,
                 job: actor.job,
                 skills: actor.skills.iter().map(|(&key, skill)| (key, skill.clone_light())).collect(),
@@ -438,6 +454,9 @@ pub struct BossEvent {
 pub enum BossEventKind {
     /// Killed at this moment (unix ms).
     Killed { at_ms: i64 },
+    /// Seen up: its spawn came, as it spawned or came into view (unix ms).
+    /// Only for the Abyss's cores, whose maps say nothing of them.
+    Seen { at_ms: i64 },
 }
 
 /// Unsent boss events kept at most (the sender drains them every second).
@@ -447,6 +466,8 @@ const MAX_BOSS_EVENTS: usize = 64;
 /// A field boss counts as being fought while its HP changed, or it took
 /// damage, this recently.
 const IN_COMBAT_MS: i64 = 10_000;
+/// The passive HP regen everyone gets ("Restore HP"), not a heal anyone cast.
+const PASSIVE_REGEN_SKILL: i32 = 1_900_001;
 /// While it is fought and its HP holds, the same HP goes again this often:
 /// the site takes a repeat as "still being fought" once a minute and ignores
 /// the rest. A change goes on the next pass (every 3 s), as always.
@@ -496,6 +517,10 @@ pub struct DataStorage {
     /// The players in sight, for the PvP view (`combat::nearby_players`).
     /// Its own lock, as `abnormals`.
     nearby: Mutex<NearbyPlayers>,
+    /// Stagger gauges and their windows (see `combat::stagger`). Its own
+    /// lock, as `abnormals`: fed by its own records, read when a fight is
+    /// saved.
+    stagger: Mutex<StaggerLog>,
 }
 
 /// The timeline and when it was last pruned.
@@ -517,6 +542,10 @@ struct Inner {
     /// Changes when the party's members change, or it ends (see
     /// `party_generation`).
     party_generation: u64,
+    /// Counted at each map load (`zone_generation`), and at each one that
+    /// enters or leaves an instance (`instance_generation`).
+    zone_generation: u64,
+    instance_generation: u64,
     /// When the party last ended (`end_party`), clock ms; `NEVER_MS` if it
     /// has not.
     party_ended_at_ms: i64,
@@ -553,6 +582,12 @@ struct Inner {
     low_id_entities: HashSet<i32>,
     /// Party roster from the `0x9702` packet, keyed by character name.
     party_members: HashMap<String, PartyMember>,
+    /// Members who have left the roster, as it last had them. A fight is saved
+    /// again every 30 s until the next one, and members who leave the party
+    /// before its last save would otherwise go out with no level, gear score
+    /// or combat power (Vakron, 2026-10-17: three of five, who left at the
+    /// end of the run). See `fight_roster`.
+    former_party_members: HashMap<String, PartyMember>,
     /// When the last roster arrived, and whether its members who have not
     /// fought should still get rows. See `party_placeholders_wanted`.
     party_roster_at_ms: i64,
@@ -590,6 +625,16 @@ struct Inner {
     /// and a count that moves with each, for `boss_maps_since`.
     boss_maps: Vec<crate::capture::boss_map::BossMap>,
     boss_map_seq: u64,
+    /// Who holds each Abyss artifact, as last told (`capture::abyss_artifacts`):
+    /// each war and artifact replaced by its newer word. When it was told,
+    /// and a count that moves with each, for `abyss_artifacts_since`.
+    abyss_artifacts: crate::capture::abyss_artifacts::ArtifactState,
+    abyss_artifacts_seen_ms: i64,
+    abyss_artifacts_seq: u64,
+    /// The Supply Requests boards, as last told at login
+    /// (`capture::supply_requests`), and a count that moves with each.
+    supply_requests: Vec<crate::capture::supply_requests::Board>,
+    supply_requests_seq: u64,
     /// Entities whose max HP came from their spawn record, so a percentage of
     /// it can be trusted (a peak seen later may be below the real max).
     spawn_hp_ids: HashSet<i32>,
@@ -643,6 +688,8 @@ struct Inner {
     /// reports from them carry it for a2tools.app to tell the two apart
     /// (`boss_report::with_host`).
     game_host: Option<std::net::Ipv4Addr>,
+    /// See `note_host_server`.
+    host_server: u16,
 
     /// Odyle energy, (basic, charged), as the game last sent it. See
     /// `StreamProcessor::parse_odyle_energy_packet`.
@@ -685,7 +732,9 @@ struct Inner {
     /// The class and level your own self record last stated, with the name it
     /// was for, so a character switch does not carry the last one's over.
     self_profile: Option<(String, Option<JobClass>, Option<u32>)>,
-    /// Your combat power, as your own self record states it (name, value).
+    /// The gear score the last self record gave, with the name it was for.
+    self_gear_score: Option<(String, i32)>,
+    /// The combat power the last self record gave, with the name it was for.
     self_combat_power: Option<(String, i64)>,
 }
 
@@ -726,6 +775,8 @@ impl DataStorage {
                 nickname_storage: HashMap::new(),
                 names_generation: 0,
                 party_generation: 0,
+                zone_generation: 0,
+                instance_generation: 0,
                 party_ended_at_ms: NEVER_MS,
                 pending_nicknames: HashMap::new(),
                 permanent_nicknames: HashMap::new(),
@@ -740,6 +791,7 @@ impl DataStorage {
                 summon_spawn_ids: HashSet::new(),
                 low_id_entities: HashSet::new(),
                 party_members: HashMap::new(),
+                former_party_members: HashMap::new(),
                 party_roster_at_ms: 0,
                 party_size: None,
                 damage_since_roster_bind: 0,
@@ -753,6 +805,11 @@ impl DataStorage {
                 death_log: VecDeque::new(),
                 boss_maps: Vec::new(),
                 boss_map_seq: 0,
+                abyss_artifacts: crate::capture::abyss_artifacts::ArtifactState { wars: Vec::new(), artifacts: Vec::new() },
+                abyss_artifacts_seen_ms: 0,
+                abyss_artifacts_seq: 0,
+                supply_requests: Vec::new(),
+                supply_requests_seq: 0,
                 spawn_hp_ids: HashSet::new(),
                 boss_hp_now: HashMap::new(),
                 boss_hp_sent: HashMap::new(),
@@ -768,6 +825,7 @@ impl DataStorage {
                 has_boss_in_segment: false,
                 current_target: 0,
                 game_host: None,
+                host_server: 0,
                 odyle_energy: None,
                 odyle_owner: None,
                 odyle_awaits_self_record: false,
@@ -780,6 +838,7 @@ impl DataStorage {
                 player_servers: HashMap::new(),
                 self_server: 0,
                 self_profile: None,
+                self_gear_score: None,
                 self_combat_power: None,
             }),
             damage_generation: AtomicI64::new(0),
@@ -789,6 +848,7 @@ impl DataStorage {
             before_reset: RwLock::new(None),
             abnormals: Mutex::new(AbnormalLog { timeline: abnormal::Timeline::default(), pruned_ms: NEVER_MS }),
             nearby: Mutex::new(NearbyPlayers::default()),
+            stagger: Mutex::new(StaggerLog::default()),
         }
     }
 
@@ -945,6 +1005,101 @@ impl DataStorage {
     /// Forget the buff timeline, for a capture from another session.
     pub fn forget_abnormals(&self) {
         self.abnormals.lock().timeline.clear();
+    }
+
+    /// The stagger gauge an entity's spawn carries (its starting value).
+    pub fn note_stagger_spawn(&self, entity: i32, max: u32, rest: u32) {
+        self.stagger.lock().note_spawn(entity, max, rest);
+    }
+
+    /// A gauge update (`05 E0 .. 03 01`), at the current time.
+    pub fn note_stagger_gauge(&self, entity: i32, max: u32, rest: u32, status: u8) {
+        tracing::debug!("Stagger gauge: entity {} at {}/{} status {}", entity, rest, max, status);
+        self.stagger.lock().note_gauge(entity, max, rest, status, now_ms());
+    }
+
+    /// A gauge broke (`05 E0 .. 00 03 02`), at the current time.
+    pub fn note_stagger_break(&self, entity: i32) {
+        tracing::debug!("Stagger gauge: entity {} broken", entity);
+        self.stagger.lock().note_break(entity, now_ms());
+    }
+
+    /// A hit with a value, or a DoT tick, that the next update of the
+    /// target's gauge may take (`StaggerLog::note_hit`).
+    pub fn note_stagger_hit(&self, target: i32, actor: i32, skill: i32, dot: bool) {
+        self.stagger.lock().note_hit(target, actor, skill, now_ms(), dot);
+    }
+
+    /// An entry of a hit with no value (`StaggerLog::note_hit_entry`).
+    pub fn note_stagger_hit_entry(&self, target: i32, actor: i32, skill: i32) {
+        self.stagger.lock().note_hit_entry(target, actor, skill);
+    }
+
+    /// The gauge of `entity` as last known: (max, rest).
+    #[cfg(test)]
+    pub fn stagger_gauge(&self, entity: i32) -> Option<(u32, u32)> {
+        self.stagger.lock().gauge(entity)
+    }
+
+    /// Stagger taken off the gauges of `entities` by each actor and skill
+    /// from `start_ms` to `end_ms`, summons as themselves (the meter resolves
+    /// them as it does damage). Deductions with no actor are left out.
+    pub fn stagger_totals(&self, start_ms: i64, end_ms: i64, entities: &HashSet<i32>) -> HashMap<(i32, i32), i64> {
+        let mut out: HashMap<(i32, i32), i64> = HashMap::new();
+        for w in self.stagger.lock().windows_between(start_ms, end_ms) {
+            if !entities.contains(&w.entity) {
+                continue;
+            }
+            for h in w.hits.iter().filter(|h| h.actor != 0 && h.ms >= start_ms && h.ms <= end_ms) {
+                *out.entry((h.actor, h.skill)).or_default() += h.value as i64;
+            }
+        }
+        out
+    }
+
+    /// The gauge of `entity` now: (max, rest, broken), for a live view
+    /// (GuildHub fork: the overlay's stagger bar).
+    pub fn stagger_live_gauge(&self, entity: i32) -> Option<(u32, u32, bool)> {
+        self.stagger.lock().live_gauge(entity)
+    }
+
+    /// The stagger window open on `entity`, if any.
+    #[cfg(test)]
+    pub fn stagger_open_window(&self, entity: i32) -> Option<crate::combat::stagger::Window> {
+        self.stagger.lock().open_window(entity).cloned()
+    }
+
+    /// The stagger windows with a deduction from `start_ms` to `end_ms`
+    /// (`StaggerLog::windows_between`), for a fight starting at `start_ms`:
+    /// times from its start, summons resolved to their owners.
+    pub fn fight_stagger(&self, start_ms: i64, end_ms: i64) -> Vec<StaggerWindow> {
+        let windows = self.stagger.lock().windows_between(start_ms, end_ms);
+        let inner = self.inner.read();
+        windows
+            .into_iter()
+            .map(|w| StaggerWindow {
+                entity: w.entity,
+                mob_code: inner.mob_storage.get(&w.entity).copied().unwrap_or(0),
+                max: w.max,
+                start: w.start_ms - start_ms,
+                end: w.end_ms.unwrap_or(end_ms) - start_ms,
+                result: w.outcome().unwrap_or(Outcome::Missed),
+                ended: w.ended.unwrap_or(End::FightEnd),
+                missing: w.missing,
+                incomplete: w.incomplete,
+                hits: w
+                    .hits
+                    .iter()
+                    .map(|h| StaggerHit {
+                        t: h.ms - start_ms,
+                        actor: summon_resolver::resolve(h.actor, &inner.summon_storage),
+                        skill: h.skill,
+                        value: h.value,
+                        ambiguous: h.ambiguous,
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Called when a self/world teleport (zone-change opcode) is seen. Resets
@@ -1275,7 +1430,13 @@ impl DataStorage {
         inner.self_profile = Some((name.to_string(), class.or(old_class), level.or(old_level)));
     }
 
-    /// Your combat power, as your own self record states it.
+    /// Your gear score as the self record states it (sent on login and on
+    /// every teleport).
+    pub fn note_self_gear_score(&self, name: &str, gear_score: i32) {
+        self.inner.write().self_gear_score = Some((name.to_string(), gear_score));
+    }
+
+    /// Your combat power as the self record states it.
     pub fn note_self_combat_power(&self, name: &str, combat_power: i64) {
         self.inner.write().self_combat_power = Some((name.trim().to_string(), combat_power));
     }
@@ -1306,7 +1467,15 @@ impl DataStorage {
         if class.is_none() {
             class = inner.local_player_id.and_then(|id| inner.actor_jobs.get(&(id as i32)).copied());
         }
-        LocalProfile { name, server_id: server, class, level }
+        // The roster's is the fresher while in a party (it follows gear
+        // changes); the self record's is from the last teleport.
+        let me = name.as_deref().map(str::trim);
+        let roster = me.and_then(|n| inner.party_members.get(n));
+        let gear_score =
+            roster.map(|m| m.gear_score).filter(|&g| g > 0).or_else(|| stated_for(&inner.self_gear_score, me));
+        let combat_power =
+            roster.map(|m| m.combat_power).filter(|&c| c > 0).or_else(|| stated_for(&inner.self_combat_power, me));
+        LocalProfile { name, server_id: server, class, level, gear_score, combat_power }
     }
 
     /// The server the fights being recorded are on: the local player's home
@@ -1322,6 +1491,36 @@ impl DataStorage {
     /// is the fallback, by majority, since in a cross-server party each member
     /// keeps their own server but all share the region.
     pub fn fight_server_id(&self) -> u16 {
+        let own = self.own_server();
+        if own != 0 {
+            return own;
+        }
+        let inner = self.inner.read();
+        let local = inner.local_character_name.as_deref().map(str::trim);
+        if let Some(member) = local.and_then(|n| inner.party_members.get(n)) {
+            if member.server_id != 0 {
+                return member.server_id;
+            }
+        }
+        // A meter started mid-game: the server this game server's address
+        // was last seen to be (`note_host_server`), before a party's
+        // majority, which can be another server's.
+        if inner.host_server != 0 {
+            return inner.host_server;
+        }
+        let mut counts: HashMap<u16, usize> = HashMap::new();
+        for member in inner.party_members.values() {
+            if member.server_id != 0 {
+                *counts.entry(member.server_id).or_default() += 1;
+            }
+        }
+        counts.into_iter().max_by_key(|&(server, n)| (n, std::cmp::Reverse(server))).map_or(0, |(s, _)| s)
+    }
+
+    /// The local player's own server as the game stated it (a self or loot
+    /// record), 0 when it hasn't yet. Unlike `fight_server_id`, never a
+    /// guess from the party or the connection.
+    pub fn own_server(&self) -> u16 {
         let inner = self.inner.read();
         let local = inner.local_character_name.as_deref().map(str::trim);
         if let Some(&server) = local.and_then(|n| inner.player_servers.get(n)) {
@@ -1332,21 +1531,16 @@ impl DataStorage {
         // the name) and the next self record, the fight just ended was saved
         // with no local name, and the roster majority filed it under a party
         // member's server (1014 for a 2014 player, 2026-08-15).
-        if inner.self_server != 0 {
-            return inner.self_server;
+        inner.self_server
+    }
+
+    /// The server the game server's address was last seen to be (see
+    /// `boss_report::report_server`); 0 when not known.
+    pub fn note_host_server(&self, server: u16) {
+        let mut inner = self.inner.write();
+        if inner.host_server != server {
+            inner.host_server = server;
         }
-        if let Some(member) = local.and_then(|n| inner.party_members.get(n)) {
-            if member.server_id != 0 {
-                return member.server_id;
-            }
-        }
-        let mut counts: HashMap<u16, usize> = HashMap::new();
-        for member in inner.party_members.values() {
-            if member.server_id != 0 {
-                *counts.entry(member.server_id).or_default() += 1;
-            }
-        }
-        counts.into_iter().max_by_key(|&(server, n)| (n, std::cmp::Reverse(server))).map_or(0, |(s, _)| s)
     }
 
     /// Whether the game itself named the local player (the self record or the
@@ -1507,6 +1701,7 @@ impl DataStorage {
                 if let Some(actor_data) = fight_of(&mut inner, resolved_target, Some(actor_id)) {
                     actor_data.damage_received += dmg;
                     actor_data.hits_received += 1;
+                    actor_data.received.note(pdp.specials());
                 }
             }
             return;
@@ -1619,7 +1814,18 @@ impl DataStorage {
 
     pub fn append_mob(&self, mid: i32, code: i32) {
         let mut inner = self.inner.write();
-        inner.mob_storage.insert(mid, code);
+        let before = inner.mob_storage.insert(mid, code);
+        // An Abyss core seen up, once per entity (online builds only, as kills).
+        #[cfg(feature = "online")]
+        if before != Some(code)
+            && crate::capture::abyss_cores::is_core(code)
+            && inner.current_dungeon_id <= 0
+            && !inner.dead_entity_ids.contains(&mid)
+        {
+            push_boss_event(&mut inner, BossEvent { npc: code, kind: BossEventKind::Seen { at_ms: now_ms() } });
+        }
+        #[cfg(not(feature = "online"))]
+        let _ = before;
         // A spawn names the NPC: the table says what it is from here on.
         inner.hp_floored_ids.remove(&mid);
         inner.hp_reset_dummy_ids.remove(&mid);
@@ -1701,13 +1907,14 @@ impl DataStorage {
         #[cfg(feature = "online")]
         if inner.current_dungeon_id <= 0 && !inner.dead_entity_ids.contains(&entity_id) {
             if let Some(&code) = inner.mob_storage.get(&entity_id) {
-                if crate::capture::field_bosses::is_field_boss(code) {
+                if crate::capture::field_bosses::is_reported(code) {
                     push_boss_event(&mut inner, BossEvent { npc: code, kind: BossEventKind::Killed { at_ms: now_ms() } });
                 }
             }
         }
         inner.boss_hp_now.remove(&entity_id);
         inner.boss_hp_sent.remove(&entity_id);
+        self.stagger.lock().note_gone(entity_id, now_ms(), true);
         inner.dead_entity_ids.insert(entity_id);
         inner.hp_floored_ids.remove(&entity_id);
         inner.death_log.push_back((entity_id, now_ms(), None));
@@ -1771,13 +1978,54 @@ impl DataStorage {
         (inner.boss_map_seq != seq).then(|| (inner.boss_map_seq, inner.boss_maps.clone()))
     }
 
+    /// Who holds the Abyss artifacts, as the game just said: each war and
+    /// artifact it names replaces what was known of it.
+    pub fn note_abyss_artifacts(&self, told: crate::capture::abyss_artifacts::ArtifactState) {
+        let mut inner = self.inner.write();
+        let known = &mut inner.abyss_artifacts;
+        for war in told.wars {
+            known.wars.retain(|w| w.event_id != war.event_id);
+            known.wars.push(war);
+        }
+        for artifact in told.artifacts {
+            known.artifacts.retain(|a| a.id != artifact.id);
+            known.artifacts.push(artifact);
+        }
+        known.wars.sort_by_key(|w| w.event_id);
+        known.artifacts.sort_by_key(|a| a.id);
+        inner.abyss_artifacts_seen_ms = now_ms();
+        inner.abyss_artifacts_seq += 1;
+    }
+
+    /// The artifact owners and when they were last told, if told since
+    /// `seq`, and the count to ask with next time.
+    pub fn abyss_artifacts_since(&self, seq: u64) -> Option<(u64, crate::capture::abyss_artifacts::ArtifactState, i64)> {
+        let inner = self.inner.read();
+        (inner.abyss_artifacts_seq != seq)
+            .then(|| (inner.abyss_artifacts_seq, inner.abyss_artifacts.clone(), inner.abyss_artifacts_seen_ms))
+    }
+
+    /// The Supply Requests boards the game just sent (at login).
+    pub fn note_supply_requests(&self, boards: Vec<crate::capture::supply_requests::Board>) {
+        let mut inner = self.inner.write();
+        inner.supply_requests = boards;
+        inner.supply_requests_seq += 1;
+    }
+
+    /// The boards, when told since `seq`: (the new seq, the boards).
+    pub fn supply_requests_since(&self, seq: u64) -> Option<(u64, Vec<crate::capture::supply_requests::Board>)> {
+        let inner = self.inner.read();
+        (inner.supply_requests_seq != seq).then(|| (inner.supply_requests_seq, inner.supply_requests.clone()))
+    }
+
     pub fn deaths_between(&self, from: i64, to: i64) -> Vec<(i32, i64, Option<i64>)> {
         self.inner.read().death_log.iter().filter(|d| d.1 >= from && d.1 <= to).copied().collect()
     }
 
     /// `id` left the world. Only a linked summon is marked: see
-    /// `Inner::despawned_summon_ids`.
+    /// `Inner::despawned_summon_ids`. A stagger window open on it is missed.
     pub fn note_despawn(&self, id: i32) {
+        self.stagger.lock().note_gone(id, now_ms(), false);
         let mut inner = self.inner.write();
         if inner.summon_storage.contains_key(&id) {
             inner.despawned_summon_ids.insert(id);
@@ -1915,6 +2163,12 @@ impl DataStorage {
             inner.party_generation += 1;
         }
         if complete {
+            let gone: Vec<String> = inner.party_members.keys().filter(|n| !members.iter().any(|(m, _)| m == *n)).cloned().collect();
+            for name in gone {
+                if let Some(member) = inner.party_members.remove(&name) {
+                    inner.former_party_members.insert(name, member);
+                }
+            }
             inner.party_members.clear();
         }
         // A partial roster only updates the members it decoded, so whoever
@@ -1950,7 +2204,8 @@ impl DataStorage {
         // whose they are; the hook reads this storage, so no lock is held.
         self.run_before_reset();
         let mut inner = self.inner.write();
-        inner.party_members.clear();
+        let members = std::mem::take(&mut inner.party_members);
+        inner.former_party_members.extend(members);
         inner.party_generation += 1;
         inner.party_ended_at_ms = now_ms();
         inner.roster_dungeon_id = 0;
@@ -2000,7 +2255,11 @@ impl DataStorage {
         // A load hands out new entity ids: counts of the old ones would name
         // an entity that is gone.
         inner.loot_identity.scope_counts.clear();
-        inner.current_map_id = Some(map_id);
+        let from = inner.current_map_id.replace(map_id);
+        inner.zone_generation += 1;
+        if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
+            inner.instance_generation += 1;
+        }
         let dungeon = dungeon_of_map(inner.roster_dungeon_id, Some(map_id));
         if dungeon != inner.current_dungeon_id {
             tracing::debug!("Map {map_id}: dungeon {} -> {dungeon}", inner.current_dungeon_id);
@@ -2024,6 +2283,17 @@ impl DataStorage {
 
     pub fn get_party_members(&self) -> HashMap<String, PartyMember> {
         self.inner.read().party_members.clone()
+    }
+
+    /// The roster a saved fight takes its players' level, gear score, combat
+    /// power and identity from: the party now, and those who have left it as
+    /// it last had them. Only for what a fight record keeps; who is in the
+    /// party is `get_party_members`.
+    pub fn fight_roster(&self) -> HashMap<String, PartyMember> {
+        let inner = self.inner.read();
+        let mut roster = inner.former_party_members.clone();
+        roster.extend(inner.party_members.iter().map(|(n, m)| (n.clone(), m.clone())));
+        roster
     }
 
     /// Whether party members who have not fought should still be shown, with
@@ -2236,7 +2506,7 @@ impl DataStorage {
             && inner.spawn_hp_ids.contains(&id)
         {
             if let Some(&code) = inner.mob_storage.get(&id) {
-                if crate::capture::field_bosses::is_field_boss(code) {
+                if crate::capture::field_bosses::is_reported(code) {
                     let pct = ((hp as i64 * 100) / max as i64).clamp(0, 100) as u8;
                     let changed = match inner.boss_hp_now.get(&id) {
                         Some(&(_, before, at)) if before == pct => at,
@@ -2275,6 +2545,8 @@ impl DataStorage {
         e.total_heal += amount;
         e.tick_count += 1;
         e.ticks.push((timestamp, amount));
+        drop(inner);
+        self.damage_generation.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn get_heal_snapshot(&self) -> HashMap<i32, HashMap<(i32, bool), HealSkillData>> {
@@ -2287,28 +2559,32 @@ impl DataStorage {
             .collect()
     }
 
-    /// Healing done per healer between `from` and `to` (ms, the capture clock)
-    /// — the meter's rows, which only want totals: no copy of the ticks — and
-    /// the skills it was done with (a healer with no damage gets their class
-    /// from them).
-    pub fn heal_totals_between(&self, from: i64, to: i64) -> HashMap<i32, (i64, Vec<i32>)> {
+    /// Per-actor heal totals within a fight window. Iterates ticks without
+    /// cloning the vectors — much cheaper than `get_heal_snapshot`.
+    ///
+    /// Passive HP regen ("Restore HP", 1900001) is left out: everyone gets it,
+    /// and it would inflate every player's HPS. It is still stored, as
+    /// Details shows it on its own.
+    pub fn get_heal_totals_in_window(&self, from_ms: i64, to_ms: i64) -> HashMap<i32, i64> {
         let inner = self.inner.read();
-        let mut totals = HashMap::new();
-        for (&id, skills) in &inner.heal_storage {
-            if is_mob(&inner, id) {
+        let mut totals: HashMap<i32, i64> = HashMap::new();
+        for (&actor_id, skills) in &inner.heal_storage {
+            if is_mob(&inner, actor_id) {
                 continue;
             }
-            let mut healed = 0i64;
-            let mut codes = Vec::new();
-            for (&(code, _), s) in skills {
-                let by_skill: i64 = s.ticks.iter().filter(|(t, _)| *t >= from && *t <= to).map(|(_, amount)| amount).sum();
-                if by_skill > 0 {
-                    healed += by_skill;
-                    codes.push(code);
+            let mut actor_total: i64 = 0;
+            for (&(code, _), skill_data) in skills {
+                if code == PASSIVE_REGEN_SKILL {
+                    continue;
+                }
+                for &(ts, amount) in &skill_data.ticks {
+                    if ts >= from_ms && ts <= to_ms {
+                        actor_total += amount;
+                    }
                 }
             }
-            if healed > 0 {
-                totals.insert(id, (healed, codes));
+            if actor_total > 0 {
+                totals.insert(actor_id, actor_total);
             }
         }
         totals
@@ -2365,6 +2641,7 @@ impl DataStorage {
     /// reset would otherwise stay unlinked for good. Ids that are reused get
     /// their links dropped by the new spawn (see `note_summon_spawn`).
     pub fn flush(&self) {
+        self.stagger.lock().forget_pending();
         let mut inner = self.inner.write();
         inner.target_combat.clear();
         inner.held_dot_ticks.clear();
@@ -2388,6 +2665,7 @@ impl DataStorage {
     /// Used on a zone-change / in-instance-teleport reset so the meter starts on
     /// clean numbers without dropping who your party and you are.
     pub fn flush_combat_only(&self) {
+        self.stagger.lock().forget_pending();
         let mut inner = self.inner.write();
         inner.target_combat.clear();
         inner.held_dot_ticks.clear();
@@ -2405,8 +2683,10 @@ impl DataStorage {
     /// Drop every summon link, for a capture from another session (a replay),
     /// whose entity ids mean something else.
     pub fn forget_summon_links(&self) {
-        // The buffs those ids had on are as foreign as the links.
+        // The buffs those ids had on are as foreign as the links, and so
+        // are their stagger gauges.
         self.forget_abnormals();
+        self.stagger.lock().clear();
         let mut inner = self.inner.write();
         inner.summon_storage.clear();
         inner.confirmed_summon_ids.clear();
@@ -2449,6 +2729,15 @@ impl DataStorage {
     /// party. Not with every roster; the game resends it on each map load.
     pub fn party_generation(&self) -> u64 {
         self.inner.read().party_generation
+    }
+
+    /// Counts of map loads: every one, and those entering or leaving an
+    /// instance (a dungeon, entered again with "go again" too; anything but
+    /// the open world to the open world). The meter clears the last fight
+    /// off the screen on one, as its setting says.
+    pub fn zone_generations(&self) -> (u64, u64) {
+        let inner = self.inner.read();
+        (inner.zone_generation, inner.instance_generation)
     }
 
     /// Changes whenever a name is bound, replaced or dropped, and with each
@@ -3187,6 +3476,43 @@ mod tests {
         assert_eq!(s.get_party_members().len(), 2, "the roster itself is kept, for combat power");
     }
 
+    /// A meter started mid-game: the fights go under the server learnt for
+    /// the connection, ahead of a party's majority; the game's own word
+    /// still wins once it comes (Harvest Manager Moshav, 2026-10-18).
+    #[test]
+    fn fights_take_the_connection_server_until_the_game_says() {
+        let s = DataStorage::new();
+        let on = |server: u16| PartyMember { server_id: server, ..member(1) };
+        s.set_party_roster(vec![("A".into(), on(2304)), ("B".into(), on(2304)), ("C".into(), on(1307))], true);
+        assert_eq!(s.fight_server_id(), 2304, "the party's majority, as before");
+        s.note_host_server(1304);
+        assert_eq!(s.fight_server_id(), 1304, "the connection's server over the majority");
+        assert_eq!(s.own_server(), 0, "never taken as the player's own");
+        s.note_self_server(1305);
+        assert_eq!(s.fight_server_id(), 1305, "the game's own word wins");
+    }
+
+    /// Members leaving after the boss falls (Vakron, 2026-10-17) keep their
+    /// combat power in the fight's later saves, but are no longer the party.
+    #[test]
+    fn a_fight_keeps_the_stats_of_members_who_have_left() {
+        let s = DataStorage::new();
+        let three = || vec![("Nyxera".into(), member(1)), ("Alfira".into(), member(2)), ("Sherhana".into(), member(3))];
+        s.set_party_roster(three(), true);
+        s.set_party_roster(vec![("Nyxera".into(), member(1)), ("Sherhana".into(), member(3))], true);
+        assert!(!s.get_party_members().contains_key("Alfira"));
+        assert_eq!(s.fight_roster().get("Alfira").map(|m| m.combat_power), Some(39_000));
+
+        // The roster now wins over what a member had before they left.
+        s.set_party_roster(vec![("Nyxera".into(), member(1)), ("Sherhana".into(), member(3)), ("Alfira".into(), PartyMember { combat_power: 41_000, ..member(2) })], true);
+        assert_eq!(s.fight_roster().get("Alfira").map(|m| m.combat_power), Some(41_000));
+
+        // The party ending keeps them too.
+        s.set_party_roster(vec![("Nyxera".into(), member(1))], true);
+        assert!(s.get_party_members().is_empty());
+        assert_eq!(s.fight_roster().len(), 3);
+    }
+
     fn hit(actor: i32, target: i32, at: i64, damage: i32, dot: bool) -> ParsedDamagePacket {
         let mut p = ParsedDamagePacket::new();
         p.set_actor_id(actor);
@@ -3279,6 +3605,22 @@ mod tests {
         assert_eq!(s.fight_server_id(), 1304, "what your own record says");
         s.note_player_server("C", 99);
         assert_eq!(s.fight_server_id(), 1304, "a value no server has is not taken");
+    }
+
+    #[test]
+    fn instances_entered_and_left_are_counted_apart_from_open_world_moves() {
+        let s = DataStorage::new();
+        let open = *OPEN_WORLD_MAPS.iter().next().unwrap();
+        s.note_map_load(open);
+        let (_, at_start) = s.zone_generations();
+        s.note_map_load(open);
+        assert_eq!(s.zone_generations().1, at_start, "a teleport in the open world");
+        s.note_map_load(610_001);
+        assert_eq!(s.zone_generations().1, at_start + 1, "into a dungeon");
+        s.note_map_load(610_001);
+        assert_eq!(s.zone_generations().1, at_start + 2, "go again: the same dungeon loaded again");
+        s.note_map_load(open);
+        assert_eq!(s.zone_generations(), (5, at_start + 3), "back to the open world");
     }
 
     #[test]

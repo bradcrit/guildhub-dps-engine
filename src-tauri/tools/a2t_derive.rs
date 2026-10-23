@@ -130,7 +130,7 @@ fn ring_check(packets: &[CapturedPacket], storage: &DataStorage, w: &FightRecord
     }
     let dir = std::env::temp_dir().join(format!("a2t-ring-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let result = a2tools_dps_meter_lib::share::save_slice(&dir, w, storage).and_then(|bytes| {
+    let result = a2tools_dps_meter_lib::share::save_slice(&dir, w, &a2tools_dps_meter_lib::share::SliceNames::of(storage)).and_then(|bytes| {
         let gz = std::fs::read(a2tools_dps_meter_lib::share::slices_dir(&dir).join(format!("{}.a2es.gz", w.id)))
             .map_err(|e| e.to_string())?;
         let mut slice = Vec::new();
@@ -423,6 +423,18 @@ fn check(packets: &[CapturedPacket], storage: &DataStorage, w: &FightRecord, t: 
              w.server_id, got.server_id, if same_server { "ok" } else { "MISMATCH" },
              w.details.total_target_damage, got.details.total_target_damage, w.duration_ms, got.duration_ms,
              a.len(), b.len(), if identical { "identical" } else { "DIFFERENT" });
+    // The Buffs timeline: not part of "identical" (the damage is what a log
+    // rests on), but what a slice's state packets are kept for.
+    let tracks = |r: &FightRecord| -> Vec<String> {
+        let mut v: Vec<String> = r.buffs.iter().flatten()
+            .map(|b| serde_json::to_string(b).unwrap_or_default()).collect();
+        v.sort();
+        v
+    };
+    let (bw, bs) = (tracks(w), tracks(got));
+    let differing = bw.iter().filter(|b| !bs.contains(b)).count() + bs.iter().filter(|b| !bw.contains(b)).count();
+    println!("   buffs: {} / {} tracks, {}", bw.len(), bs.len(),
+             if differing == 0 { "same".to_string() } else { format!("{differing} differ") });
     for k in diffs.iter().take(if std::env::var("A2_ALL_ROWS").is_ok() { usize::MAX } else { 12 }) {
         println!("     row {:?}: whole {:?} slice {:?}", k, a.get(k), b.get(k));
     }

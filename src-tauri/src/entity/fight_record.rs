@@ -49,6 +49,12 @@ pub struct FightRecord {
     /// log service's output change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffs: Option<Vec<crate::combat::fight_buffs::BuffTrack>>,
+    /// The stagger windows of the fight: each gauge that took a deduction in
+    /// it, who took what off it, and whether it broke (`combat::stagger`).
+    /// `None` in a fight saved before the meter recorded them, so neither the
+    /// files of older fights nor the log service's output change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stagger: Option<Vec<crate::combat::stagger::StaggerWindow>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +148,7 @@ mod tests {
     fn a_fight_saved_before_buffs_loads_and_saves_unchanged() {
         let record: FightRecord = serde_json::from_value(old_record()).unwrap();
         assert!(record.buffs.is_none());
+        assert!(record.stagger.is_none());
         assert_eq!(serde_json::to_value(&record).unwrap(), old_record());
     }
 

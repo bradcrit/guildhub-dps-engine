@@ -62,6 +62,10 @@ pub struct AppState {
     /// Order fight snapshots and their writes together. Settings never take
     /// this lock; the calculator guard is released before disk work.
     pub fight_save: Mutex<()>,
+    /// Fights taken before a reset, with their names, until HISTORY saves
+    /// them (see `save_fights_before_reset`). Whoever saves next under
+    /// `fight_save` takes them: quitting does not leave them behind.
+    pub queued_fight_saves: Mutex<Vec<(Vec<FightRecord>, share::SliceNames)>>,
     pub settings: Settings,
     pub skill_lookup: Arc<SkillLookup>,
     pub npc_lookup: Arc<NpcLookup>,
@@ -116,6 +120,66 @@ pub struct OverlayLock {
     applied: Mutex<Option<bool>>,
 }
 
+/// The setting that hides the DPS meter, for players who use only plugins:
+/// capture, uploads and plugins go on; the overlay stays hidden until shown
+/// again (Settings → Plugins, the toggle hotkey, or a plugin window's bar).
+const SHOW_METER_KEY: &str = "dpsMeter.showMeter";
+
+fn meter_wanted(app: &tauri::AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .and_then(|s| s.settings.get(SHOW_METER_KEY))
+        .as_deref()
+        != Some("false")
+}
+
+/// Show or hide the DPS meter and remember it. Hidden in place (Linux keeps
+/// it mapped, so it comes back where it was). Every window hears
+/// "meter-shown", so Settings and plugin bars follow.
+fn set_meter_wanted(app: &tauri::AppHandle, shown: bool) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.settings.set(SHOW_METER_KEY, if shown { "true" } else { "false" });
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        if shown {
+            show_meter_again(app, &window);
+        } else {
+            platform::window::hide_in_place(&window);
+        }
+    }
+    let _ = app.emit("meter-shown", shown);
+}
+
+/// Whether something would be left to open the meter or a plugin with, with
+/// `except` (a window about to go) gone: the meter, another plugin window,
+/// or an unlocked widget (double-clicked, it opens its plugin's window).
+pub(crate) fn way_back_without(app: &tauri::AppHandle, except: &str) -> bool {
+    meter_wanted(app)
+        || app.webview_windows().into_iter().any(|(label, w)| {
+            label != except && crate::plugins::is_plugin_window(&label)
+                && w.is_visible().unwrap_or(false) && !platform::window::is_hidden_in_place(&w)
+        })
+        || crate::plugins::widgets::any_unlocked_widget_shown(app)
+}
+
+/// The meter hidden and nothing left on screen to open anything with (a
+/// tester hid both, 2026-10-17): the meter comes back. `except` is a window
+/// about to go.
+pub(crate) fn keep_something_on_screen(app: &tauri::AppHandle, except: &str) {
+    if !way_back_without(app, except) {
+        set_meter_wanted(app, true);
+    }
+}
+
+#[tauri::command]
+fn set_meter_shown(app: tauri::AppHandle, shown: bool) {
+    set_meter_wanted(&app, shown);
+}
+
+#[tauri::command]
+fn meter_shown(app: tauri::AppHandle) -> bool {
+    meter_wanted(&app)
+}
+
 /// Show the meter that auto-hide hid: in place where it was hidden so
 /// (Linux), else as usual. The page re-measures, as its content may have
 /// changed meanwhile.
@@ -133,13 +197,104 @@ fn show_meter_again(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
     let _ = window.emit("force-resize", ());
 }
 
+/// The windows that hide with the meter when AION2 isn't in front ("Hide
+/// when AION2 isn't focused"): Settings, Battle History and Details, and the
+/// windows and icons of plugins set to (Settings → Plugins; an alert's icon
+/// is often wanted most then). Only the meter hid, and the rest stayed over
+/// the browser (Hirai, 2026-10-19).
+fn hides_with_meter(app: &tauri::AppHandle, label: &str) -> bool {
+    TOOL_WINDOWS.contains(&label) || label.starts_with("details-") || crate::plugins::hides_unfocused(app, label)
+}
+
+/// Hide those of `hides_with_meter` that are up, noting each.
+fn hide_with_meter(app: &tauri::AppHandle, hidden: &mut std::collections::HashSet<String>) {
+    for (label, window) in app.webview_windows() {
+        if !hides_with_meter(app, &label) || hidden.contains(&label) {
+            continue;
+        }
+        if window.is_visible().unwrap_or(false) && !platform::window::is_hidden_in_place(&window) {
+            platform::window::hide_in_place(&window);
+            hidden.insert(label);
+        }
+    }
+}
+
+/// Show again those `hide_with_meter` hid.
+fn show_with_meter(app: &tauri::AppHandle, hidden: &mut std::collections::HashSet<String>) {
+    for label in hidden.drain() {
+        let Some(window) = app.get_webview_window(&label) else { continue };
+        // A widget its plugin closed meanwhile stays hidden.
+        if crate::plugins::widgets::is_closed(&label) {
+            continue;
+        }
+        if !platform::window::reveal_in_place(&window) {
+            platform::window::show_on_top_without_focus(&window);
+        }
+        crate::plugins::widgets::relock(app, &window);
+    }
+}
+
+/// The label of the meter window titled `title`.
+fn window_titled(app: &tauri::AppHandle, title: &str) -> Option<String> {
+    app.webview_windows()
+        .into_iter()
+        .find(|(_, window)| window.title().ok().as_deref() == Some(title))
+        .map(|(label, _)| label)
+        .or_else(|| titles().lock().unwrap_or_else(|p| p.into_inner()).get(title).cloned())
+}
+
+/// Each window's title and label, noted before the window is built: KWin
+/// asks where a window goes the moment it appears, which can be before the
+/// app has the new window in its list, and a window it could not name
+/// opened in the middle of the screen (widgets moved before, a tester on
+/// KDE Wayland, 2026-10-17).
+fn titles() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    static TITLES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+    TITLES.get_or_init(Default::default)
+}
+
+pub(crate) fn note_window_title(title: &str, label: &str) {
+    titles().lock().unwrap_or_else(|p| p.into_inner()).insert(title.to_string(), label.to_string());
+}
+
+/// Where the window manager says a window was left, by its label (#76).
+fn save_window_place(app: &tauri::AppHandle, title: &str, (x, y, w, h): (i32, i32, i32, i32)) {
+    let (Some(label), Some(state)) = (window_titled(app, title), app.try_state::<AppState>()) else { return };
+    state.settings.set(&format!("window.{label}.placed"), &format!("{x},{y},{w},{h}"));
+}
+
+/// Where a window belongs, for the window manager to put it (#76). The
+/// overlay sizes itself to its content, so it gets its place only.
+fn load_window_place(app: &tauri::AppHandle, title: &str) -> Option<(i32, i32, i32, i32)> {
+    let label = window_titled(app, title)?;
+    // On X11 the meter places its windows itself; KWin puts back only a
+    // widget, where the meter saved it, as KWin may not let it go there
+    // (platform::linux::focus, X11_IN_WAYLAND).
+    if platform::window::places_own_windows() {
+        let (id, name) = crate::plugins::widgets::parse_label(&label)?;
+        return crate::plugins::widgets::saved_place(app, &id, &name).map(|(x, y)| (x, y, 0, 0));
+    }
+    let state = app.try_state::<AppState>()?;
+    let placed = |label: &str| {
+        let value = state.settings.get(&format!("window.{label}.placed"))?;
+        let n: Vec<i32> = value.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        let [x, y, w, h] = n[..] else { return None };
+        Some((x, y, w, h))
+    };
+    match placed(&label) {
+        Some((x, y, w, h)) => Some(if label == "main" { (x, y, 0, 0) } else { (x, y, w, h) }),
+        // A plugin's widget never moved: beside its others, not mid-screen.
+        None => crate::plugins::widgets::place_beside_others(app, &label, placed).map(|(x, y)| (x, y, 0, 0)),
+    }
+}
+
 /// Auto-hide at once, when the desktop says the active window changed (KWin,
 /// see platform::linux::focus): the 500 ms check and its wait before hiding
 /// left the meter up for a moment after an alt-tab (2026-10-17). The check
 /// still runs, for every other desktop and as a fallback.
 fn auto_hide_now(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else { return };
-    if state.settings.get("dpsMeter.autoHideMeter").unwrap_or_default() != "true" {
+    if state.settings.get("dpsMeter.autoHideMeter").unwrap_or_default() != "true" || !meter_wanted(app) {
         return;
     }
     let Some(window) = app.get_webview_window("main") else { return };
@@ -156,10 +311,40 @@ fn auto_hide_now(app: &tauri::AppHandle) {
 
 /// Tell the main window whether to ignore the mouse: when locked, unless the
 /// pointer is over the lock button or a card is open.
+/// A screenshot tool (KDE's Spectacle) is the active window: every meter
+/// window lets clicks through, so its area selection can be dragged across
+/// them, which still show in the shot (KDE draws the selection under them).
+static SCREENSHOT_TOOL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn screenshot_tool_in_front() -> bool {
+    SCREENSHOT_TOOL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A screenshot tool came to the front (`true`) or left it.
+fn screenshot_tool(app: &tauri::AppHandle, in_front: bool) {
+    SCREENSHOT_TOOL.store(in_front, std::sync::atomic::Ordering::Relaxed);
+    // The overlay, by its lock (which reads the flag).
+    if let Some(state) = app.try_state::<AppState>() {
+        let lock = state.overlay_lock.clone();
+        *lock.applied.lock() = None;
+        sync_click_through(app, &lock, false);
+    }
+    // Plugins' icons, by their lock and area.
+    crate::plugins::widgets::reapply_locks(app);
+    // Settings, History, Details, and plugins' windows: all or nothing.
+    for (label, window) in app.webview_windows() {
+        let tool = TOOL_WINDOWS.contains(&label.as_str()) || label.starts_with("details-") || crate::plugins::is_plugin_window(&label);
+        if tool && !platform::window::click_through_except(&window, in_front, None) && !cfg!(target_os = "linux") {
+            let _ = window.set_ignore_cursor_events(in_front);
+        }
+    }
+}
+
 fn sync_click_through(app: &tauri::AppHandle, lock: &OverlayLock, over_button: bool) {
     use std::sync::atomic::Ordering;
     let mut applied = lock.applied.lock();
-    let ignore = click_through(lock.locked.load(Ordering::SeqCst), over_button, lock.card_open.load(Ordering::SeqCst));
+    let ignore = screenshot_tool_in_front()
+        || click_through(lock.locked.load(Ordering::SeqCst), over_button, lock.card_open.load(Ordering::SeqCst));
     // The region follows the button, so it is set again even unchanged.
     if let Some(main) = app.get_webview_window("main") {
         if platform::window::click_through_except(&main, ignore, *lock.button.lock()) {
@@ -257,11 +442,13 @@ async fn get_skill_details(app: tauri::AppHandle, target_id: i32, actor_ids: Opt
     }).await
 }
 
-/// The buffs and debuffs of the live fight on a target (Details' Buffs section).
+/// The buffs and debuffs of the live fight on a target (Details' Buffs
+/// section), and its stagger windows over `target_ids`, all the targets
+/// Details shows together (see `DpsCalculator::live_fight_buffs`).
 #[tauri::command]
-async fn get_fight_buffs(app: tauri::AppHandle, target_id: i32) -> Result<Option<crate::combat::fight_buffs::LiveFightBuffs>, String> {
+async fn get_fight_buffs(app: tauri::AppHandle, target_id: i32, target_ids: Option<Vec<i32>>) -> Result<Option<crate::combat::fight_buffs::LiveFightBuffs>, String> {
     crate::blocking::CALCULATIONS.run(move || {
-        details_reader(&app.state::<AppState>()).live_fight_buffs(target_id)
+        details_reader(&app.state::<AppState>()).live_fight_buffs(target_id, target_ids.as_deref().unwrap_or_default())
     }).await
 }
 
@@ -377,11 +564,11 @@ fn auto_upload(app: tauri::AppHandle, record: FightRecord) {
 /// and verified later (training dummies are not logs), and auto-upload the
 /// finished ones when that is on.
 #[cfg_attr(not(feature = "online"), allow(unused_variables))]
-fn save_fight_records(app: &tauri::AppHandle, state: &AppState, records: Vec<FightRecord>) {
+fn save_fight_records(app: &tauri::AppHandle, state: &AppState, records: Vec<FightRecord>, names: &share::SliceNames) {
     for record in &records {
         let _ = state.fight_history.save_fight(record);
         if !record.is_train {
-            if let Err(e) = share::save_slice(&state.app_data_dir, record, &state.data_storage) {
+            if let Err(e) = share::save_slice(&state.app_data_dir, record, names) {
                 // A fight that began before the meter did is normal; anything
                 // else is why an upload will later say no packets were saved.
                 if e.starts_with("no packets in memory") {
@@ -406,21 +593,61 @@ fn save_fight_records(app: &tauri::AppHandle, state: &AppState, records: Vec<Fig
     }
 }
 
-/// Save every fight on the meter now, before its combat data is cleared: a
-/// zone change, the end of a party, the reset button, the reload hotkey or
-/// quitting. Each cleared it unsaved, and leaving an instance right after a
-/// kill lost everything since the last 30-second save (issue #19).
+/// Save every fight on the meter, before its combat data is cleared: a zone
+/// change, the end of a party, the reset button or the reload hotkey. Each
+/// cleared it unsaved, and leaving an instance right after a kill lost
+/// everything since the last 30-second save (issue #19).
+///
+/// The records are taken now; writing them, and cutting each fight's slice,
+/// is queued behind any save already running. A zone change and the end of a
+/// party call this from the parser's thread, and waiting there for the disk
+/// stopped the parser: packets were lost and the meter froze for minutes.
 fn save_fights_before_reset(app: &tauri::AppHandle) {
+    let Some(fights) = fights_before_reset(app) else { return };
+    let Some(state) = app.try_state::<AppState>() else { return };
+    state.queued_fight_saves.lock().push(fights);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let job = handle.clone();
+        if let Err(error) = crate::blocking::HISTORY.run(move || save_queued_fights(&job)).await {
+            tracing::warn!("Saving fights before a reset failed: {error}");
+        }
+    });
+}
+
+/// Save the fights `save_fights_before_reset` queued, if nobody has yet.
+fn save_queued_fights(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else { return };
     let _saving = state.fight_save.lock();
+    let queued = std::mem::take(&mut *state.queued_fight_saves.lock());
+    for (records, names) in queued {
+        save_fight_records(app, &state, records, &names);
+    }
+}
+
+/// Save every fight on the meter before quitting, and wait for it: the
+/// fights still queued from a reset first, which a save running on HISTORY
+/// could hold up past the exit.
+fn save_fights_before_quit(app: &tauri::AppHandle) {
+    save_queued_fights(app);
+    let Some((records, names)) = fights_before_reset(app) else { return };
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let _saving = state.fight_save.lock();
+    save_fight_records(app, &state, records, &names);
+}
+
+/// The fights on the meter, as records, with the names their slices need.
+fn fights_before_reset(app: &tauri::AppHandle) -> Option<(Vec<FightRecord>, share::SliceNames)> {
+    let state = app.try_state::<AppState>()?;
     if state.data_storage.damage_generation() <= 0 {
-        return;
+        return None;
     }
     let records = state.dps_calculator.lock().snapshot_boss_fights_force();
-    if !records.is_empty() {
-        tracing::info!("Saving {} fight(s) before combat data is cleared", records.len());
+    if records.is_empty() {
+        return None;
     }
-    save_fight_records(app, &state, records);
+    tracing::info!("Saving {} fight(s) before combat data is cleared", records.len());
+    Some((records, share::SliceNames::of(&state.data_storage)))
 }
 
 #[cfg(feature = "online")]
@@ -668,7 +895,15 @@ struct Hotkeys {
 }
 
 /// The keybind settings: changing one registers the keys again.
-const HOTKEY_KEYS: [&str; 3] = ["dpsMeter.hotkey", "dpsMeter.toggleWindowHotkey", "dpsMeter.lockHotkey"];
+const HOTKEY_KEYS: [&str; 4] =
+    ["dpsMeter.hotkey", "dpsMeter.toggleWindowHotkey", "dpsMeter.lockHotkey", "dpsMeter.pluginWindowsHotkey"];
+
+/// Open the desktop's own shortcut settings, where the keys are set on
+/// Linux (KDE keeps its own; see platform::hotkeys).
+#[tauri::command]
+fn open_desktop_shortcuts(hotkeys: tauri::State<'_, Hotkeys>) -> Result<(), String> {
+    hotkeys.manager.open_desktop_settings()
+}
 
 /// What each key's registration came to, for Settings to show.
 #[tauri::command]
@@ -711,77 +946,96 @@ fn restart_global_hotkeys(app: &tauri::AppHandle) {
     apply_global_hotkeys(app);
 }
 
+/// The keybind settings and their defaults, as Settings shows them: the
+/// plugin windows key has none (`""`), so it is off until one is set.
+pub const HOTKEY_DEFAULTS: [(&str, &str); 4] = [
+    ("dpsMeter.hotkey", "Ctrl+Alt+R"),
+    ("dpsMeter.toggleWindowHotkey", "Ctrl+Alt+Up"),
+    ("dpsMeter.lockHotkey", "Ctrl+Alt+L"),
+    ("dpsMeter.pluginWindowsHotkey", ""),
+];
+
+/// A keybind setting's key: what is saved, else (unset or unreadable) its
+/// default. A key of 0 is off.
+fn hotkey_of(settings: &Settings, key: &str) -> (u32, u32) {
+    let default = HOTKEY_DEFAULTS.iter().find(|(k, _)| *k == key).map(|(_, d)| *d).unwrap_or("");
+    let label = settings.get(key).unwrap_or_else(|| default.to_string());
+    platform::hotkeys::parse_hotkey_label(&label)
+        .or_else(|| platform::hotkeys::parse_hotkey_label(default))
+        .unwrap_or((0, 0))
+}
+
 /// Register the hotkeys from saved settings (or defaults).
+/// Show or hide the meter, and remember it (as Settings → Plugins → Show
+/// the DPS meter does): its keybind and the tray's. Hidden by auto-hide
+/// only, it is shown, as before, and nothing changes.
+pub(crate) fn toggle_meter(app: &tauri::AppHandle) {
+    if meter_wanted(app)
+        && let Some(window) = app.get_webview_window("main")
+        && (!window.is_visible().unwrap_or(true) || platform::window::is_hidden_in_place(&window))
+    {
+        show_meter_again(app, &window);
+        return;
+    }
+    set_meter_wanted(app, !meter_wanted(app));
+}
+
+/// Toggle the click-through lock, and tell the page so its button and saved
+/// setting follow: its keybind and the tray's.
+pub(crate) fn toggle_overlay_lock(app: &tauri::AppHandle) {
+    let locked = app
+        .try_state::<AppState>()
+        .is_some_and(|s| s.overlay_lock.locked.load(std::sync::atomic::Ordering::SeqCst));
+    if platform::window::cursor_position().is_none() && !locked {
+        return; // the lock is not offered here
+    }
+    apply_overlay_lock(app, !locked);
+    let _ = app.emit("overlay-lock-changed", !locked);
+}
+
 fn start_hotkeys(app: &tauri::AppHandle, settings: &Settings) {
-    let hotkey_handle = app.clone();
+    use platform::hotkeys::Binding;
     let Some(hotkeys) = app.try_state::<Hotkeys>() else { return };
     let status_handle = app.clone();
+    let binding = |name: &'static str, key: &str, on_fire: Box<dyn Fn() + Send>| {
+        let (mods, vk) = hotkey_of(settings, key);
+        Binding { name, mods, vk, on_fire }
+    };
 
-    let reload_label = settings
-        .get("dpsMeter.hotkey").unwrap_or_default();
-    let toggle_label = settings
-        .get("dpsMeter.toggleWindowHotkey").unwrap_or_default();
-    let lock_label = settings
-        .get("dpsMeter.lockHotkey").unwrap_or_default();
-
-    let (reload_mods, reload_vk) = platform::hotkeys::parse_hotkey_label(&reload_label)
-        .unwrap_or((0x0002 | 0x0001, 0x52)); // Default: Ctrl+Alt+R
-    let (toggle_mods, toggle_vk) = platform::hotkeys::parse_hotkey_label(&toggle_label)
-        .unwrap_or((0x0002 | 0x0001, 0x26)); // Default: Ctrl+Alt+Up
-    let (lock_mods, lock_vk) = platform::hotkeys::parse_hotkey_label(&lock_label)
-        .unwrap_or((0x0002 | 0x0001, 0x4C)); // Default: Ctrl+Alt+L
+    let h = app.clone();
+    let reload = binding("reload", "dpsMeter.hotkey", Box::new(move || {
+        tracing::info!("Hotkey: reload triggered");
+        save_fights_before_reset(&h);
+        if let Some(state) = h.try_state::<AppState>() {
+            state.dps_calculator.lock().restart_target_selection(true);
+            state.data_storage.forget_guessed_nicknames();
+        }
+        // Notify frontend to clear UI
+        let _ = h.emit("combat-reset", ());
+        let _ = h.emit("dps-update", &entity::dps_data::DpsData::new());
+    }));
+    let h = app.clone();
+    let toggle = binding("toggle", "dpsMeter.toggleWindowHotkey", Box::new(move || toggle_meter(&h)));
+    let h = app.clone();
+    let lock = binding("lock", "dpsMeter.lockHotkey", Box::new(move || toggle_overlay_lock(&h)));
+    let h = app.clone();
+    let plugins = binding("plugins", "dpsMeter.pluginWindowsHotkey", Box::new(move || {
+        tracing::info!("Hotkey: bringing back the plugin windows");
+        let app = h.clone();
+        // Window calls belong on the main thread.
+        let _ = h.run_on_main_thread(move || crate::plugins::bring_back_windows(&app));
+    }));
 
     hotkeys.manager.start(
-        reload_mods, reload_vk,
-        toggle_mods, toggle_vk,
-        lock_mods, lock_vk,
-        {
-            let h = hotkey_handle.clone();
-            move || {
-                tracing::info!("Hotkey: reload triggered");
-                save_fights_before_reset(&h);
-                if let Some(state) = h.try_state::<AppState>() {
-                    state.dps_calculator.lock().restart_target_selection(true);
-                    state.data_storage.forget_guessed_nicknames();
-                }
-                // Notify frontend to clear UI
-                let _ = h.emit("combat-reset", ());
-                let _ = h.emit("dps-update", &entity::dps_data::DpsData::new());
-            }
-        },
-        {
-            let h = hotkey_handle.clone();
-            move || {
-                // Toggle window visibility
-                if let Some(window) = h.get_webview_window("main") {
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
-                    } else {
-                        let _ = window.show();
-                        let _ = window.set_always_on_top(true);
-                        let _ = window.set_focus();
-                    }
-                }
-            }
-        },
-        {
-            let h = hotkey_handle;
-            move || {
-                // Toggle the click-through lock, and tell the page so
-                // its button and saved setting follow.
-                let locked = h
-                    .try_state::<AppState>()
-                    .is_some_and(|s| s.overlay_lock.locked.load(std::sync::atomic::Ordering::SeqCst));
-                if platform::window::cursor_position().is_none() && !locked {
-                    return; // the lock is not offered here
-                }
-                apply_overlay_lock(&h, !locked);
-                let _ = h.emit("overlay-lock-changed", !locked);
-            }
-        },
-        move |key, ok| {
+        vec![reload, toggle, lock, plugins],
+        move |key, state, assigned| {
             set_hotkey_status(&status_handle, |s| {
-                s.insert(key.to_string(), if ok { "ok" } else { "taken" }.to_string());
+                s.insert(key.to_string(), state.to_string());
+                // The key the desktop gave it, where the desktop decides.
+                match assigned {
+                    Some(a) => s.insert(format!("{key}.assigned"), a),
+                    None => s.remove(&format!("{key}.assigned")),
+                };
             });
         },
     );
@@ -975,6 +1229,7 @@ fn set_language(app: tauri::AppHandle, state: tauri::State<'_, AppState>, langua
         tracing::warn!("No i18n data dir available for language reload");
     }
     state.settings.set("dpsMeter.language", &language);
+    crate::tray::relabel(&app);
     crate::plugins::broadcast(&app, "language", serde_json::Value::String(language));
 }
 
@@ -1021,8 +1276,8 @@ fn set_manual_device(state: tauri::State<'_, AppState>, device: String) {
 }
 
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle) {
-    save_fights_before_reset(&app);
+pub(crate) fn quit_app(app: tauri::AppHandle) {
+    save_fights_before_quit(&app);
     flush_settings_before_exit(&app);
     app.exit(0);
 }
@@ -1035,13 +1290,19 @@ fn flush_settings_before_exit(app: &tauri::AppHandle) {
     }
 }
 
+/// A skill icon from the disk cache. `async`, like `write_cached_icon`: as
+/// sync commands they ran on the main thread, a hundred or so of each when a
+/// fight opened, and every window stopped moving and painting for seconds
+/// (2026-10-18).
 #[tauri::command]
-fn read_cached_icon(state: tauri::State<'_, AppState>, key: String) -> Option<String> {
+async fn read_cached_icon(app: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
     if !crate::history::fight_history::is_plain_name(&key) {
-        return None;
+        return Ok(None);
     }
-    let path = state.app_data_dir.join("icon_cache").join(&key);
-    std::fs::read_to_string(&path).ok()
+    crate::blocking::ICONS.run(move || {
+        let path = app.state::<AppState>().app_data_dir.join("icon_cache").join(&key);
+        std::fs::read_to_string(&path).ok()
+    }).await
 }
 
 #[tauri::command]
@@ -1058,6 +1319,17 @@ fn suspend_capture(state: tauri::State<'_, AppState>, suspended: bool) {
 #[tauri::command]
 fn overlay_lock_supported() -> bool {
     platform::window::cursor_position().is_some()
+}
+
+/// Where the mouse pointer is from the calling window's top-left, in screen
+/// pixels, or `None` where it can't be read (a native Wayland window). The
+/// hover tooltip checks it: a row can miss its mouse-leave (the game takes
+/// the pointer while it is over the meter), and the tooltip then stayed up.
+#[tauri::command]
+fn pointer_in_window(window: tauri::WebviewWindow) -> Option<(i32, i32)> {
+    let (px, py) = platform::window::cursor_position()?;
+    let origin = window.inner_position().ok()?;
+    Some((px - origin.x, py - origin.y))
 }
 
 #[tauri::command]
@@ -1106,15 +1378,21 @@ fn log_from_ui(message: String) {
     tracing::warn!("UI: {message}");
 }
 
+/// Keep a downloaded skill icon (base64) for next time. Off the main thread;
+/// see `read_cached_icon`. An icon already kept is not written again.
 #[tauri::command]
-fn write_cached_icon(state: tauri::State<'_, AppState>, key: String, data: String) {
+async fn write_cached_icon(app: tauri::AppHandle, key: String, data: String) -> Result<(), String> {
     if !crate::history::fight_history::is_plain_name(&key) {
-        return;
+        return Ok(());
     }
-    let cache_dir = state.app_data_dir.join("icon_cache");
-    let _ = std::fs::create_dir_all(&cache_dir);
-    let path = cache_dir.join(&key);
-    let _ = std::fs::write(&path, &data);
+    crate::blocking::ICONS.run(move || {
+        let cache_dir = app.state::<AppState>().app_data_dir.join("icon_cache");
+        let path = cache_dir.join(&key);
+        if !path.exists() {
+            let _ = std::fs::create_dir_all(&cache_dir);
+            let _ = std::fs::write(&path, &data);
+        }
+    }).await
 }
 
 
@@ -1132,6 +1410,7 @@ async fn show_update_window(
     arch_sha256: Option<String>,
     deb_sha256: Option<String>,
     rpm_sha256: Option<String>,
+    ask: Option<bool>,
 ) -> Result<bool, String> {
     // The manifest names a package per platform (the MSI; the Arch, Debian
     // and RPM packages). Where this install cannot update itself, or the
@@ -1154,6 +1433,11 @@ async fn show_update_window(
     if !platform::updater::supported() || package_url.is_empty() {
         tracing::info!("Update {} available (running {}); this install updates through its package manager", latest, current);
         return Ok(false);
+    }
+    // `ask` false: only whether there is something to offer, for the green
+    // button in the meter's title, which asks when clicked.
+    if ask == Some(false) {
+        return Ok(true);
     }
     let msg = format!("A new update is available!\n\nCurrent: {}\nLatest: {}\n\nDownload and install now?", current, latest);
 
@@ -1485,8 +1769,9 @@ async fn show_update_window(
     arch_sha256: Option<String>,
     deb_sha256: Option<String>,
     rpm_sha256: Option<String>,
+    ask: Option<bool>,
 ) -> Result<bool, String> {
-    let _ = (current, latest, msi_url, arch_url, deb_url, rpm_url, msi_sha256, arch_sha256, deb_sha256, rpm_sha256);
+    let _ = (current, latest, msi_url, arch_url, deb_url, rpm_url, msi_sha256, arch_sha256, deb_sha256, rpm_sha256, ask);
     Ok(false)
 }
 
@@ -1538,6 +1823,11 @@ fn resize_window(app: tauri::AppHandle, width: f64, height: f64, scale: Option<f
 /// position and sizing the meter, so its initial 400x300 rectangle never flashes.
 #[tauri::command]
 fn main_window_ready(window: tauri::WebviewWindow) {
+    // Hidden for plugins only: it stays hidden.
+    if window.label() == "main" && !meter_wanted(window.app_handle()) {
+        platform::window::hide_in_place(&window);
+        return;
+    }
     platform::window_startup::main_ready(&window);
 }
 
@@ -1765,6 +2055,95 @@ fn details_geometry_is_user_placed(app: &tauri::AppHandle) -> bool {
 
 const DETAILS_USER_PLACED_KEY: &str = "window.details.userPlaced";
 
+/// The windows that float apart from the overlay and reopen where they were
+/// left. Per-fight windows (details-*) are deliberately absent: they are
+/// opened to be read and closed, and keying geometry by fight id would grow
+/// settings without bound.
+const TOOL_WINDOWS: [&str; 3] = ["details", "settings", "history"];
+
+/// Settings, History and Details are on top of the overlay (always on top
+/// itself), or they could not be reached over it while the game is in front.
+/// But only while the meter or the game is: on top of a browser the player
+/// switched to, Settings stayed in the way (2026-10-18). Focused, a tool
+/// window is on top; when it loses the front to another program, it goes
+/// back to an ordinary window until it is clicked again. Asked a moment
+/// after the focus moves, when the new front window is known.
+fn keep_on_top_while_ours(app: &tauri::AppHandle, label: &str, focused: bool) {
+    let Some(window) = app.get_webview_window(label) else { return };
+    if focused {
+        let _ = window.set_always_on_top(true);
+        return;
+    }
+    let app = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let Some(window) = handle.get_webview_window(&label) else { return };
+            if !window.is_focused().unwrap_or(false) && !platform::window::front_is_ours_or_game() {
+                let _ = window.set_always_on_top(false);
+            }
+        });
+    });
+}
+
+/// Remember where tool window `label` is and its size. Called on every move
+/// and resize, and every 5 s as before: with only the timer, a window moved
+/// and closed within 5 s reopened where it had been (Battle History,
+/// 2026-10-18).
+fn save_tool_window_geometry(handle: &tauri::AppHandle, label: &str) {
+    save_window_geometry(handle, label, label);
+}
+
+/// The settings key the fight windows (`details-<fight id>`) share: one
+/// place and size for all of them, where the last one was left, rather than
+/// one per fight, which never reopened anywhere but the middle (2026-10-18).
+const FIGHT_WINDOW_KEY: &str = "fight";
+
+/// Remember window `label` as `key` (see `save_tool_window_geometry`).
+fn save_window_geometry(handle: &tauri::AppHandle, label: &str, key: &str) {
+    let Some(state) = handle.try_state::<AppState>() else { return };
+    // While Details is pinned to a monitor its rect comes from the setting,
+    // not from the user. Saving it poisons the windowed geometry: turn the
+    // setting off and Details would reopen full-size on that same screen.
+    if label == "details" && details_monitor_setting(handle).is_some() {
+        return;
+    }
+    let Some(w) = handle.get_webview_window(label) else { return };
+    if !w.is_visible().unwrap_or(false) || w.is_minimized().unwrap_or(false) {
+        return;
+    }
+    if let Ok(pos) = w.outer_position() {
+        if pos.x > -10000 && pos.y > -10000 {
+            state.settings.set(&format!("window.{}.x", key), &pos.x.to_string());
+            state.settings.set(&format!("window.{}.y", key), &pos.y.to_string());
+        }
+    }
+    // Inner, not outer: restore applies it with set_size, which sets the
+    // inner size. Saving the outer size grew every tool window by its border
+    // (16x9 px here) on each reopen.
+    if let Ok(size) = w.inner_size() {
+        if size.width > 100 && size.height > 100 {
+            state.settings.set(&format!("window.{}.w", key), &size.width.to_string());
+            state.settings.set(&format!("window.{}.h", key), &size.height.to_string());
+        }
+    }
+    // Details is unpinned here, but the window may still be sitting on the
+    // fill rect from before the setting was switched off. A rect that
+    // swallows a whole screen is not a placement anyone chose by dragging, so
+    // it never earns the marker.
+    if label == "details" {
+        let filling = match (w.outer_position(), w.outer_size()) {
+            (Ok(pos), Ok(size)) => rect_covers_a_monitor(handle, pos, size),
+            _ => true,
+        };
+        if !filling {
+            state.settings.set(DETAILS_USER_PLACED_KEY, "true");
+        }
+    }
+}
+
 /// Whether a window rect swallows a whole monitor — the shape of a
 /// monitor-filling placement rather than somewhere the user dragged a window.
 fn rect_covers_a_monitor(
@@ -1800,6 +2179,54 @@ fn center_on_overlay_monitor(app: &tauri::AppHandle, window: &tauri::WebviewWind
         }
     }
     let _ = window.center();
+}
+
+/// Where a tool window should be born, in logical units for its builder: the
+/// spot `label`'s window was left at, and its size unless `keep_size` is
+/// false; else (or with no `label`) centred on the overlay's screen at `size`.
+/// Built at the default spot and moved after `build()` returned, it showed
+/// there first and then jumped: on Windows `build()` waits for WebView2, so
+/// the jump was plain to see (Settings, 2026-10-18). `restore_window_geometry` still runs after, to set
+/// the physical pixels exactly; the window is already there.
+fn birth_place(app: &tauri::AppHandle, label: Option<&str>, size: (f64, f64), keep_size: bool) -> (f64, f64, f64, f64) {
+    let saved = |k: &str| {
+        let label = label?;
+        app.try_state::<AppState>()
+            .and_then(|s| s.settings.get(&format!("window.{}.{}", label, k)))
+            .and_then(|v| v.trim().parse::<i32>().ok())
+    };
+    let monitors = app.available_monitors().unwrap_or_default();
+    if let (Some(x), Some(y)) = (saved("x"), saved("y")) {
+        let screen = monitors.iter().find(|m| {
+            let p = *m.position();
+            let s = *m.size();
+            x >= p.x - 64 && x < p.x + s.width as i32 && y >= p.y - 64 && y < p.y + s.height as i32
+        });
+        if let Some(m) = screen {
+            let scale = m.scale_factor();
+            let (mut w, mut h) = size;
+            if keep_size {
+                if let (Some(sw), Some(sh)) = (saved("w"), saved("h")) {
+                    if sw > 200 && sh > 150 {
+                        (w, h) = (sw as f64 / scale, sh as f64 / scale);
+                    }
+                }
+            }
+            return (x as f64 / scale, y as f64 / scale, w, h);
+        }
+    }
+    let monitor = app
+        .get_webview_window("main")
+        .and_then(|main| main.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    match monitor {
+        Some(m) => {
+            let scale = m.scale_factor();
+            let (p, s) = (m.position().to_logical::<f64>(scale), m.size().to_logical::<f64>(scale));
+            (p.x + ((s.width - size.0) / 2.0).max(0.0), p.y + ((s.height - size.1) / 2.0).max(0.0), size.0, size.1)
+        }
+        None => (100.0, 100.0, size.0, size.1),
+    }
 }
 
 /// Restore a tool window's remembered geometry. Returns true if anything was
@@ -1856,8 +2283,36 @@ fn restore_window_geometry(app: &tauri::AppHandle, window: &tauri::WebviewWindow
 /// through `run_on_main_thread` makes it worse, not better. An `async` command
 /// runs off the main thread, so the loop stays free to complete the callback.
 /// See <https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html>.
+/// The Settings section a window opened on its behalf is to show first
+/// (`open_settings_at`), until its page asks (`take_settings_section`).
+fn pending_settings_section() -> &'static Mutex<Option<String>> {
+    static PENDING: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+    PENDING.get_or_init(Mutex::default)
+}
+
+/// Open Settings on one section (the plugin dock's button: Plugins). An
+/// open Settings window switches to it; a new one shows it first.
 #[tauri::command]
-async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_settings_at(app: tauri::AppHandle, section: String) -> Result<(), String> {
+    if section.is_empty() || section.len() > 24 || !section.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+        return Err("not a section".into());
+    }
+    if app.get_webview_window("settings").is_some() {
+        let _ = app.emit_to("settings", "settings-section", &section);
+    } else {
+        *pending_settings_section().lock() = Some(section);
+    }
+    open_settings_window(app).await
+}
+
+/// The section a new Settings window opens on, once (`open_settings_at`).
+#[tauri::command]
+fn take_settings_section() -> Option<String> {
+    pending_settings_section().lock().take()
+}
+
+#[tauri::command]
+pub(crate) async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     let ready = platform::window_startup::request_settings_open();
     if let Some(existing) = app.get_webview_window("settings") {
         if !ready {
@@ -1906,6 +2361,7 @@ window.__A2_VIEW__ = 'settings';
 
 fn build_settings_window(app: &tauri::AppHandle) -> Result<(), String> {
     platform::window_startup::begin_settings_load();
+    let (x, y, _, _) = birth_place(app, Some("settings"), (760.0, 820.0), false);
     let window = tauri::WebviewWindowBuilder::new(
         app,
         "settings",
@@ -1922,6 +2378,7 @@ fn build_settings_window(app: &tauri::AppHandle) -> Result<(), String> {
     .always_on_top(true)
     .resizable(true)
     .skip_taskbar(false)
+    .position(x, y)
     .inner_size(760.0, 820.0)
     .min_inner_size(520.0, 420.0)
     // Built visible on Windows, with the app's background colour to cover the
@@ -2151,8 +2608,12 @@ async fn request_details_view(
 /// to be read and closed, and persisting geometry per fight id would accumulate
 /// settings without bound.
 fn open_fight_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
+    // Where the last fight window was left, at its size; cascaded only past
+    // fight windows already open. Born there, not moved after `build()`: it
+    // showed at the default spot first (see birth_place).
     let step = app.webview_windows().keys().filter(|l| l.starts_with("details-")).count() as f64;
     let offset = (step % 6.0) * 34.0;
+    let (x, y, w, h) = birth_place(app, Some(FIGHT_WINDOW_KEY), (1180.0, 760.0), true);
 
     let window = tauri::WebviewWindowBuilder::new(
         app,
@@ -2166,29 +2627,20 @@ fn open_fight_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
     .always_on_top(true)
     .resizable(true)
     .skip_taskbar(false)
-    .inner_size(1180.0, 760.0)
+    .position(x + offset, y + offset)
+    .inner_size(w, h)
     .min_inner_size(520.0, 360.0)
     .background_color(tauri::window::Color(10, 14, 22, 255))
     .build()
     .map_err(|e| e.to_string())?;
-    platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: 1180.0, height: 760.0 }));
-
-    center_on_overlay_monitor(app, &window);
-    if offset > 0.0 {
-        if let Ok(pos) = window.outer_position() {
-            let shift = offset as i32;
-            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: pos.x + shift,
-                y: pos.y + shift,
-            }));
-        }
-    }
+    platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
     Ok(())
 }
 
 /// The History window. Persistent by design — it is the browser you pick fights
 /// from, and it stays put while those fights open in windows of their own.
 fn open_history_window_inner(app: &tauri::AppHandle) -> Result<(), String> {
+    let (x, y, w, h) = birth_place(app, Some("history"), (1100.0, 720.0), true);
     let window = tauri::WebviewWindowBuilder::new(
         app,
         "history",
@@ -2201,12 +2653,13 @@ fn open_history_window_inner(app: &tauri::AppHandle) -> Result<(), String> {
     .always_on_top(true)
     .resizable(true)
     .skip_taskbar(false)
-    .inner_size(1100.0, 720.0)
+    .position(x, y)
+    .inner_size(w, h)
     .min_inner_size(480.0, 360.0)
     .background_color(tauri::window::Color(10, 14, 22, 255))
     .build()
     .map_err(|e| e.to_string())?;
-    platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: 1100.0, height: 720.0 }));
+    platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
 
     if !restore_window_geometry(app, &window, "history") {
         center_on_overlay_monitor(app, &window);
@@ -2226,6 +2679,8 @@ fn close_tool_window(window: tauri::Window) {
 /// give them a window they can move, not black out a display over the game.
 /// A remembered position still wins — this is only the first-run geometry.
 fn open_details_windowed(app: &tauri::AppHandle) -> Result<(), String> {
+    let placed = details_geometry_is_user_placed(app).then_some("details");
+    let (x, y, w, h) = birth_place(app, placed, (1180.0, 760.0), true);
     let window = tauri::WebviewWindowBuilder::new(
         app,
         "details",
@@ -2238,14 +2693,15 @@ fn open_details_windowed(app: &tauri::AppHandle) -> Result<(), String> {
     .always_on_top(true)
     .resizable(true)
     .skip_taskbar(false)
-    .inner_size(1180.0, 760.0)
+    .position(x, y)
+    .inner_size(w, h)
     .min_inner_size(520.0, 360.0)
     // Visible, with the app background painted behind the load — same reason as
     // the monitor-filling path: a hidden WebView2 window may never load at all.
     .background_color(tauri::window::Color(10, 14, 22, 255))
     .build()
     .map_err(|e| e.to_string())?;
-    platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: 1180.0, height: 760.0 }));
+    platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
 
     // A remembered position still wins, but only one the user actually chose.
     if !details_geometry_is_user_placed(app)
@@ -2683,11 +3139,19 @@ pub fn run() {
             platform::window_startup::loads_hidden(),
             platform::window_startup::reuses_settings(),
         ))
+        // One meter at a time: a second start shows this one instead. Two
+        // ran side by side (a tester), each with its plugins, and every alert
+        // came twice. First, as the plugin asks.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tracing::info!("A second start: showing this meter instead");
+            set_meter_wanted(app, true);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri::plugin::Builder::<_, ()>::new("settings-persistence")
             .on_event(|app, event| {
                 // Flush before normal exit or restart, with Exit as a final safeguard.
                 if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+                    save_queued_fights(app);
                     flush_settings_before_exit(app);
                 }
             })
@@ -2700,11 +3164,69 @@ pub fn run() {
         // Closing the meter quits, even with Details, History or a kept
         // Settings window still open.
         .on_window_event(|window, event| {
-            // Plugin windows open where they were left.
+            // Plugin windows open where they were left, at the size they
+            // were left (#76).
             if let tauri::WindowEvent::Moved(at) = event
-                && window.label().starts_with("plugin-")
+                && crate::plugins::is_plugin_window(window.label())
             {
                 crate::plugins::note_moved(window.app_handle(), window.label(), *at);
+            }
+            if let tauri::WindowEvent::Resized(size) = event
+                && crate::plugins::is_plugin_window(window.label())
+            {
+                crate::plugins::note_resized(window.app_handle(), window, *size);
+            }
+            if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_))
+                && TOOL_WINDOWS.contains(&window.label())
+            {
+                save_tool_window_geometry(window.app_handle(), window.label());
+            }
+            if let tauri::WindowEvent::Focused(focused) = event
+                && (TOOL_WINDOWS.contains(&window.label()) || window.label().starts_with("details-"))
+            {
+                keep_on_top_while_ours(window.app_handle(), window.label(), *focused);
+            }
+            if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_))
+                && window.label().starts_with("details-")
+            {
+                save_window_geometry(window.app_handle(), window.label(), FIGHT_WINDOW_KEY);
+            }
+            // Plugin widgets (#77) open where they were left, and close with
+            // their plugin's window.
+            if let tauri::WindowEvent::Moved(at) = event
+                && window.label().starts_with("pw_")
+            {
+                crate::plugins::widgets::note_moved(window.app_handle(), window.label(), *at);
+            }
+            // The dock gone: its plugins' frames with it, so their widgets
+            // and follows too, as a plugin window's below.
+            if let tauri::WindowEvent::Destroyed = event
+                && window.label() == crate::plugins::dock::LABEL
+            {
+                for id in crate::plugins::dock::members(window.app_handle()) {
+                    crate::plugins::widgets::close_all(window.app_handle(), &id);
+                    crate::plugins::boss_live::forget_plugin(window.app_handle(), &id);
+                }
+            }
+            if let tauri::WindowEvent::Destroyed = event
+                && let Some(id) = window.label().strip_prefix("plugin-")
+            {
+                // Moved into the dock: it runs there now, and has already
+                // opened its widgets and follows again (the window goes after
+                // the dock's frame starts), so they stay. Closed, they went
+                // with the window (Ping's display, 2026-10-23).
+                if !crate::plugins::dock::members(window.app_handle()).iter().any(|m| m == id) {
+                    crate::plugins::widgets::close_all(window.app_handle(), id);
+                    crate::plugins::boss_live::forget_plugin(window.app_handle(), id);
+                }
+                // The meter hidden and its last plugin window closed: nothing
+                // would be left on screen, so the meter comes back.
+                let app = window.app_handle();
+                let label = window.label().to_string();
+                let others = app.webview_windows().into_keys().any(|l| l != label && crate::plugins::is_plugin_window(&l));
+                if !others && !meter_wanted(app) {
+                    set_meter_wanted(app, true);
+                }
             }
             if window.label() == "main"
                 && let tauri::WindowEvent::CloseRequested { api, .. } = event
@@ -2808,6 +3330,7 @@ pub fn run() {
                 port_detector: port_detector.clone(),
                 fight_history: FightHistoryManager::new(app_data_dir.clone()),
                 fight_save: Mutex::new(()),
+                queued_fight_saves: Mutex::new(Vec::new()),
                 settings,
                 skill_lookup: skill_lookup.clone(),
                 npc_lookup: npc_lookup.clone(),
@@ -2839,28 +3362,41 @@ pub fn run() {
             {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
-                    let state = handle.state::<AppState>();
                     // For "Hide when AION2 isn't focused": KWin says which
                     // window is active (platform::linux::focus).
+                    // On Wayland, KWin keeps the windows where they were
+                    // left (#76). Before the watch, which starts the script.
+                    let (save_app, load_app) = (handle.clone(), handle.clone());
+                    platform::window::keep_places(
+                        move |title, rect| save_window_place(&save_app, title, rect),
+                        move |title| load_window_place(&load_app, title),
+                    );
+                    let shot_app = handle.clone();
+                    platform::window_detector::watch_screenshot_tool(move |in_front| screenshot_tool(&shot_app, in_front));
                     let focus_app = handle.clone();
                     if let Err(e) = platform::window_detector::watch_focus(move || auto_hide_now(&focus_app)) {
                         tracing::warn!("Cannot follow the active window: {e}");
                     }
-                    if let Err(e) = platform::window_rules::keep_above_fullscreen(false) {
-                        tracing::warn!("Could not add the KWin rule: {e}");
-                    }
-                    // The overlay takes no focus, so a click on it leaves the
-                    // game focused (#71). Its own key, so installs that
-                    // already have the first rule get this one too.
-                    const NO_FOCUS_KEY: &str = "dpsMeter.kwinNoFocusRuleAdded";
-                    let done = state.settings.get(NO_FOCUS_KEY).as_deref() == Some("true");
-                    match platform::window_rules::click_without_focus(done) {
-                        Ok(true) if !done => {
-                            state.settings.set(NO_FOCUS_KEY, "true");
+                    // Each rule checked at every start and put back when
+                    // missing: KWin can drop rules it did not write itself,
+                    // and a rule added once and never again left the overlay
+                    // taking the focus (a CachyOS player, 2026-10-19). The
+                    // overlay takes no focus, so a click on it leaves the game
+                    // focused (#71); nor do plugins' icons. Plugin windows
+                    // stay above the game, so their alerts are seen.
+                    let rules: [(&str, fn(bool) -> Result<bool, String>); 4] = [
+                        ("above", platform::window_rules::keep_above_fullscreen),
+                        ("no-focus", platform::window_rules::click_without_focus),
+                        ("icons", platform::window_rules::icons_without_focus),
+                        ("plugin windows", platform::window_rules::plugin_windows_above),
+                    ];
+                    for (name, ensure) in rules {
+                        if let Err(e) = ensure(false) {
+                            tracing::warn!("Could not add the KWin {name} rule: {e}");
                         }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!("Could not add the KWin no-focus rule: {e}"),
                     }
+                    // And put back while the meter runs, if KWin drops them.
+                    platform::window_rules::keep_rules();
                 });
             }
             {
@@ -2872,6 +3408,8 @@ pub fn run() {
             crate::presence::spawn(app.handle().clone());
             #[cfg(feature = "online")]
             crate::boss_report::spawn(app.handle().clone());
+            #[cfg(feature = "online")]
+            crate::supply_report::spawn(app.handle().clone());
             #[cfg(feature = "online")]
             crate::party_presence::spawn(app.handle().clone());
             #[cfg(feature = "online")]
@@ -2915,7 +3453,21 @@ pub fn run() {
                 if let Ok(size) = window.inner_size() {
                     platform::window::set_size(&window, tauri::Size::Physical(size));
                 }
-                platform::window_startup::arm_main_fallback(window);
+                if meter_wanted(app.handle()) {
+                    platform::window_startup::arm_main_fallback(window);
+                } else {
+                    // Plugins only: the meter stays hidden, unless no plugin
+                    // window is on screen by then.
+                    platform::window::hide_in_place(&window);
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                        // No plugin window on screen by then (none started,
+                        // or all hidden): the meter comes back.
+                        let h = handle.clone();
+                        let _ = handle.run_on_main_thread(move || keep_something_on_screen(&h, ""));
+                    });
+                }
             }
 
             // Check if Npcap is available before starting capture
@@ -2927,7 +3479,7 @@ pub fn run() {
             // Start capture pipeline
             let (tx, rx) = mpsc::channel::<CapturedPayload>(4096);
 
-            let capturer = PcapCapturer::new(tx);
+            let capturer = PcapCapturer::new(tx, port_detector.clone());
             if npcap_available {
                 capturer.start();
             } else {
@@ -2957,13 +3509,14 @@ pub fn run() {
             plugin_host.reload(app.handle());
             crate::plugins::restore_windows(app.handle());
             #[cfg(feature = "online")]
-            crate::plugins::alert_updates_at_start(app.handle());
+            crate::plugins::find_updates_at_start(app.handle());
 
             app.manage(Hotkeys {
                 manager: platform::hotkeys::HotkeyManager::new(),
                 status: Arc::new(Mutex::new(HashMap::new())),
             });
             apply_global_hotkeys(app.handle());
+            crate::tray::spawn(app.handle());
 
             // DPS to the windows, checked at the meter update rate (200 ms
             // unless changed in Settings > Advanced) and sent when it changed
@@ -3037,6 +3590,12 @@ pub fn run() {
                 let mut tick_count: u64 = 0;
                 let mut hide_delay: u64 = 0; // ticks to wait before hiding
                 let mut last_ping: Option<u64> = None;
+                // The meter hidden because AION2 is closed (Settings).
+                let mut hidden_closed = false;
+                // The other windows hidden with the meter (auto-hide), and how
+                // many ticks nothing of ours or the game has been in front.
+                let mut hidden_with_meter: std::collections::HashSet<String> = Default::default();
+                let mut others_delay: u32 = 0;
                 let mut last_odyle: Option<((u32, u32), Option<String>)> = None;
                 loop {
                     interval.tick().await;
@@ -3068,10 +3627,35 @@ pub fn run() {
                             }
                         }
 
+                        // --- Hide while AION2 is closed, or while solo (every 2 s) ---
+                        // Hidden as the game closes or the party breaks up (or
+                        // the option is turned on then), shown as it opens or a
+                        // party forms: in between, the keybind can still bring
+                        // the meter back. Solo is fewer than two in the party,
+                        // as the game last told (Hirai, 2026-10-22).
+                        if tick_count % 4 == 0 {
+                            let on = |key: &str| state.settings.get(key).as_deref() == Some("true");
+                            let closed = on("dpsMeter.hideWhenGameClosed") && !platform::window_detector::find_aion2_window();
+                            let solo = on("dpsMeter.hideWhenSolo") && state.data_storage.get_party_members().len() < 2;
+                            let want = meter_wanted(&handle) && (closed || solo);
+                            if want != hidden_closed {
+                                if let Some(window) = handle.get_webview_window("main") {
+                                    if want {
+                                        platform::window::minimize_off_top(&window);
+                                    } else {
+                                        show_meter_again(&handle, &window);
+                                    }
+                                }
+                                hidden_closed = want;
+                            }
+                        }
+
                         // --- Auto-hide when AION2 loses focus (every tick) ---
                         let auto_hide = tick_count > 20
+                            && !hidden_closed
                             && state.settings.get("dpsMeter.autoHideMeter")
-                                .unwrap_or_default() == "true";
+                                .unwrap_or_default() == "true"
+                            && meter_wanted(&handle);
                         if auto_hide {
                             if let Some(window) = handle.get_webview_window("main") {
                                 let aion_fg = platform::window_detector::is_aion2_foreground();
@@ -3099,6 +3683,24 @@ pub fn run() {
                                     }
                                 }
                             }
+                            // The rest go and come back with it: gone while
+                            // another program is in front, back with the game
+                            // or any of the meter's windows (Settings in use
+                            // stays).
+                            if platform::window::front_is_ours_or_game() {
+                                others_delay = 0;
+                                if !hidden_with_meter.is_empty() {
+                                    show_with_meter(&handle, &mut hidden_with_meter);
+                                }
+                            } else {
+                                others_delay += 1;
+                                if others_delay >= 3 {
+                                    hide_with_meter(&handle, &mut hidden_with_meter);
+                                }
+                            }
+                        } else if !hidden_with_meter.is_empty() {
+                            // Auto-hide turned off meanwhile: back.
+                            show_with_meter(&handle, &mut hidden_with_meter);
                         }
 
                         // --- Save window position every ~5 seconds (every 10 ticks) ---
@@ -3117,53 +3719,8 @@ pub fn run() {
                             // (details-*) are deliberately absent: they are
                             // opened to be read and closed, and keying geometry
                             // by fight id would grow settings without bound.
-                            for label in ["details", "settings", "history"] {
-                                // While Details is pinned to a monitor its rect
-                                // comes from the setting, not from the user.
-                                // Saving it poisons the windowed geometry: turn
-                                // the setting off and Details would reopen
-                                // full-size on that same screen.
-                                if label == "details"
-                                    && details_monitor_setting(&handle).is_some()
-                                {
-                                    continue;
-                                }
-                                if let Some(w) = handle.get_webview_window(label) {
-                                    if !w.is_visible().unwrap_or(false) {
-                                        continue;
-                                    }
-                                    if let Ok(pos) = w.outer_position() {
-                                        if pos.x > -10000 && pos.y > -10000 {
-                                            state.settings.set(&format!("window.{}.x", label), &pos.x.to_string());
-                                            state.settings.set(&format!("window.{}.y", label), &pos.y.to_string());
-                                        }
-                                    }
-                                    // Inner, not outer: restore applies it with
-                                    // set_size, which sets the inner size. Saving
-                                    // the outer size grew every tool window by its
-                                    // border (16x9 px here) on each reopen.
-                                    if let Ok(size) = w.inner_size() {
-                                        if size.width > 100 && size.height > 100 {
-                                            state.settings.set(&format!("window.{}.w", label), &size.width.to_string());
-                                            state.settings.set(&format!("window.{}.h", label), &size.height.to_string());
-                                        }
-                                    }
-                                    // Details is unpinned here, but the window
-                                    // may still be sitting on the fill rect from
-                                    // before the setting was switched off. A rect
-                                    // that swallows a whole screen is not a
-                                    // placement anyone chose by dragging, so it
-                                    // never earns the marker.
-                                    if label == "details" {
-                                        let filling = match (w.outer_position(), w.outer_size()) {
-                                            (Ok(pos), Ok(size)) => rect_covers_a_monitor(&handle, pos, size),
-                                            _ => true,
-                                        };
-                                        if !filling {
-                                            state.settings.set(DETAILS_USER_PLACED_KEY, "true");
-                                        }
-                                    }
-                                }
+                            for label in TOOL_WINDOWS {
+                                save_tool_window_geometry(&handle, label);
                             }
                         }
 
@@ -3186,7 +3743,8 @@ pub fn run() {
                                 .map(|mut calc| calc.snapshot_boss_fights());
                             if let Some(records) = records {
                                 // The calculator guard is gone before any disk I/O.
-                                save_fight_records(&handle, &state, records);
+                                let names = share::SliceNames::of(&state.data_storage);
+                                save_fight_records(&handle, &state, records, &names);
                             }
                         }
                         // Automatic uploads that failed and are due again,
@@ -3290,11 +3848,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             get_hotkey_status,
+            open_desktop_shortcuts,
             crate::plugins::plugin_list,
             crate::plugins::plugin_set_dev_mode,
             crate::plugins::plugin_add_folder,
             crate::plugins::plugin_remove_folder,
             crate::plugins::plugin_check_updates,
+            crate::plugins::plugin_pending_updates,
+            crate::plugins::plugin_offer_updates,
             crate::plugins::plugin_catalog,
             crate::plugins::plugin_install,
             crate::plugins::plugin_uninstall,
@@ -3304,9 +3865,32 @@ pub fn run() {
             crate::plugins::plugin_close,
             crate::plugins::plugin_open,
             crate::plugins::plugin_set_enabled,
+            crate::plugins::plugin_set_hide,
             crate::plugins::plugin_hello,
+            open_settings_at,
+            take_settings_section,
+            crate::plugins::dock::dock_hello,
+            crate::plugins::dock::dock_close,
+            crate::plugins::dock::dock_fold,
+            crate::plugins::dock::plugin_set_docked,
+            crate::plugins::set_plugin_theme,
+            crate::plugins::widgets::plugin_widget_open,
+            crate::plugins::widgets::plugin_widget_close,
+            crate::plugins::widgets::plugin_widget_send,
+            crate::plugins::widgets::plugin_widgets_lock,
+            crate::plugins::widgets::plugin_widgets_locked,
+            crate::plugins::widgets::plugin_widget_hello,
+            crate::plugins::widgets::plugin_widget_post,
+            crate::plugins::widgets::plugin_widget_drag,
+            crate::plugins::boss_live::plugin_boss_follow,
+            crate::plugins::widgets::plugin_widget_area,
+            crate::plugins::widgets::plugin_widget_where,
+            crate::plugins::widgets::plugin_widget_place,
+            set_meter_shown,
+            meter_shown,
             crate::plugins::plugin_storage_get,
             crate::plugins::plugin_boss_timers,
+            crate::plugins::plugin_abyss_siege,
             crate::plugins::plugin_storage_set,
             get_dps_snapshot,
             get_skill_details,
@@ -3352,6 +3936,7 @@ pub fn run() {
             log_from_ui,
             suspend_capture,
             overlay_lock_supported,
+            pointer_in_window,
             set_overlay_locked,
             set_overlay_card_open,
             is_overlay_locked,

@@ -435,7 +435,15 @@ html:lang(zh-Hant), html:lang(zh-Hant) body {
   min-height: 30px;
   position: relative;
   border-radius: var(--rounded);
-  background: rgba(var(--hud-bg), var(--window-opacity));
+  /* Two layers: the title bar (its height measured into --title-h) at its own
+     opacity, which follows the background's until it is set apart in
+     Settings, and the rest at the background's. */
+  background:
+    linear-gradient(rgba(var(--hud-bg), var(--title-opacity, var(--window-opacity))),
+                    rgba(var(--hud-bg), var(--title-opacity, var(--window-opacity))))
+      top / 100% var(--title-h, 31px) no-repeat,
+    linear-gradient(rgba(var(--hud-bg), var(--window-opacity)), rgba(var(--hud-bg), var(--window-opacity)))
+      bottom / 100% calc(100% - var(--title-h, 31px)) no-repeat;
   border: 1px solid rgba(255, 255, 255, min(0.14, calc(var(--window-opacity) * 0.2)));
   box-shadow: 0 8px 28px rgba(0, 0, 0, calc(var(--window-opacity) * 0.45));
 }
@@ -548,6 +556,10 @@ body.linuxOverlay .meter {
 .header .headerBtns.hasSuspendBtn { gap: 6px; }
 .header .headerBtns .suspendBtn { color: rgba(255, 255, 255, 0.55); }
 .header .headerBtns .suspendBtn.isSuspended { color: #ff6b6b; }
+/* An update waiting (meter or plugins): green, until clicked. */
+.header .headerBtns .updatesBtn { color: #3ddc84; }
+.header .headerBtns .updatesBtn:hover { color: #7af0ae; }
+.header .headerBtns .updatesBtn[hidden] { display: none; }
 
 /* ---------- boss HP: the waterline ---------- */
 
@@ -1085,6 +1097,12 @@ html:not(.hoverStale) .list .item:hover { background: rgba(255, 255, 255, 0.075)
   font-style: italic;
   color: var(--hud-sub);
 }
+/* Everyone not in your party on an open-world boss, from its lost HP. */
+.meter .item.isOthers .content .name {
+  font-style: italic;
+  color: var(--hud-sub);
+}
+.meter .item.isOthers { cursor: default; }
 body.mainPlayerNamesBold :is(.meter, .barPreviewPanel) .item .content .name,
 body.mainPlayerNamesBold :is(.meter, .barPreviewPanel) .item .content .name.isCjk {
   font-weight: 750;
@@ -1419,8 +1437,60 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
    notes (core.js). */
 /* The tab list is the nav's own children, for the layout. */
 .settingsPanel .settingsTabs { display: contents; }
-.settingsPanel .settingsNav .settingsVersionLink {
+/* The version, and beside it a check for updates and what it found. */
+.settingsPanel .settingsNav .settingsVersionRow {
   margin-top: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  column-gap: 2px;
+}
+.settingsPanel .settingsNav .settingsUpdateBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  margin-bottom: -1px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+}
+.settingsPanel .settingsNav .settingsUpdateBtn:hover,
+.settingsPanel .settingsNav .settingsUpdateBtn:focus-visible {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+.settingsPanel .settingsNav .settingsUpdateBtn[hidden],
+.settingsPanel .settingsNav .settingsUpdateStatus[hidden] {
+  display: none;
+}
+.settingsPanel .settingsNav .settingsUpdateBtn svg {
+  width: 14px;
+  height: 14px;
+}
+.settingsPanel .settingsNav .settingsUpdateBtn.isChecking svg {
+  animation: settingsUpdateSpin 0.9s linear infinite;
+}
+@keyframes settingsUpdateSpin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settingsPanel .settingsNav .settingsUpdateBtn.isChecking svg {
+    animation: none;
+  }
+}
+.settingsPanel .settingsNav .settingsUpdateStatus {
+  flex-basis: 100%;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: rgba(255, 255, 255, 0.6);
+}
+.settingsPanel .settingsNav .settingsVersionLink {
   align-self: flex-start;
   padding: 8px 10px 2px;
   font-variant-numeric: tabular-nums;
@@ -1433,8 +1503,15 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
   color: #fff;
 }
 @media (max-width: 560px) {
-  .settingsPanel .settingsNav .settingsVersionLink {
+  .settingsPanel .settingsNav .settingsVersionRow {
     margin: 0 0 0 auto;
+    align-items: center;
+  }
+  .settingsPanel .settingsNav .settingsUpdateStatus {
+    display: none;
+  }
+  .settingsPanel .settingsNav .settingsVersionLink {
+    margin: 0;
     align-self: center;
     padding: 0 6px;
   }
@@ -1515,7 +1592,7 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
   width: 15px;
   height: 15px;
   stroke-width: 2;
-  color: var(--isUser-fill);
+  color: var(--settings-accent, var(--isUser-fill));
   opacity: 0.9;
 }
 .settingsPanel .settingsNavItem.isActive svg { color: inherit; opacity: 1; }
@@ -1540,11 +1617,11 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
   position: absolute;
   inset: 0;
   z-index: -1;
-  background: var(--isUser-fill);
+  background: var(--settings-accent, var(--isUser-fill));
   opacity: 0.62;
 }
 .settingsPanel .settingsNavItem:focus-visible {
-  outline: 2px solid var(--isUser-fill);
+  outline: 2px solid var(--settings-accent, var(--isUser-fill));
   outline-offset: -2px;
 }
 .settingsPanel .settingsNavItem { isolation: isolate; }
@@ -1784,7 +1861,7 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
 .settingsPanel .characterNameInput:focus,
 .settingsPanel .localActorIdInput:focus {
   outline: none;
-  border-color: var(--isUser-fill);
+  border-color: var(--settings-accent, var(--isUser-fill));
 }
 .settingsPanel .characterNameInput::placeholder,
 .settingsPanel .localActorIdInput::placeholder {
@@ -1824,7 +1901,7 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
 .settingsPanel .streamOverlayNameInput:focus,
 .settingsPanel .streamOverlayUrlInput:focus {
   outline: none;
-  border-color: var(--isUser-fill);
+  border-color: var(--settings-accent, var(--isUser-fill));
 }
 .settingsPanel .streamOverlayPortInput.isInvalid {
   border-color: var(--error-fill);
@@ -1903,7 +1980,7 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
   width: 12px;
   height: 12px;
   margin: 0;
-  accent-color: var(--isUser-fill);
+  accent-color: var(--settings-accent, var(--isUser-fill));
   cursor: pointer;
 }
 .settingsPanel .deviceDropdownWrapper {
@@ -1950,7 +2027,7 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
 .settingsPanel .keybindBtn:focus-visible,
 .settingsPanel .settingsAction:focus-visible,
 .settingsPanel .settingsRange:focus-visible {
-  outline: 2px solid var(--isUser-fill);
+  outline: 2px solid var(--settings-accent, var(--isUser-fill));
   outline-offset: 1px;
 }
 
@@ -2058,7 +2135,7 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
 }
 .settingsPanel .keybindBtn.recording {
   color: #fff;
-  border-color: var(--isUser-fill);
+  border-color: var(--settings-accent, var(--isUser-fill));
   background: rgba(255, 255, 255, 0.12);
   animation: keybindPulse 1s ease-in-out infinite;
 }
@@ -2113,7 +2190,7 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
   border-radius: 2px;
   background: linear-gradient(
     to right,
-    var(--isUser-fill) 0 var(--range-pct, 50%),
+    var(--settings-accent, var(--isUser-fill)) 0 var(--range-pct, 50%),
     rgba(255, 255, 255, 0.14) var(--range-pct, 50%) 100%
   );
 }
@@ -2179,15 +2256,15 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
   transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), background 120ms ease;
 }
 .settingsPanel .settingsToggleControl input[type="checkbox"]:checked + .settingsToggleTrack {
-  background: var(--isUser-fill);
-  border-color: var(--isUser-fill);
+  background: var(--settings-accent, var(--isUser-fill));
+  border-color: var(--settings-accent, var(--isUser-fill));
 }
 .settingsPanel .settingsToggleControl input[type="checkbox"]:checked + .settingsToggleTrack::after {
   transform: translateX(13px);
   background: #fff;
 }
 .settingsPanel .settingsToggleControl input[type="checkbox"]:focus-visible + .settingsToggleTrack {
-  outline: 2px solid var(--isUser-fill);
+  outline: 2px solid var(--settings-accent, var(--isUser-fill));
   outline-offset: 2px;
 }
 
@@ -2735,6 +2812,13 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
     /* Once, when the name turns gold (a supporter joins the meter), then it
        holds with the shine past the end of the name. */
     animation: a2toolsGoldSweep 2.4s ease-out 1 both;
+  }
+  /* Still gold in Details. Each frame of the sweep repainted the page around
+     the name, ~150 ms of every 250 for its 2.4 s, and a fight's window would
+     not move until it ended (2026-10-18). A layer of its own made it worse. */
+  .detailsPanel .detailsPartyBarName.isSupporter {
+    animation: none;
+    background-position: 0% 50%, 0 0;
   }
 }
 
@@ -6733,12 +6817,139 @@ html.detailsWindow .detailsMonitorBadge.isVisible {
    was left.
    ============================================================ */
 
+/* Settings colours (Appearance → Settings colours): the window's
+   background, the section list's, and the accent of its switches, buttons
+   and selected section (--settings-accent, used in place of the meter
+   theme's --isUser-fill, which the Appearance preview keeps). "meter" is the
+   window as it always was, its accent the meter theme's own. All of them dark: the panel's text is white. */
+html.settingsWindow {
+  --settings-bg: #0a0e16;
+  --settings-nav-bg: transparent;
+}
+html.settingsWindow[data-settings-theme="midnight"],
+.settingsThemeSwatch[data-settings-theme="midnight"] {
+  --settings-bg: #0b1322;
+  --settings-nav-bg: #0e182b;
+  --settings-accent: #22b8cf;
+}
+html.settingsWindow[data-settings-theme="graphite"],
+.settingsThemeSwatch[data-settings-theme="graphite"] {
+  --settings-bg: #141518;
+  --settings-nav-bg: #191a1e;
+  --settings-accent: #8f9bb3;
+}
+html.settingsWindow[data-settings-theme="violet"],
+.settingsThemeSwatch[data-settings-theme="violet"] {
+  --settings-bg: #120d1c;
+  --settings-nav-bg: #171126;
+  --settings-accent: #9b6bff;
+}
+html.settingsWindow[data-settings-theme="forest"],
+.settingsThemeSwatch[data-settings-theme="forest"] {
+  --settings-bg: #0b1511;
+  --settings-nav-bg: #0f1c16;
+  --settings-accent: #3fbf7f;
+}
+html.settingsWindow[data-settings-theme="crimson"],
+.settingsThemeSwatch[data-settings-theme="crimson"] {
+  --settings-bg: #170c0f;
+  --settings-nav-bg: #1e1014;
+  --settings-accent: #e5484d;
+}
+html.settingsWindow[data-settings-theme="ocean"],
+.settingsThemeSwatch[data-settings-theme="ocean"] {
+  --settings-bg: #071619;
+  --settings-nav-bg: #0a1e22;
+  --settings-accent: #14b8a6;
+}
+html.settingsWindow[data-settings-theme="sapphire"],
+.settingsThemeSwatch[data-settings-theme="sapphire"] {
+  --settings-bg: #0a0f24;
+  --settings-nav-bg: #0d1430;
+  --settings-accent: #3b6cf6;
+}
+html.settingsWindow[data-settings-theme="indigo"],
+.settingsThemeSwatch[data-settings-theme="indigo"] {
+  --settings-bg: #0e0d22;
+  --settings-nav-bg: #13112d;
+  --settings-accent: #6366f1;
+}
+html.settingsWindow[data-settings-theme="rose"],
+.settingsThemeSwatch[data-settings-theme="rose"] {
+  --settings-bg: #1a0d14;
+  --settings-nav-bg: #22111a;
+  --settings-accent: #ec4899;
+}
+html.settingsWindow[data-settings-theme="sunset"],
+.settingsThemeSwatch[data-settings-theme="sunset"] {
+  --settings-bg: #1a100a;
+  --settings-nav-bg: #22150d;
+  --settings-accent: #f97316;
+}
+html.settingsWindow[data-settings-theme="amber"],
+.settingsThemeSwatch[data-settings-theme="amber"] {
+  --settings-bg: #17120a;
+  --settings-nav-bg: #1e170d;
+  --settings-accent: #e0a526;
+}
+html.settingsWindow[data-settings-theme="copper"],
+.settingsThemeSwatch[data-settings-theme="copper"] {
+  --settings-bg: #160f0c;
+  --settings-nav-bg: #1d1410;
+  --settings-accent: #c8693a;
+}
+html.settingsWindow[data-settings-theme="lime"],
+.settingsThemeSwatch[data-settings-theme="lime"] {
+  --settings-bg: #0f140a;
+  --settings-nav-bg: #141a0d;
+  --settings-accent: #7cc416;
+}
+html.settingsWindow[data-settings-theme="ice"],
+.settingsThemeSwatch[data-settings-theme="ice"] {
+  --settings-bg: #0b1219;
+  --settings-nav-bg: #0f1822;
+  --settings-accent: #6cc4f0;
+}
+html.settingsWindow[data-settings-theme="slate"],
+.settingsThemeSwatch[data-settings-theme="slate"] {
+  --settings-bg: #0f141b;
+  --settings-nav-bg: #141b24;
+  --settings-accent: #71829b;
+}
+html.settingsWindow[data-settings-theme="onyx"],
+.settingsThemeSwatch[data-settings-theme="onyx"] {
+  --settings-bg: #000000;
+  --settings-nav-bg: #0b0b0c;
+  --settings-accent: #a1a1aa;
+}
+/* Each choice in the menu: a dot of its accent on its background. */
+.settingsThemeSwatch {
+  --settings-bg: #0a0e16;
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-right: 7px;
+  vertical-align: -2px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 4px solid var(--settings-bg);
+  background: var(--settings-accent, var(--isUser-fill));
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+.settingsThemeSwatch[data-settings-theme="meter"] {
+  --settings-accent: var(--isUser-fill);
+}
+html.settingsWindow .settingsNav {
+  background: var(--settings-nav-bg);
+}
+
 html.settingsWindow,
 html.settingsWindow body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #0a0e16;
+  background: var(--settings-bg);
 }
 
 html.settingsWindow .container,
@@ -6782,7 +6993,7 @@ html.settingsWindow .settingsPanel {
   height: 100%;
   border: 0;
   border-radius: 0;
-  background: #0a0e16;
+  background: var(--settings-bg);
   overflow: hidden;
   --set-nav-w: 204px;
 }
@@ -6804,7 +7015,7 @@ html.settingsWindow .settingsFooter {
    see tauriBridge.js; not -webkit-app-region, which froze the app). */
 html.settingsWindow .settingsHeader {
   flex: 0 0 auto;
-  background: #0a0e16;
+  background: var(--settings-bg);
 }
 
 /* ============================================================
@@ -6869,24 +7080,213 @@ html.settingsWindow .meter {
 /* WebKitGTK asks fontconfig about every missing family in a stack, again in
    each new window process; the Windows/macOS names cost ~0.5s of first layout
    on Linux, where they never resolve. Same rendering, without those names. */
+/* Linux has neither Bahnschrift nor (usually) Pretendard, and the system
+   sans-serif is static: the weight and width the HUD sets did nothing, so the
+   title and numbers came out light and wide. Saira (a narrow face with
+   width and weight axes, standing in for Bahnschrift) and Pretendard ship
+   with the meter for Linux; both under the SIL Open Font License (fonts/).
+   Files the page loads, so no fontconfig lookups either. */
+@font-face {
+  font-family: "A2 Saira";
+  src: url("./fonts/Saira.woff2") format("woff2");
+  font-weight: 100 900;
+  font-stretch: 50% 125%;
+  font-display: block;
+}
+@font-face {
+  font-family: "A2 Pretendard";
+  src: url("./fonts/PretendardVariable.woff2") format("woff2");
+  font-weight: 45 920;
+  font-display: block;
+}
 html.linux {
   --cjk-font-stack: "Noto Sans SC", "Noto Sans TC", sans-serif;
-  --hud-tech: sans-serif;
-  --hud-ident: "Pretendard", sans-serif;
+  --hud-tech: "A2 Saira", sans-serif;
+  --hud-ident: "A2 Pretendard", sans-serif;
+}
+/* Saira's regular is lighter than Bahnschrift's: the numbers a step up. */
+html.linux .list .item .dps > p {
+  font-variation-settings: "wght" 500, "wdth" 87.5;
 }
 html.linux, html.linux body {
-  font-family: "Pretendard", Arial, sans-serif;
+  font-family: "A2 Pretendard", sans-serif;
 }
 html.linux:lang(ko), html.linux:lang(ko) body {
-  font-family: "Pretendard", sans-serif;
+  font-family: "A2 Pretendard", sans-serif;
 }
 html.linux:lang(zh-CN), html.linux:lang(zh-CN) body,
 html.linux:lang(zh-Hans), html.linux:lang(zh-Hans) body {
-  font-family: "Pretendard", sans-serif;
+  font-family: "A2 Pretendard", sans-serif;
 }
 html.linux:lang(zh-TW), html.linux:lang(zh-TW) body,
 html.linux:lang(zh-Hant), html.linux:lang(zh-Hant) body {
   font-family: sans-serif;
+}
+
+/* The font chosen in Settings → Appearance (#98; core.js applyFont): the
+   meter's own (Saira and Pretendard, above) unless one is picked. Each sets
+   the page's font and the two the HUD uses; Korean and Chinese fall back to
+   their usual faces. All under the SIL Open Font License (fonts/). A face's
+   file loads only once a page uses it. */
+@font-face {
+  font-family: "A2 Inter";
+  src: url("./fonts/Inter-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "A2 Inter";
+  src: url("./fonts/Inter-latin-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "A2 Exo 2";
+  src: url("./fonts/Exo2-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "A2 Exo 2";
+  src: url("./fonts/Exo2-latin-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "A2 Oxanium";
+  src: url("./fonts/Oxanium-latin.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "A2 Oxanium";
+  src: url("./fonts/Oxanium-latin-ext.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "A2 JetBrains Mono";
+  src: url("./fonts/JetBrainsMono-latin.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "A2 JetBrains Mono";
+  src: url("./fonts/JetBrainsMono-latin-ext.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "A2 Atkinson";
+  src: url("./fonts/AtkinsonHyperlegibleNext-latin.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "A2 Atkinson";
+  src: url("./fonts/AtkinsonHyperlegibleNext-latin-ext.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "A2 Lexend";
+  src: url("./fonts/Lexend-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "A2 Lexend";
+  src: url("./fonts/Lexend-latin-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "A2 Andika";
+  src: url("./fonts/Andika-latin-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0100-024F;
+}
+@font-face {
+  font-family: "A2 Andika";
+  src: url("./fonts/Andika-latin-ext-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "A2 Andika";
+  src: url("./fonts/Andika-latin-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0100-024F;
+}
+@font-face {
+  font-family: "A2 Andika";
+  src: url("./fonts/Andika-latin-ext-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+html[data-font="system"] {
+  --a2-font: system-ui, "Segoe UI", "Noto Sans", sans-serif;
+  --hud-tech: system-ui, "Segoe UI", "Noto Sans", sans-serif;
+  --hud-ident: system-ui, "Segoe UI", "Noto Sans", sans-serif;
+}
+html[data-font="inter"] {
+  --a2-font: "A2 Inter", var(--cjk-font-stack);
+  --hud-tech: "A2 Inter", var(--cjk-font-stack);
+  --hud-ident: "A2 Inter", var(--cjk-font-stack);
+}
+html[data-font="exo2"] {
+  --a2-font: "A2 Exo 2", var(--cjk-font-stack);
+  --hud-tech: "A2 Exo 2", var(--cjk-font-stack);
+  --hud-ident: "A2 Exo 2", var(--cjk-font-stack);
+}
+html[data-font="oxanium"] {
+  --a2-font: "A2 Oxanium", var(--cjk-font-stack);
+  --hud-tech: "A2 Oxanium", var(--cjk-font-stack);
+  --hud-ident: "A2 Oxanium", var(--cjk-font-stack);
+}
+html[data-font="jetbrains"] {
+  --a2-font: "A2 JetBrains Mono", ui-monospace, var(--cjk-font-stack);
+  --hud-tech: "A2 JetBrains Mono", ui-monospace, var(--cjk-font-stack);
+  --hud-ident: "A2 JetBrains Mono", ui-monospace, var(--cjk-font-stack);
+}
+html[data-font="atkinson"] {
+  --a2-font: "A2 Atkinson", var(--cjk-font-stack);
+  --hud-tech: "A2 Atkinson", var(--cjk-font-stack);
+  --hud-ident: "A2 Atkinson", var(--cjk-font-stack);
+}
+html[data-font="lexend"] {
+  --a2-font: "A2 Lexend", var(--cjk-font-stack);
+  --hud-tech: "A2 Lexend", var(--cjk-font-stack);
+  --hud-ident: "A2 Lexend", var(--cjk-font-stack);
+}
+html[data-font="andika"] {
+  --a2-font: "A2 Andika", var(--cjk-font-stack);
+  --hud-tech: "A2 Andika", var(--cjk-font-stack);
+  --hud-ident: "A2 Andika", var(--cjk-font-stack);
+}
+html[data-font]:not([data-font="meter"]),
+html[data-font]:not([data-font="meter"]) body {
+  font-family: var(--a2-font) !important;
+}
+/* Saira's width axis tunes the numbers; other faces have none. */
+html[data-font]:not([data-font="meter"]) .list .item .dps > p {
+  font-variation-settings: normal;
 }
 
 /* The main meter window and Details are HUDs: dragging across them, or a
@@ -7117,7 +7517,14 @@ html.a2-offline .historyUploadBtn {
 .detailsPanel .fightTimeline.hide-dps .ftlGroupDps,
 .detailsPanel .fightTimeline.hide-buffs .ftlGroupBuffs,
 .detailsPanel .fightTimeline.hide-buffs .fightTimelineBar .buffToolbar,
+.detailsPanel .fightTimeline.hide-stagger .ftlGroupStagger,
 .detailsPanel .fightTimeline.hide-casts .ftlGroupCasts {
+  display: none;
+}
+/* No stagger window in the fight (staggerPanel.js): neither the section nor
+   its toggle chip. */
+.detailsPanel .fightTimeline.noStagger .ftlGroupStagger,
+.detailsPanel .fightTimeline.noStagger [data-ftl-section="stagger"] {
   display: none;
 }
 /* HEAL without heal times has no chart or casts to show. */
@@ -7219,6 +7626,338 @@ html.a2-offline .historyUploadBtn {
 }
 .detailsPanel .fightTimelineAxisLane span.isEnd {
   transform: translateX(-100%);
+}
+
+/* Fight replay (fightReplay.js): under the axis, the controls in the gutter
+   and the scrubber over the lanes, so its thumb sits on the chart's moment. */
+.detailsPanel .fightReplayBar {
+  flex: none;
+  display: grid;
+  grid-template-columns: var(--ftl-gutter) minmax(0, 1fr) calc(var(--ftl-right) + var(--ftl-sb, 0px));
+  align-items: center;
+  min-height: 34px;
+  border-top: 1px solid var(--hud-hairline);
+  /* A little larger than the timeline's labels: it is read while playing. */
+  font-size: 1.15em;
+}
+/* Under the title row: the timeline's columns, so the slider still lines up
+   with the chart. */
+.detailsPanel .fightReplayBar.isTop {
+  --ftl-gutter: var(--details-sidebar-w);
+  --ftl-right: 52px;
+  border-top: none;
+  border-bottom: 1px solid var(--hud-hairline);
+}
+.detailsPanel .fightReplayBar[hidden] {
+  display: none;
+}
+.detailsPanel .fightReplayControls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 8px 3px 12px;
+}
+/* Replay buttons: the secondary style (exit). Play / pause, the main
+   action, is filled below. No transition on shadow or brightness: they
+   change only on hover and press, never while a replay plays. */
+.detailsPanel .fightReplayBtn {
+  appearance: none;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background-color 120ms ease-out;
+}
+.detailsPanel .fightReplayBtn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--hud-num, #fff);
+}
+.detailsPanel .fightReplayBtn:active {
+  transform: translateY(1px);
+}
+.detailsPanel .fightReplayBtn:focus-visible,
+.detailsPanel .fightReplaySpeed:focus-visible,
+.detailsPanel .fightReplayScrub:focus-visible {
+  outline: 2px solid var(--isUser-fill);
+  outline-offset: 2px;
+}
+.detailsPanel .fightReplayBtn:disabled {
+  opacity: 0.4;
+  box-shadow: none;
+  cursor: default;
+  transform: none;
+}
+.detailsPanel .fightReplayBtn svg {
+  width: 15px;
+  height: 15px;
+}
+/* Play / pause: the main action, a labelled pill in the accent. Wide
+   enough for either word, so the clock and speed do not shift between
+   them. */
+.detailsPanel .fightReplayPlay {
+  width: auto;
+  min-width: 122px;
+  height: 30px;
+  gap: 7px;
+  padding: 0 14px 0 11px;
+  border-radius: 999px;
+  color: #fff;
+  border: 1px solid color-mix(in srgb, var(--isUser-fill) 70%, transparent);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--isUser-fill) 40%, transparent),
+    color-mix(in srgb, var(--isUser-fill) 20%, transparent));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 2px 8px rgba(0, 0, 0, 0.35);
+  font-family: var(--hud-tech);
+  font-variation-settings: "wght" 650, "wdth" 87.5;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.detailsPanel .fightReplayPlay:hover {
+  color: #fff;
+  border-color: var(--isUser-fill);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--isUser-fill) 55%, transparent),
+    color-mix(in srgb, var(--isUser-fill) 30%, transparent));
+}
+.detailsPanel .fightReplayPlay:active {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+/* No hit times to replay: the icon alone. */
+.detailsPanel .fightReplayPlay:disabled {
+  min-width: 0;
+  padding: 0 11px;
+  box-shadow: none;
+}
+.detailsPanel .fightReplayPlay:disabled .fightReplayPlayText {
+  display: none;
+}
+.detailsPanel .fightReplayPlay svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+.detailsPanel .fightReplayBar .fightReplayIconPause,
+.detailsPanel .fightReplayBar.isPlaying .fightReplayIconPlay {
+  display: none;
+}
+.detailsPanel .fightReplayBar.isPlaying .fightReplayIconPause {
+  display: block;
+}
+.detailsPanel .fightReplayTime {
+  /* Changes once a second while playing: kept to itself. */
+  contain: layout paint style;
+  margin-left: auto;
+  font-family: var(--hud-tech);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.95em;
+  color: rgba(255, 255, 255, 0.82);
+  white-space: nowrap;
+}
+.detailsPanel .fightReplayBar.isActive .fightReplayTime {
+  color: var(--hud-num, #fff);
+}
+/* The speed menu: styled like the secondary replay buttons, with its own
+   chevron (the native arrow is hidden). */
+.detailsPanel .fightReplaySpeed {
+  flex: none;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 30px;
+  padding: 0 26px 0 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.06);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='rgba(255,255,255,0.85)' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 10px 6px;
+  color: rgba(255, 255, 255, 0.92);
+  font-family: var(--hud-tech);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  font-size: 0.9em;
+  cursor: pointer;
+  transition: background-color 120ms ease-out;
+}
+.detailsPanel .fightReplaySpeed:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+.detailsPanel .fightReplaySpeed:active {
+  transform: translateY(1px);
+}
+/* The open list: the panel's dark, the speed in use in the accent. */
+.detailsPanel .fightReplaySpeed option {
+  background: rgb(var(--hud-bg));
+  color: #fff;
+  font-weight: 600;
+}
+.detailsPanel .fightReplaySpeed option:checked {
+  background: var(--isUser-fill);
+  color: #fff;
+}
+.detailsPanel .fightReplayScrubWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+/* While playing: progress drawn by the GPU, the slider invisible above it
+   (it still takes a drag; fightReplay.js). */
+.detailsPanel .fightReplayProg {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 13px;
+  margin-top: -6.5px;
+  pointer-events: none;
+}
+.detailsPanel .fightReplayBar.isPlaying .fightReplayProg {
+  display: block;
+}
+.detailsPanel .fightReplayBar.isPlaying .fightReplayScrub {
+  opacity: 0;
+}
+.detailsPanel .fightReplayProg::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 5px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.14);
+}
+.detailsPanel .fightReplayProgFill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 5px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--isUser-fill);
+  transform-origin: left center;
+  transform: scaleX(0);
+}
+.detailsPanel .fightReplayProgKnob {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 9px;
+  height: 13px;
+  border-radius: 1px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+/* Moved by one long transition while playing (fightReplay.js glide): each
+   on a steady layer of its own. */
+.detailsPanel .fightReplayProgFill,
+.detailsPanel .fightReplayProgKnob,
+.detailsPanel .fightReplayHead,
+.detailsPanel .fightReplayShadeFill {
+  will-change: transform;
+}
+.detailsPanel .fightReplayScrub {
+  width: 100%;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.detailsPanel .fightReplayScrub:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.detailsPanel .fightReplayScrub::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--isUser-fill) 0 var(--range-pct, 100%),
+    rgba(255, 255, 255, 0.14) var(--range-pct, 100%) 100%
+  );
+}
+.detailsPanel .fightReplayBar:not(.isActive) .fightReplayScrub::-webkit-slider-runnable-track {
+  background: rgba(255, 255, 255, 0.14);
+}
+.detailsPanel .fightReplayScrub::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 9px;
+  height: 13px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 1px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+.detailsPanel .fightReplayExit {
+  justify-self: start;
+  margin-left: 8px;
+  visibility: hidden;
+}
+.detailsPanel .fightReplayBar.isActive .fightReplayExit {
+  visibility: visible;
+}
+.detailsPanel .fightReplayNote {
+  display: none;
+  grid-column: 2 / -1;
+  padding: 0 12px 5px 0;
+  font-size: 0.75em;
+  color: var(--hud-sub);
+}
+.detailsPanel .fightReplayBar.isActive .fightReplayNote:not(.fightReplayHealNote),
+.detailsPanel .fightReplayBar.isActive.noHealTiming .fightReplayHealNote {
+  display: block;
+}
+/* The moment, through the timeline's lanes (which past it are faint). */
+.detailsPanel .fightReplayHead {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  border-left: 2px solid var(--isUser-fill);
+  pointer-events: none;
+  z-index: 29;
+  /* Moved every frame of a replay: its own layer, so nothing repaints. */
+  will-change: transform;
+}
+.detailsPanel .fightReplayShade {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 28;
+}
+.detailsPanel .fightReplayShade[hidden] {
+  display: none;
+}
+.detailsPanel .fightReplayShadeFill {
+  position: absolute;
+  inset: 0;
+  background: rgb(var(--hud-bg));
+  will-change: transform;
+}
+.detailsPanel .fightReplayHead[hidden] {
+  display: none;
+}
+/* What a replay cannot cut by time stays the whole fight's, greyed. */
+.detailsPanel.isReplaying .detailsStats .stat.isWholeFight,
+.detailsPanel.isReplaying .skillRow .cell.mindmg,
+.detailsPanel.isReplaying .skillRow .cell.maxdmg,
+.detailsPanel.isReplaying .fightTimeline .buffUptime {
+  opacity: 0.4;
 }
 
 /* HEAL draws healing per second and the heal casts; a fight saved before
@@ -7387,8 +8126,8 @@ html.a2-offline .historyUploadBtn {
   padding: 0 14px;
 }
 .settingsPanel .hotkeyConsentConfirm {
-  border-color: var(--isUser-fill);
-  background: var(--isUser-fill);
+  border-color: var(--settings-accent, var(--isUser-fill));
+  background: var(--settings-accent, var(--isUser-fill));
   color: #fff;
 }
 
@@ -7398,6 +8137,12 @@ html.a2-offline .historyUploadBtn {
   border-color: #e5484d;
   box-shadow: inset 0 0 0 1px #e5484d;
   color: #ffb4b4;
+}
+
+/* A keybind with no keys yet (the plugin windows key has no default). */
+.settingsPanel .keybindBtn.isUnset .keybindText {
+  opacity: 0.6;
+  font-style: italic;
 }
 
 /* Plugins: hidden rows stay hidden (rows set their own display). */
@@ -7414,13 +8159,6 @@ html.a2-offline .historyUploadBtn {
 #settingsSection-plugins .settingsHint:empty,
 #settingsSection-plugins .settingsHint[hidden] {
   display: none;
-}
-/* "Installed" and "Available" above their lists. */
-.settingsPanel .pluginListTitle {
-  margin: 14px 0 2px;
-  font-size: 12px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.6);
 }
 .settingsPanel .pluginListEmpty,
 .settingsPanel .pluginCatalogStatus {
@@ -7448,7 +8186,6 @@ html.a2-offline .historyUploadBtn {
 /* A plugin the last update check changed: a green arrow by its version. */
 .settingsPanel .pluginUpdated {
   box-shadow: inset 2px 0 0 #4ade80;
-  padding-left: 8px;
 }
 .settingsPanel .pluginUpdatedIcon,
 .settingsPanel .pluginUpdated svg {
@@ -7463,9 +8200,10 @@ html.a2-offline .historyUploadBtn {
 /* The switch that turns a plugin on or off, before its buttons; a plugin
    turned off is dimmed (its switch stays clear to turn it back on). */
 .settingsPanel .pluginEnabledToggle {
-  margin-right: 4px;
+  margin-left: 2px;
 }
-.settingsPanel .pluginOff .settingsInfo {
+.settingsPanel .pluginOff .pluginMain,
+.settingsPanel .pluginOff .pluginMark {
   opacity: 0.5;
 }
 
@@ -7475,6 +8213,18 @@ html.a2-offline .historyUploadBtn {
   font-size: 12px;
   line-height: 1.35;
   color: #ff9a9a;
+}
+/* The desktop has no key for it yet (KDE/GNOME set it in their settings). */
+.settingsPanel .keybindBtn.isUnsetByDesktop,
+.settingsPanel .keybindBtn.isUnsetByDesktop:hover {
+  border-color: #f2b94f;
+  box-shadow: inset 0 0 0 1px #f2b94f;
+}
+.settingsPanel .keybindHint.isNote {
+  color: #f6d38f;
+}
+.settingsPanel .keybindDesktopBtn[hidden] {
+  display: none;
 }
 .settingsPanel .keybindHint[hidden] {
   display: none;
@@ -7563,4 +8313,499 @@ html.a2-offline .historyUploadBtn {
 }
 .settingsPanel .barPreview .classIconImg {
   visibility: visible;
+}
+
+/* While core.js reads each theme's colours for the theme list. */
+.readingThemes *,
+.readingThemes *::before,
+.readingThemes *::after {
+  transition: none !important;
+}
+
+/* A Details section drawn after the first paint (details.js renderRest). */
+@keyframes detailsPopIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+.detailsPopIn {
+  animation: detailsPopIn 220ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .detailsPopIn { animation: none; }
+}
+
+/* Party bars sliding out from empty on a fight's first show (details.js). */
+.detailsPanel .detailsPartyBarFill.isSliding {
+  transform-origin: left center;
+  transition: transform 700ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+/* Figures that count up keep their width while they do. */
+.detailsPanel .detailsPartyBarDps,
+.detailsPanel .detailsPartyBarDmg,
+.detailsPanel .detailsPartyBarPct,
+.detailsPanel .detailsStats {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Folding a timeline section by its heading (details.js foldHeading). */
+.detailsPanel .ftlFoldHeading {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.detailsPanel .ftlFoldHeading:hover { color: var(--text-color, #fff); }
+.detailsPanel .ftlFoldHeading:focus-visible { outline: 1px solid var(--hud-hairline); outline-offset: 2px; }
+.detailsPanel .ftlFoldChevron {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  opacity: 0.7;
+  transition: transform 150ms ease-out;
+}
+.detailsPanel .isFolded > .ftlFoldHeading .ftlFoldChevron { transform: rotate(-90deg); }
+.detailsPanel .ftlGroup.isFolded > :not(.ftlGroupTitle),
+.detailsPanel .buffGroup.isFolded > :not(.buffGroupHeader) {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .detailsPanel .ftlFoldChevron { transition: none; }
+}
+
+/* Replaying: the figures are redrawn several times a second. No transition
+   inside the party list or the skill table: each running one put its row on
+   a GPU layer of its own, made and dropped with every redraw (about a
+   hundred, several times a second), which lagged the whole desktop
+   (2026-10-18). Each of the three blocks is instead one steady layer of its
+   own, so its redraws repaint only itself, not the page. */
+.detailsPanel.isReplaying .detailsPartyList *,
+.detailsPanel.isReplaying .detailsSkills * {
+  transition: none !important;
+}
+.detailsPanel.isReplaying .detailsPartyList,
+.detailsPanel.isReplaying .detailsStats,
+.detailsPanel.isReplaying .detailsSkills {
+  contain: layout paint;
+  will-change: transform;
+}
+
+/* Replaying: the skill table is redrawn four times a second. Rows scrolled
+   out of view are skipped (laid out and painted only when shown), and each
+   row's changes stay inside it, so a redraw no longer lays out and repaints
+   the whole long table (2026-10-18). */
+.detailsPanel.isReplaying .detailsSkills .skills .skillRow {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 28px;
+  contain: layout style paint;
+}
+
+/* While a replay plays: the skill list is one steady layer that keeps its
+   repaints to itself, and its rows take no hover (each mouse move over them
+   restyled and repainted the table; the list itself still scrolls). */
+.detailsPanel.isReplaying .detailsSkills .skills {
+  contain: layout paint style;
+  will-change: transform;
+}
+.detailsPanel.isReplayPlaying .detailsSkills .skills .skillRow {
+  pointer-events: none;
+}
+
+/* Replaying: the timeline's scroller is a steady layer of its own, so the
+   playhead and shade moving over it never repaint it. */
+.detailsPanel.isReplaying .fightTimelineScroll {
+  will-change: transform;
+}
+
+/* While a replay plays the skill table shows its first ten rows; this says
+   how many more there are (details.js showSkillsMore). */
+.detailsPanel .skillsReplayMore {
+  padding: 4px 12px;
+  font-size: 0.8em;
+  color: var(--hud-sub);
+}
+.detailsPanel .skillsReplayMore[hidden],
+.detailsPanel:not(.isReplayPlaying) .skillsReplayMore {
+  display: none;
+}
+
+/* The party row picked in Details, in its class colour at full strength, so
+   the selection stands out (the class themes). Its name in white over it,
+   over the name's own inline class colour. */
+:root[data-theme^="aion2-classes"] .detailsPanel .detailsPartyBar.isSelected .detailsPartyBarFill {
+  opacity: 0.95;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--class-fill, var(--row-fill)) 60%, transparent),
+    color-mix(in srgb, var(--class-fill, var(--row-fill)) 92%, transparent));
+}
+:root[data-theme^="aion2-classes"] .detailsPanel .detailsPartyBar.isSelected .detailsPartyBarName:not(.isSupporter) {
+  color: #fff !important;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+/* Settings → Plugins: tabs (Installed, Available), a search once the list
+   is long, and the update check, on one line. */
+.settingsPanel .pluginBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.settingsPanel .pluginTabs {
+  display: flex;
+  gap: 2px;
+  margin-right: auto;
+}
+.settingsPanel .pluginTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 7px;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: rgba(255, 255, 255, 0.55);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.settingsPanel .pluginTab:hover { color: rgba(255, 255, 255, 0.85); }
+.settingsPanel .pluginTab.isActive {
+  color: #fff;
+  border-bottom-color: var(--isUser-fill);
+}
+.settingsPanel .pluginTab:focus-visible {
+  outline: 2px solid var(--isUser-fill);
+  outline-offset: -2px;
+}
+.settingsPanel .pluginTabCount {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.75);
+}
+.settingsPanel .pluginTabCount:empty { display: none; }
+.settingsPanel .pluginSearch {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 7px;
+  margin-bottom: 4px;
+  border: 1px solid var(--set-field-border);
+  border-radius: 3px;
+  background: var(--set-field-bg);
+  color: rgba(255, 255, 255, 0.5);
+}
+.settingsPanel .pluginSearch[hidden] { display: none; }
+.settingsPanel .pluginSearch:focus-within { border-color: var(--set-field-border-hover); }
+.settingsPanel .pluginSearch svg { width: 13px; height: 13px; flex: none; }
+.settingsPanel .pluginSearchInput {
+  width: 120px;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+}
+.settingsPanel .pluginIconBtn {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+}
+.settingsPanel .pluginBar .pluginIconBtn { margin-bottom: 4px; }
+.settingsPanel .pluginIconBtn:hover {
+  color: #fff;
+  background: var(--set-field-bg-hover);
+  border-color: var(--set-field-border);
+}
+.settingsPanel .pluginIconBtn:focus-visible {
+  outline: 2px solid var(--isUser-fill);
+  outline-offset: 1px;
+}
+.settingsPanel .pluginIconBtn svg { width: 15px; height: 15px; }
+.settingsPanel .pluginUpdateBtn:disabled svg { animation: pluginSpin 900ms linear infinite; }
+@keyframes pluginSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .settingsPanel .pluginUpdateBtn:disabled svg { animation: none; }
+}
+.settingsPanel .pluginPane[hidden],
+.settingsPanel .pluginNoMatch[hidden] { display: none; }
+#settingsSection-plugins .pluginIntro { margin: 2px 0 6px; }
+
+/* One plugin: a single line until clicked, then a card with its details. */
+.settingsPanel .pluginItem {
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+.settingsPanel .pluginItem + .pluginItem { margin-top: 1px; }
+.settingsPanel .pluginItem.isOpen {
+  margin: 6px 0;
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+.settingsPanel .pluginItem.isOpen .pluginHead {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px 6px 0 0;
+}
+.settingsPanel .pluginItem.isOpen .pluginHead:hover { background: none; }
+.settingsPanel .pluginItem.isOpen .pluginDetails { padding-top: 10px; }
+.settingsPanel .pluginHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.settingsPanel .pluginHead:hover { background: rgba(255, 255, 255, 0.04); }
+.settingsPanel .pluginHead:focus-visible {
+  outline: 2px solid var(--isUser-fill);
+  outline-offset: -2px;
+}
+.settingsPanel .pluginMark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: hsl(var(--mark-hue, 210) 45% 32%);
+  color: hsl(var(--mark-hue, 210) 80% 88%);
+  font-weight: 700;
+  font-size: 14px;
+}
+.settingsPanel .pluginMark svg {
+  width: 16px;
+  height: 16px;
+}
+.settingsPanel .pluginMain {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.settingsPanel .pluginName {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  font-weight: 600;
+}
+.settingsPanel .pluginNameText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settingsPanel .pluginVersion {
+  flex: none;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.settingsPanel .pluginDesc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
+.settingsPanel .pluginItem.isOpen .pluginDesc { visibility: hidden; height: 0; }
+.settingsPanel .pluginEnd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  cursor: default;
+}
+.settingsPanel .pluginInstallBtn { height: 24px; padding: 0 10px; font-size: 12px; }
+.settingsPanel .pluginChevron {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  color: rgba(255, 255, 255, 0.35);
+  transition: transform 150ms ease;
+}
+.settingsPanel .pluginChevron svg { width: 14px; height: 14px; }
+.settingsPanel .pluginItem.isOpen .pluginChevron { transform: rotate(180deg); }
+.settingsPanel .pluginDetails {
+  padding: 0 12px 12px 44px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+}
+.settingsPanel .pluginDetails[hidden] { display: none; }
+.settingsPanel .pluginDescFull {
+  margin: 0 0 10px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.78);
+}
+.settingsPanel .pluginAuthor {
+  margin: -6px 0 10px;
+  color: rgba(255, 255, 255, 0.45);
+  word-break: break-all;
+}
+.settingsPanel .pluginOptions {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.settingsPanel .pluginOption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 340px;
+  cursor: pointer;
+}
+.settingsPanel .pluginOptionText { color: rgba(255, 255, 255, 0.82); }
+.settingsPanel .pluginDetailTitle {
+  margin-bottom: 3px;
+  color: rgba(255, 255, 255, 0.5);
+}
+.settingsPanel .pluginPerms ul {
+  margin: 0 0 12px;
+  padding-left: 16px;
+  line-height: 1.5;
+}
+.settingsPanel .pluginDetailActions { display: flex; gap: 8px; }
+.settingsPanel .pluginRemoveBtn { height: 24px; padding: 0 10px; font-size: 12px; }
+.settingsPanel .pluginRemoveBtn:hover {
+  color: #ffb4b4;
+  border-color: rgba(229, 72, 77, 0.6);
+}
+
+/* ---------- details: stagger ----------
+   Each stagger window: a head row with the window on the fight's time, a
+   line saying how it ended, then a row per player (their share of the gauge
+   shaded behind their name, a tick per hit on the time lane), which opens
+   to a row per skill. The same columns as the buff rows. */
+
+.detailsPanel .ftlGroupStagger,
+.buffTooltip.staggerTooltip {
+  --stagger-break: #5fc48a;
+  --stagger-missed: var(--error-fill, #e06b6b);
+  --stagger-gone: #8fa3c0;
+  --stagger-warn: #f0c060;
+  --stagger-mark: #fff;
+}
+.detailsPanel .staggerBody {
+  padding: 0 12px 6px;
+}
+.detailsPanel .staggerWindow {
+  padding: 4px 0 6px;
+}
+.detailsPanel .staggerWindow + .staggerWindow {
+  border-top: 1px solid var(--hud-hairline, rgba(255, 255, 255, 0.07));
+}
+.detailsPanel .staggerHead .staggerEntity {
+  font-weight: 700;
+  color: var(--hud-name, rgba(255, 255, 255, 0.95));
+}
+.detailsPanel .staggerSpan {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  min-width: 2px;
+  border-radius: 2px;
+  opacity: 0.75;
+}
+.detailsPanel .staggerSpan.isBreak { background: var(--stagger-break); }
+.detailsPanel .staggerSpan.isMissed { background: var(--stagger-missed); }
+.detailsPanel .staggerSpan.isGone { background: var(--stagger-gone); }
+.detailsPanel .staggerBreakMark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--stagger-mark);
+  pointer-events: none;
+}
+.detailsPanel .staggerStatus {
+  padding: 1px 2px 4px;
+  font-size: 11px;
+}
+.detailsPanel .staggerStatus.isBreak { color: var(--stagger-break); }
+.detailsPanel .staggerStatus.isMissed { color: var(--stagger-missed); }
+.detailsPanel .staggerStatus.isGone { color: var(--hud-sub, rgba(255, 255, 255, 0.45)); }
+.detailsPanel .staggerValue {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.detailsPanel .staggerActor {
+  cursor: pointer;
+}
+.detailsPanel .staggerActor:hover,
+.detailsPanel .staggerActor:focus-visible {
+  outline: none;
+  background: var(--hud-row-bg, rgba(255, 255, 255, 0.05));
+}
+/* The player's share of the gauge, shaded behind their name. */
+.detailsPanel .staggerActorLabel {
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--stagger-color, #8fa3c0) 28%, transparent) var(--stagger-share, 0%),
+    transparent var(--stagger-share, 0%)
+  );
+  border-radius: 2px;
+}
+.detailsPanel .staggerActor.isUnknown .buffName {
+  font-style: italic;
+  color: var(--hud-sub, rgba(255, 255, 255, 0.45));
+}
+.detailsPanel .staggerChevron {
+  flex: 0 0 auto;
+  font-size: 8px;
+  color: var(--hud-faint, rgba(255, 255, 255, 0.3));
+}
+.detailsPanel .staggerActor.isOpen .staggerChevron {
+  transform: rotate(90deg);
+}
+.detailsPanel .staggerWarn {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--stagger-warn);
+}
+.detailsPanel .staggerSkill .buffLabel {
+  padding-left: 16px;
+}
+.detailsPanel .staggerSkill .buffName {
+  color: var(--hud-sub, rgba(255, 255, 255, 0.45));
+}
+.detailsPanel .staggerTick {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  width: 3px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--stagger-gone);
+}
+.detailsPanel .staggerTick.isAmbiguous {
+  outline: 1px solid var(--stagger-warn);
 }

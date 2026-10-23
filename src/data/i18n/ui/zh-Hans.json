@@ -7,7 +7,17 @@
       "ariaDps": "显示 DPS",
       "ariaDamage": "显示总伤害",
       "both": "两者",
-      "ariaBoth": "显示 DPS 和总伤害"
+      "ariaBoth": "显示 DPS 和总伤害",
+      "hps": "HPS",
+      "totalHeal": "HEAL",
+      "stagger": "破防",
+      "ariaHps": "显示每秒治疗量",
+      "ariaHeal": "显示总治疗量",
+      "ariaStagger": "显示对首领破防条造成的削减"
+    },
+    "updates": {
+      "meter": "A2Tools DPS Meter {version} 可更新",
+      "plugins": "插件更新：{list}"
     }
   },
   "details": {
@@ -117,7 +127,12 @@
       "deaths": "死亡次数",
       "avgDps": "平均 DPS",
       "peakDps": "峰值 DPS",
-      "peakDpsTip": "战斗中任意 5 秒内的最高 DPS"
+      "peakDpsTip": "战斗中任意 5 秒内的最高 DPS",
+      "blockedTaken": "盾挡（完美）",
+      "blockedTakenTip": "受到的攻击中用盾牌挡下的比例，括号内为完美盾挡",
+      "parriedTaken": "格挡（完美）",
+      "parriedTakenTip": "受到的攻击中格挡的比例，括号内为完美格挡",
+      "parryRateTip": "你的攻击中被目标格挡的比例"
     },
     "titleFor": "针对",
     "titleVs": "vs",
@@ -168,7 +183,40 @@
         "replaced": "被新等级替换"
       }
     },
+    "stagger": {
+      "title": "破防",
+      "unknownActor": "未知",
+      "unknownSkill": "未知技能",
+      "older": "此战斗没有破防数据（由旧版本记录）。",
+      "loading": "加载中...",
+      "none": "此战斗中没有削减任何破防条。",
+      "incomplete": "未看到起始值：缺少之前的破防数值。",
+      "ambiguous": "可能属于其他玩家：同一时间有其他人命中。",
+      "ambiguousCount": "{n} 次命中可能属于其他玩家。",
+      "value": "破防 {n}",
+      "ended": {
+        "break": "{secs} 秒后破防",
+        "reset": "失败：{max} 中剩余 {missing}",
+        "death": "破防前被击败：{max} 中剩余 {missing}",
+        "despawn": "破防前消失：{max} 中剩余 {missing}",
+        "fightEnd": "战斗结束时仍未完成：{max} 中剩余 {missing}"
+      }
+    },
     "fightTimeline": "战斗时间线",
+    "replay": {
+      "label": "回放",
+      "title": "回放",
+      "play": "播放回放",
+      "pause": "暂停",
+      "speed": "播放速度",
+      "position": "回放位置",
+      "positionText": "{at} / {total}",
+      "exit": "结束回放（显示整场战斗）",
+      "wholeFightNote": "承受伤害、最小 / 最大值和增益持续率为整场战斗的数值。",
+      "moreSkills": "还有 {n} 个，暂停时显示",
+      "noHealTiming": "本场战斗的治疗没有时间记录（由旧版本保存）：显示整场战斗的数值。",
+      "unavailable": "这场战斗保存时没有命中时间，无法回放"
+    },
     "casts": "施放",
     "resize": "拖动调整大小",
     "healTimingNote": "此战斗没有治疗时间数据（由旧版本记录）。",
@@ -259,10 +307,14 @@
     "showOdyle": "显示奥德能量",
     "odyleEnergy": "奥德能量",
     "showTtk": "显示预计击杀时间",
+    "showHealModes": "在 DPS/DMG 按钮中显示治疗",
+    "showStaggerMode": "在 DPS/DMG 按钮中显示破防",
     "showTotalDps": "显示队伍总计",
     "roundDps": "DPS 以千为单位显示 (13k)",
     "showDpsSuffix": "DPS 后显示 /s",
     "autoHideMeter": "AION2 不在前台时隐藏",
+    "hideWhenGameClosed": "AION2 关闭时隐藏",
+    "hideWhenSolo": "仅在队伍中显示",
     "showSuspendBtn": "显示暂停捕获按钮",
     "showLockBtn": "显示点击穿透锁定按钮",
     "playerLimit": {
@@ -270,12 +322,15 @@
     },
     "partyPresence": "显示队伍中的 A2Tools 用户",
     "shareBossTimers": "分享野外首领计时",
+    "shareSupplyRequests": "分享补给委托",
     "debugLogging": "调试日志",
     "quit": "退出",
     "discord": {
       "title": "Discord",
       "activity": "在 Discord 显示我正在玩的内容",
-      "activityHint": "AION2 打开时，你的 Discord 状态会显示角色名、职业、等级、服务器，以及正在对战的首领。通过这台电脑上的 Discord 应用显示，不需要账号。"
+      "activityHint": "AION2 打开时，你的 Discord 状态会显示角色名、职业、等级、服务器，以及正在对战的首领。通过这台电脑上的 Discord 应用显示，不需要账号。选择 Discord 中显示的数值后，还会显示战斗力或装备分数。",
+      "stat": "Discord 中显示的数值",
+      "statHint": "Discord 状态中显示在等级后面的数值。"
     },
     "streamOverlay": {
       "title": "直播",
@@ -297,6 +352,14 @@
       "displayNamePlaceholder": "你的角色名"
     },
     "version": "版本",
+    "update": {
+      "check": "检查更新",
+      "checking": "正在检查…",
+      "current": "已是最新",
+      "installing": "正在更新…",
+      "available": "{version} 已发布",
+      "failed": "无法检查，请稍后再试。"
+    },
     "theme": {
       "label": "配色主题",
       "options": {
@@ -317,6 +380,44 @@
         "varian": "瓦里安"
       }
     },
+    "settingsTheme": {
+      "label": "设置窗口颜色",
+      "tip": "此设置窗口的颜色。计量器保留自己的主题。",
+      "options": {
+        "meter": "计量器主题",
+        "midnight": "午夜",
+        "graphite": "石墨",
+        "violet": "紫罗兰",
+        "forest": "森林",
+        "crimson": "深红",
+        "ocean": "海洋",
+        "sapphire": "蓝宝石",
+        "indigo": "靛蓝",
+        "rose": "玫瑰",
+        "sunset": "日落",
+        "amber": "琥珀",
+        "copper": "铜",
+        "lime": "青柠",
+        "ice": "冰",
+        "slate": "石板",
+        "onyx": "黑玛瑙"
+      }
+    },
+    "font": {
+      "label": "字体",
+      "tip": "计量器、设置、战斗记录和详情使用的字体。",
+      "options": {
+        "meter": "计量器字体",
+        "system": "系统字体",
+        "inter": "Inter",
+        "exo2": "Exo 2",
+        "oxanium": "Oxanium",
+        "jetbrains": "JetBrains Mono (数字等宽)",
+        "atkinson": "Atkinson Hyperlegible (字母和数字清晰)",
+        "lexend": "Lexend (更易阅读)",
+        "andika": "Andika (适合阅读障碍)"
+      }
+    },
     "textureOffset": "错开纹理",
     "barTexture": {
       "label": "条形纹理",
@@ -334,17 +435,28 @@
         "aura": "灵光"
       }
     },
+    "appearanceGroups": {
+      "general": "常规",
+      "colours": "颜色",
+      "layout": "布局",
+      "opacity": "不透明度"
+    },
     "language": {
       "label": "语言"
     },
     "windowOpacity": {
       "label": "背景不透明度"
     },
+    "titleOpacity": {
+      "label": "标题栏不透明度"
+    },
     "meterOpacity": {
       "label": "条形不透明度"
     },
     "barPreview": "预览",
-    "meterSaturation": {"label": "条形颜色强度"},
+    "meterSaturation": {
+      "label": "条形颜色强度"
+    },
     "bossNameSize": {
       "label": "标题大小"
     },
@@ -382,8 +494,13 @@
       "reload": "重新加载数据",
       "toggle": "显示/隐藏窗口",
       "pressKeys": "请按下按键...",
-      "needModifiers": "需要2个以上修饰键",
-      "lock": "锁定/解锁悬浮窗"
+      "tooManyKeys": "最多 3 个键",
+      "plugins": "找回插件窗口",
+      "notSet": "未设置",
+      "restoreDefaults": "恢复默认",
+      "hint": "点击一个快捷键，然后按下 1 到 3 个键。按 Esc 取消。",
+      "lock": "锁定/解锁悬浮窗",
+      "openDesktop": "桌面快捷键"
     },
     "defaultMeterMode": {
       "label": "启动时的目标模式"
@@ -444,11 +561,14 @@
       "autoHideMeter": "其他窗口位于游戏前方时计量器会隐藏，回到游戏后再出现。",
       "detailsMonitor": "在所选显示器上打开详情窗口并保持在那里。",
       "showTtk": "在战斗计时器旁显示整场首领战的预计时长。",
+      "showHealModes": "计量器上的 DPS/DMG 按钮也会切换到每秒治疗量和总治疗量。",
+      "showStaggerMode": "计量器上的 DPS/DMG 按钮也会显示每位玩家削减首领破防条的数值。",
       "showTotalDps": "在各行下方显示队伍总 DPS 和总伤害的条。",
       "roundDps": "13,412 显示为 13k。",
       "showSuspendBtn": "在计量器上显示一个按钮，按下后停止读取游戏流量，再按一次恢复。",
       "showLockBtn": "让计量器忽略鼠标、点击直接作用于游戏的按钮。",
       "windowOpacity": "计量器背景的透明程度。条形和文字不受影响。",
+      "titleOpacity": "统计窗口标题栏的透明程度，与下方背景分开设置。移动它之前，它跟随背景不透明度。",
       "meterOpacity": "彩色伤害条的不透明程度。",
       "meterSaturation": "条形颜色的浓淡：调低更柔和，调高更鲜艳。",
       "bossNameSize": "条形上方首领或目标名称的大小。",
@@ -460,10 +580,15 @@
       "updateRate": "统计数字多久刷新一次。越快越早显示伤害，但占用更多 CPU。",
       "partyPresence": "同样使用 A2Tools 的队友会在你的名字旁看到小小的 A2 标记，你也会看到他们的。队伍中任何使用 A2Tools 的人都看得到，因此会知道你使用第三方计量器。只会发送角色名称与服务器的哈希值。",
       "shareBossTimers": "通过 a2tools.app（及合作伙伴 Aion 2 Timers）与其他玩家分享野外首领计时：打开地图时图上的首领，以及你看到被击杀的野外首领，以及战斗中首领的 HP。只会发送服务器、首领、时间与 HP。",
+      "shareSupplyRequests": "当服务器的补给委托看板变化时（每次重置后），与 a2tools.app 的 Profiteer 分享：只发送服务器、看板和委托内容，不发送你的角色或进度。",
       "debugLogging": "写入开发者用于排查问题的诊断日志。",
       "saveRawPackets": "记录原始游戏流量以便提交错误报告。调试日志会随之开启。",
       "globalHotkeys": "下面的按键在游戏处于前台时也能使用。关闭后，这些按键会释放给其他程序。在 Linux 上由桌面注册这些按键，桌面可能会请你批准。",
-      "pluginDevMode": "从这台电脑上的文件夹加载插件，用于开发和测试。这些插件未经审核，请只加载你信任的插件。"
+      "pluginDevMode": "从这台电脑上的文件夹加载插件，用于开发和测试。这些插件未经审核，请只加载你信任的插件。",
+      "showMeter": "关闭：只显示插件。统计仍在后台记录战斗并上传。可在此处、用显示/隐藏快捷键，或插件窗口上的统计按钮重新显示。",
+      "clearOnZone": "切换区域后，何时从统计中清除上一场战斗。所有战斗都会保留在历史记录中。",
+      "hideWhenGameClosed": "游戏未运行时隐藏计量器，游戏启动后再次显示。",
+      "hideWhenSolo": "不在队伍中时隐藏计量器，加入队伍后再次显示。显示/隐藏快捷键仍可随时打开它。"
     },
     "globalHotkeys": "使用快捷键",
     "hotkeyConsent": {
@@ -475,6 +600,8 @@
     },
     "keybindTaken": "其他程序已在使用这些按键。请换用其他按键。",
     "keybindShared": "另一个操作使用了这些按键。请换用其他按键。",
+    "keybindUnset": "桌面尚未为此分配按键。请在“桌面快捷键”中设置。",
+    "keybindAssigned": "桌面使用的是 {key}。可在“桌面快捷键”中更改。",
     "plugins": {
       "title": "插件",
       "devMode": "插件开发者模式",
@@ -512,12 +639,28 @@
       "permStorage": "在此电脑上保存自己的数据",
       "permNotify": "在自己的窗口中显示简短消息",
       "permWindow": "显示和隐藏自己的窗口，不会抢走游戏的焦点",
+      "permWidgets": "显示可随意移动并锁定位置的小窗口",
       "permBossTimers": "读取玩家通过 a2tools.app 分享的野外首领计时",
       "permCharacter": "查看你角色的名称、服务器、职业和等级",
       "permDecoder": "读取你自己的游戏数据：{name}",
       "permNone": "除显示窗口外不做其他事",
       "enabled": "启用",
-      "enabledTip": "开启：随计量器启动。关闭：保持安装，但不运行。"
+      "enabledTip": "开启：随计量器启动。关闭：保持安装，但不运行。",
+      "showMeter": "显示 DPS 统计",
+      "hideClosed": "AION2 关闭时隐藏",
+      "hideUnfocused": "AION2 不在前台时隐藏",
+      "inDock": "放入插件停靠栏（关闭：单独窗口）",
+      "search": "搜索",
+      "noMatch": "没有匹配的插件。",
+      "permsTitle": "可以:"
+    },
+    "clearOnZone": {
+      "label": "清空统计",
+      "options": {
+        "instance": "进出副本时",
+        "any": "每次切换区域时",
+        "never": "从不（保留上一场战斗）"
+      }
     }
   },
   "support": {
@@ -557,7 +700,8 @@
   "meter": {
     "identifyingPlayer": "#{id}",
     "a2toolsUser": "使用 A2Tools",
-    "dpsSuffix": "/秒"
+    "dpsSuffix": "/秒",
+    "others": "其他"
   },
   "skills": {
     "fallback": "技能 {code}",
@@ -605,6 +749,8 @@
   },
   "presence": {
     "level": "Lv {level}",
+    "combatPower": "战斗力 {cp}",
+    "gearScore": "装备分数 {gs}",
     "fighting": "正在挑战 {boss}",
     "inGame": "游戏中",
     "elyos": "天族",
@@ -647,5 +793,22 @@
     "alsoAsks": "新版本还要求：",
     "updateNow": "现在更新吗？",
     "failed": "无法更新："
+  },
+  "pluginDock": {
+    "tabs": "以标签页显示插件",
+    "stack": "堆叠显示插件",
+    "fold": "收起停靠栏",
+    "unfold": "展开停靠栏",
+    "hideControls": "隐藏控件",
+    "showControls": "显示控件",
+    "popOut": "在单独窗口中打开",
+    "pluginSettings": "插件设置",
+    "hide": "隐藏（插件继续运行）",
+    "close": "隐藏停靠栏（插件继续运行）",
+    "hideMeter": "隐藏 DPS 计量器",
+    "showMeter": "显示 DPS 计量器",
+    "settings": "计量器设置",
+    "opacity": "背景不透明度",
+    "failed": "此插件无法启动：{error}"
   }
 }

@@ -273,13 +273,18 @@ fn canonicalise(record: &mut FightRecord) {
     if record.buffs.as_ref().is_some_and(|b| b.is_empty()) {
         record.buffs = None;
     }
+    // Stagger gauges (`05 E0`) are not on the slice's allowlist, so a slice
+    // derives none: "no data", and fight.json keeps its shape.
+    if record.stagger.as_ref().is_some_and(|w| w.is_empty()) {
+        record.stagger = None;
+    }
 }
 
 /// Bumped when the service derives differently from the meter of the same
 /// version, so a2tools.app re-derives its logs: it re-derives every log whose
 /// parser version is older than the service's. `2.0.48.1` sorts after
 /// `2.0.48` and before `2.0.49`.
-const SERVICE_REVISION: u32 = 3;
+const SERVICE_REVISION: u32 = 4;
 
 pub fn parser_version() -> String {
     format!("{}.{}", crate::entity::fight_record::APP_VERSION, SERVICE_REVISION)
@@ -566,6 +571,9 @@ mod tests {
         canonicalise(&mut record);
         assert!(record.buffs.is_none());
         assert!(serde_json::to_value(&record).unwrap().get("buffs").is_none(), "fight.json keeps its shape");
+        record.stagger = Some(Vec::new());
+        canonicalise(&mut record);
+        assert!(serde_json::to_value(&record).unwrap().get("stagger").is_none(), "fight.json keeps its shape");
     }
 
     #[test]

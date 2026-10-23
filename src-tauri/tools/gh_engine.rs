@@ -491,7 +491,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         history: FightHistoryManager::new(args.data_dir.clone()),
         port_detector: port_detector.clone(),
         npcap: AtomicBool::new(false),
-        capturer: PcapCapturer::new(tx),
+        capturer: PcapCapturer::new(tx, port_detector.clone()),
         saving: Mutex::new(()),
         dps,
         me,
@@ -591,7 +591,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 }
                 let server = engine.storage.local_profile().server_id;
                 for event in engine.storage.take_boss_events() {
-                    let BossEventKind::Killed { at_ms } = event.kind;
+                    let BossEventKind::Killed { at_ms } = event.kind else { continue };
                     let kill = serde_json::json!({ "npc": event.npc, "at": at_ms, "server": (server != 0).then_some(server) }).to_string();
                     let _ = engine.events.send(("bossKill", kill));
                 }

@@ -15,6 +15,9 @@ use crate::i18n::lookup::{NpcLookup, SkillLookup};
 /// above the entity-id range (real ids top out at 9,999,999) so it can never
 /// collide, and stays positive because the frontend discards non-positive ids.
 const PARTY_ROW_ID_BASE: i32 = 90_000_000;
+/// The Others row on an open-world boss (`world_boss_rows`), below the party
+/// rows' ids and above every entity's.
+const OTHERS_ROW_ID: i32 = PARTY_ROW_ID_BASE - 1;
 /// A death this long after a fight's last hit still belongs to it: in a
 /// wipe the last of the party can fall after the boss's last damage.
 const DEATH_GRACE_MS: i64 = 5_000;
@@ -99,6 +102,10 @@ pub struct DpsCalculator {
     /// `DataStorage::party_placeholders_wanted` at the last computed snapshot:
     /// the party rows go when it turns false, ten minutes after the roster.
     last_party_rows: bool,
+    /// The open-world boss being fought (entity, first hit of this fight) and
+    /// its HP when this meter first saw the fight, the start of what Others
+    /// counts (`world_boss_rows`).
+    world_boss_start: Option<(i32, i64, i64)>,
     target_selection_mode: TargetSelectionMode,
     last_known_local_id: Option<i64>,
     all_targets_window_ms: i64,
@@ -128,6 +135,7 @@ impl DpsCalculator {
             last_damage_gen: -1,
             last_names_gen: 0,
             last_party_rows: false,
+            world_boss_start: None,
             target_selection_mode: TargetSelectionMode::BossTargets,
             last_known_local_id: None,
             all_targets_window_ms: 120_000,
@@ -308,6 +316,19 @@ impl DpsCalculator {
             0
         };
 
+        // Fight window for windowed heal totals (union of all target windows)
+        let (fight_start, fight_end) = {
+            let mut first = i64::MAX;
+            let mut last = 0i64;
+            for &tid in &target_ids {
+                if let Some(td) = combat_data.get(&tid) {
+                    first = first.min(td.first_damage_time);
+                    last = last.max(td.last_damage_time);
+                }
+            }
+            if first == i64::MAX { (0i64, 0i64) } else { (first, last) }
+        };
+
         if (battle_time == 0 && combined_actors.is_empty()) || combined_actors.is_empty() {
             if let Some(ref mut snapshot) = self.last_dps_snapshot {
                 snapshot.target_name = dps_data.target_name.clone();
@@ -363,11 +384,33 @@ impl DpsCalculator {
 
             entry.amount += damage as f64;
 
-            if entry.job.is_empty() {
-                if let Some(job) = combined_jobs.get(&actor_id).and_then(|j| *j) {
+            // The class this player is seen to play wins over the cache, which
+            // is keyed by name alone and outlives the session's fights: a name
+            // once cached with another class (a stale binding, or a namesake
+            // on another server) showed the wrong class, and in an instance
+            // the class rule then merged two players' rows. A summon's own
+            // class never decides its owner's.
+            if let Some(job) = combined_jobs.get(&actor_id).and_then(|j| *j) {
+                let player_itself = actor_id == raw_uid;
+                if entry.job.is_empty() || (player_itself && entry.job != job.class_name()) {
                     entry.job = job.class_name().to_string();
                     self.cache_job(&nickname, job.class_name());
                 }
+            }
+        }
+
+        // Stagger taken off the shown targets' gauges in the fight, on the
+        // rows of who took it (Stagger mode). Before the orphan merges
+        // below, which carry it along with the damage.
+        let stagger_targets: HashSet<i32> = target_ids.iter().copied().collect();
+        for ((actor_id, skill), stagger) in self.data_storage.stagger_totals(fight_start, fight_end, &stagger_targets) {
+            let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
+            let nickname = resolve_nickname(raw_uid, &nickname_data, &summon_data);
+            let uid = *canonical.get(&nickname).unwrap_or(&raw_uid);
+            if let Some(entry) = dps_data.map.get_mut(&uid) {
+                entry.stagger += stagger;
+                let shown = crate::capture::stream_processor::normalize_skill_id(&self.skill_lookup, skill);
+                *entry.stagger_skills.entry(shown).or_default() += stagger;
             }
         }
 
@@ -510,45 +553,34 @@ impl DpsCalculator {
             }
         }
 
-        // Healing done in the fight's window, on the rows the damage made — a
-        // healer and their summons resolved as for damage (`get_target_details`
-        // does the same for HEAL). A healer who dealt no damage gets a row of
-        // their own when their class is known — from the heal skills, else
-        // from earlier this session; with neither it's no player for sure.
-        let window = target_ids
-            .iter()
-            .filter_map(|tid| combat_data.get(tid))
-            .map(|td| (td.first_damage_time, td.last_damage_time))
-            .reduce(|(f, l), (f2, l2)| (f.min(f2), l.max(l2)));
-        if let Some((from, to)) = window {
-            let mut heals: Vec<(i32, (i64, Vec<i32>))> = self.data_storage.heal_totals_between(from, to).into_iter().collect();
-            // The player's own entity before their summons, as for damage.
-            heals.sort_unstable_by_key(|&(actor_id, _)| (summon_resolver::resolve(actor_id, &summon_data) != actor_id, actor_id));
-            for (actor_id, (healed, codes)) in heals {
-                let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
-                if raw_uid <= 0 { continue; }
-                let nickname = resolve_nickname(raw_uid, &nickname_data, &summon_data);
-                let uid = *canonical.get(&nickname).unwrap_or(&raw_uid);
-                let uid = *orphan_to_owner.get(&uid).unwrap_or(&uid);
-                if !dps_data.map.contains_key(&uid) {
-                    let job = codes
-                        .iter()
-                        .find_map(|&code| JobClass::convert_from_skill(code))
-                        .map(|j| j.class_name().to_string())
-                        .or_else(|| self.cached_job(&nickname));
-                    let Some(job) = job else { continue };
-                    self.cache_job(&nickname, &job);
-                    dps_data.map.insert(uid, PersonalData::with_job(nickname.clone(), job));
+        // Heal data: per-actor totals windowed to the fight
+        let heal_totals = self.data_storage.get_heal_totals_in_window(fight_start, fight_end);
+        let mut resolved_heals: HashMap<i32, i64> = HashMap::new();
+        for (&actor_id, &heal) in &heal_totals {
+            let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
+            if raw_uid <= 0 { continue; }
+            let nickname = resolve_nickname(raw_uid, &nickname_data, &summon_data);
+            let uid = *canonical.get(&nickname).unwrap_or(&raw_uid);
+            let uid = *orphan_to_owner.get(&uid).unwrap_or(&uid);
+            *resolved_heals.entry(uid).or_insert(0) += heal;
+        }
+        let bt = battle_time.max(1000);
+        for (&uid, &heal) in &resolved_heals {
+            let entry = dps_data.map.entry(uid).or_insert_with(|| {
+                let nickname = resolve_nickname(uid, &nickname_data, &summon_data);
+                let cached_job = self.cached_job(&nickname);
+                if let Some(job) = cached_job {
+                    PersonalData::with_job(nickname, job)
+                } else {
+                    PersonalData::new(nickname)
                 }
-                if let Some(row) = dps_data.map.get_mut(&uid) {
-                    row.heal += healed as f64;
-                }
-            }
+            });
+            entry.heal_amount = heal as f64;
+            entry.hps = heal as f64 / bt as f64 * 1000.0;
         }
 
         // Filter and compute DPS
         let party_members = self.data_storage.get_party_members();
-        let bt = battle_time.max(1000);
         let mut to_remove = Vec::new();
         for (&uid, data) in &mut dps_data.map {
             // Combat power joins on the character name: the roster carries an
@@ -562,7 +594,9 @@ impl DpsCalculator {
                 .unwrap_or_else(|| self.data_storage.self_combat_power(&data.nickname));
             data.gear_score = member.map(|m| m.gear_score).unwrap_or(0);
             if data.job.is_empty() {
-                if local_ids.as_ref().is_some_and(|ids| ids.contains(&uid)) {
+                if local_ids.as_ref().is_some_and(|ids| ids.contains(&uid))
+                    || data.heal_amount > 0.0
+                {
                     // A class seen earlier this session survives a reset
                     // (issue #9); "Unknown" draws no icon.
                     data.job = self.cached_job(&data.nickname).unwrap_or_else(|| "Unknown".to_string());
@@ -572,7 +606,6 @@ impl DpsCalculator {
                 }
             }
             data.dps = data.amount / bt as f64 * 1000.0;
-            data.hps = data.heal / bt as f64 * 1000.0;
             data.damage_contribution = if total_damage > 0.0 {
                 data.amount / total_damage * 100.0
             } else {
@@ -581,6 +614,10 @@ impl DpsCalculator {
         }
         for uid in to_remove {
             dps_data.map.remove(&uid);
+        }
+
+        if let Some(shown) = self.world_boss_rows(&mut dps_data, &combat_data, &local_ids, &party_members, total_damage, target_current_hp, bt) {
+            total_damage = shown;
         }
 
         dps_data.battle_time = battle_time;
@@ -602,6 +639,76 @@ impl DpsCalculator {
         dps_data
     }
 
+    /// An open-world boss shows you, your party and one Others row. Since the
+    /// Global update of 2026-10-15 the server sends no one else's direct hits
+    /// on these bosses, only their damage over time, so their rows showed a
+    /// few percent of what they did (Furious Saursus, 2026-10-17: 7.8M of the
+    /// 152M it lost; #55). Others is the HP the boss has lost since this meter
+    /// first saw the fight, less what your and your party's rows show.
+    /// Returns the total the rows now add up to. `None` when the target is no
+    /// field boss.
+    #[allow(clippy::too_many_arguments)]
+    fn world_boss_rows(
+        &mut self,
+        dps_data: &mut DpsData,
+        combat_data: &HashMap<i32, TargetCombatData>,
+        local_ids: &Option<HashSet<i32>>,
+        party: &HashMap<String, crate::combat::data_storage::PartyMember>,
+        tracked: f64,
+        current_hp: i64,
+        battle_time_ms: i64,
+    ) -> Option<f64> {
+        let target = self.current_target;
+        let code = (target != 0).then(|| self.data_storage.mob_code(target)).flatten()?;
+        // In an instance everyone there is your party, and before the meter
+        // knows who you are it cannot tell who is yours.
+        if !crate::capture::field_bosses::is_field_boss(code)
+            || self.data_storage.current_dungeon_id() != 0
+            || local_ids.is_none()
+        {
+            return None;
+        }
+        let local_name = self.data_storage.local_character_name();
+        dps_data.map.retain(|uid, d| {
+            let name = d.nickname.trim();
+            local_ids.as_ref().is_some_and(|ids| ids.contains(uid))
+                || local_name.as_deref().is_some_and(|n| n.trim() == name)
+                || party.contains_key(name)
+        });
+        let listed: f64 = dps_data.map.values().map(|d| d.amount).sum();
+
+        let hp_now = if self.data_storage.is_entity_dead(target) { 0 } else { current_hp };
+        let first_hit = combat_data.get(&target).map(|t| t.first_damage_time).unwrap_or(0);
+        let mut others = 0.0;
+        if hp_now >= 0 {
+            // The first look at a fight takes its HP then, plus what was
+            // already tracked: the hits before that look are counted, the
+            // fight before this meter came is not.
+            let start = match self.world_boss_start {
+                Some((t, at, hp)) if t == target && at == first_hit => hp,
+                _ => {
+                    let hp = hp_now + tracked as i64;
+                    self.world_boss_start = Some((target, first_hit, hp));
+                    hp
+                }
+            };
+            others = ((start - hp_now) as f64 - listed).max(0.0);
+        }
+        if others > 0.0 {
+            let mut row = PersonalData::new("Others".to_string());
+            row.is_others = true;
+            row.amount = others;
+            dps_data.map.insert(OTHERS_ROW_ID, row);
+        }
+        let total = listed + others;
+        let bt = battle_time_ms.max(1000) as f64;
+        for d in dps_data.map.values_mut() {
+            d.dps = d.amount / bt * 1000.0;
+            d.damage_contribution = if total > 0.0 { d.amount / total * 100.0 } else { 0.0 };
+        }
+        Some(total)
+    }
+
     /// Give every party member a row as soon as they join, damage or not, so the
     /// meter shows the group you are actually in rather than only whoever has
     /// swung. The roster is keyed by character name — its `dbid` is an account
@@ -618,6 +725,7 @@ impl DpsCalculator {
     /// one added only on a fresh result vanished on the next cached one.
     fn finalize_rows(&self, dps_data: &mut DpsData) {
         dps_data.party_generation = self.data_storage.party_generation();
+        (dps_data.zone_generation, dps_data.instance_generation) = self.data_storage.zone_generations();
         self.add_party_rows(dps_data);
         self.mark_supporters(dps_data);
     }
@@ -981,8 +1089,9 @@ impl DpsCalculator {
         // stats here; the saved record's timestamps come from get_target_details.
         let combat_data = self.data_storage.get_combat_snapshot_light();
         // Once per snapshot rather than once per actor: the roster is a clone
-        // behind a lock, and it does not change between targets here.
-        let party_members = self.data_storage.get_party_members();
+        // behind a lock, and it does not change between targets here. With
+        // those who have left: this fight may be saved again after they go.
+        let party_members = self.data_storage.fight_roster();
         let supporters = self.data_storage.supporters();
         let roster_dungeon = self.data_storage.current_dungeon_id();
         let now_ms = crate::clock::now_ms();
@@ -1046,6 +1155,22 @@ impl DpsCalculator {
                     (nick, job)
                 });
             }
+            // A player who only healed (a Cleric who never hit the boss) has
+            // no damage row, and was left out of the record with their heals.
+            // Their heals name them: one of their own class's skills.
+            let heal_class = |uid: i32| {
+                class_by_damage(details.heal_skills.iter().filter(|s| s.actor_id == uid).map(|s| (s.code, s.dmg)))
+            };
+            for skill in &details.heal_skills {
+                let uid = skill.actor_id;
+                if record_actors.contains_key(&uid) {
+                    continue;
+                }
+                if let Some(job) = heal_class(uid) {
+                    let nick = resolve_nickname(uid, &nickname_data, &summon_data_snap);
+                    record_actors.insert(uid, (nick, job.class_name().to_string()));
+                }
+            }
 
             let local_id = self.data_storage.local_player_id().unwrap_or(-1) as i32;
             let actors: Vec<DetailsActorSummary> = record_actors.iter()
@@ -1057,15 +1182,18 @@ impl DpsCalculator {
                     };
                     let job_class = class_by_damage(
                         details.skills.iter().filter(|s| s.actor_id == id).map(|s| (s.code, s.dmg)),
-                    );
+                    )
+                    .or_else(|| heal_class(id));
                     // Aggregate per-actor stats across all targets
                     let (mut party_heal, mut regen, mut dmg_recv, mut hits_recv) = (0i64, 0i64, 0i64, 0i32);
+                    let mut received = crate::entity::details_context::ReceivedHits::default();
                     for td in combat_data.values() {
                         if let Some(ad) = td.actors.get(&id) {
                             party_heal += ad.party_heal;
                             regen += ad.regen;
                             dmg_recv += ad.damage_received;
                             hits_recv += ad.hits_received;
+                            received.add(ad.received);
                         }
                     }
                     // Joined on the unobscured nickname: the roster is keyed by
@@ -1081,6 +1209,7 @@ impl DpsCalculator {
                         regen,
                         damage_received: dmg_recv,
                         hits_received: hits_recv,
+                        received: Some(received),
                         dbid: roster.map(|m| m.dbid).unwrap_or(0),
                         server_id: roster.map(|m| m.server_id).unwrap_or(0),
                         is_supporter: supporters.contains(
@@ -1125,6 +1254,10 @@ impl DpsCalculator {
                 target_data.last_damage_time,
                 actors.iter().map(|a| a.actor_id),
             );
+            // Every gauge that took a deduction in the fight, not only the
+            // target's. A window still open is saved as missed, and stays
+            // open here: this fight is saved again while it goes on.
+            let stagger = self.data_storage.fight_stagger(target_data.first_damage_time, target_data.last_damage_time);
             let record = FightRecord {
                 id,
                 boss_name,
@@ -1142,6 +1275,7 @@ impl DpsCalculator {
                 dungeon_id: fight_dungeon(&self.npc_lookup, mob_code, roster_dungeon),
                 server_id: self.data_storage.fight_server_id(),
                 buffs: Some(buffs),
+                stagger: Some(stagger),
             };
 
             if is_ended {
@@ -1155,17 +1289,30 @@ impl DpsCalculator {
 
     /// The buffs and debuffs of the fight on `target_id` so far, for Details
     /// on a live fight: the same tracks a saved fight keeps, on the actors the
-    /// saved record would list.
-    pub fn live_fight_buffs(&self, target_id: i32) -> Option<crate::combat::fight_buffs::LiveFightBuffs> {
+    /// saved record would list; and its stagger windows, as a saved fight's.
+    ///
+    /// `shown`: every target Details shows together (All targets), whose
+    /// timeline starts at the first of them. The stagger windows are those of
+    /// that whole span, on its time: the gauge can be on another target than
+    /// the first one listed (Shaman Kumbahum among his Brawlers, 2026-10-22).
+    pub fn live_fight_buffs(&self, target_id: i32, shown: &[i32]) -> Option<crate::combat::fight_buffs::LiveFightBuffs> {
         let target = self.data_storage.get_target_snapshot_light(target_id)?;
         let (start, end) = (target.first_damage_time, target.last_damage_time.max(target.first_damage_time));
         let details = self.get_hover_details(target_id, None);
         let actors: HashSet<i32> = details.skills.iter().map(|s| s.actor_id).collect();
+        let (mut span_start, mut span_end) = (start, end);
+        for &id in shown {
+            if let Some(t) = self.data_storage.get_target_snapshot_light(id) {
+                span_start = span_start.min(t.first_damage_time);
+                span_end = span_end.max(t.last_damage_time);
+            }
+        }
         Some(crate::combat::fight_buffs::LiveFightBuffs {
             target_id,
             start_time_ms: start,
             duration_ms: end - start,
             buffs: crate::combat::fight_buffs::for_fight(&self.data_storage, target_id, start, end, actors),
+            stagger: self.data_storage.fight_stagger(span_start, span_end),
         })
     }
 
@@ -1276,12 +1423,14 @@ impl DpsCalculator {
                 ).map_or(0, |jc| jc.class_prefix());
                 // Aggregate per-actor stats
                 let (mut party_heal, mut regen, mut dmg_recv, mut hits_recv) = (0i64, 0i64, 0i64, 0i32);
+                    let mut received = crate::entity::details_context::ReceivedHits::default();
                 for td in combat_data.values() {
                     if let Some(ad) = td.actors.get(&id) {
                         party_heal += ad.party_heal;
                         regen += ad.regen;
                         dmg_recv += ad.damage_received;
                         hits_recv += ad.hits_received;
+                            received.add(ad.received);
                     }
                 }
                 DetailsActorSummary {
@@ -1293,6 +1442,7 @@ impl DpsCalculator {
                     regen,
                     damage_received: dmg_recv,
                     hits_received: hits_recv,
+                        received: Some(received),
                     // The live view is never uploaded: nothing here reads the
                     // identity a saved record keeps.
                     dbid: 0,
@@ -2066,6 +2216,37 @@ mod tests {
             "spirit to the Spiritmaster; the old id and the aura to the Cleric; two Gladiators: unknown");
     }
 
+    /// A main-window row's class came from a cache keyed by name alone and was
+    /// never corrected, so a Sorcerer whose name had once been cached as a
+    /// Templar showed as one, and in an instance the class rule then merged
+    /// the two players' rows (Details, which reads the class seen, kept them
+    /// apart). Reported 2026-10-17, log tMRqyYEStEUK7HJPC9GS6g.
+    #[test]
+    fn the_class_seen_on_a_player_beats_a_stale_cached_class() {
+        use crate::combat::data_storage::PartyMember;
+        use crate::entity::job_class::JobClass;
+        let storage = Arc::new(DataStorage::new());
+        storage.set_current_dungeon(600_072);
+        let member = |slot, job| PartyMember { slot, job: Some(job), ..Default::default() };
+        storage.set_party_roster(vec![
+            ("Tank".into(), member(1, JobClass::Templar)),
+            ("X".into(), member(2, JobClass::Sorcerer)),
+        ], true);
+        storage.append_nickname_authoritative(4186, "Tank");
+        storage.append_nickname_authoritative(5740, "X");
+        rotation(&storage, 4186, 50_000, 12, 8);     // the Templar
+        rotation(&storage, 5740, 50_000, 15, 8);     // the Sorcerer
+        let mut calc = meter(&storage);
+        calc.cache_job("X", JobClass::Templar.class_name());   // a stale class for the name
+        calc.set_target_selection_mode("allTargets");
+        let shown = calc.get_dps();
+        let mut rows: Vec<(String, String)> = shown.map.values().map(|d| (d.nickname.clone(), d.job.clone())).collect();
+        rows.sort();
+        let (templar, sorcerer) = (JobClass::Templar.class_name().to_string(), JobClass::Sorcerer.class_name().to_string());
+        assert_eq!(rows, vec![("Tank".to_string(), templar), ("X".to_string(), sorcerer.clone())]);
+        assert_eq!(calc.cached_job("X"), Some(sorcerer), "the cache is corrected");
+    }
+
     #[test]
     fn the_class_rule_stays_off_outside_an_instance_and_with_another_party() {
         // Open world: an actor of the class may be a stranger.
@@ -2183,13 +2364,53 @@ mod tests {
         assert_eq!(shown.target_id, 0);
         assert!(shown.map.is_empty());
 
-        // You join in: the boss is yours, with every player on it.
+        // You join in: the boss is yours. Strangers are no rows on an
+        // open-world boss: the server sends little of theirs (#55), and they
+        // are in Others, from the boss's HP (none read here, so no row).
         storage.append_damage(hit(7983, 44_090, 3_000));
         let shown = calc.get_dps();
         assert_eq!(shown.target_id, 44_090);
-        let mut rows: Vec<i32> = shown.map.keys().copied().collect();
-        rows.sort_unstable();
-        assert_eq!(rows, vec![2653, 7983, 13179, 15468]);
+        assert_eq!(shown.map.keys().copied().collect::<Vec<_>>(), vec![7983]);
+    }
+
+    /// On an open-world boss the rows are you, your party and Others: what
+    /// the boss lost since the meter first saw the fight, less those rows.
+    #[test]
+    fn a_world_boss_shows_others_from_the_hp_it_lost() {
+        use crate::combat::data_storage::PartyMember;
+        let storage = Arc::new(DataStorage::new());
+        storage.set_local_player_id(Some(7983));
+        storage.append_nickname_authoritative(7983, "Naicha");
+        storage.set_party_roster(vec![
+            ("Naicha".into(), PartyMember { slot: 1, ..Default::default() }),
+            ("Oppi".into(), PartyMember { slot: 2, ..Default::default() }),
+        ], true);
+        storage.append_nickname_authoritative(15_130, "Oppi");
+        let mut calc = boss_meter(&storage);
+        storage.set_mob_current_hp(44_090, 1_000_000);
+        storage.append_damage(hit(7983, 44_090, 1_000));
+        let first = calc.get_dps();
+        assert!(!first.map.contains_key(&OTHERS_ROW_ID), "nothing lost yet beyond your own hits");
+
+        // Strangers take 500,000 that the server never shows; you and Oppi
+        // land hits of your own, and a stranger's damage over time shows.
+        storage.append_damage(hit(15_130, 44_090, 2_000));
+        storage.append_damage(hit(2653, 44_090, 2_100));
+        let mine = first.map[&7983].amount;
+        let shown_before = mine + calc.get_dps().map[&15_130].amount;
+        storage.set_mob_current_hp(44_090, 1_000_000 - 500_000 - (shown_before - mine) as i32);
+        storage.append_damage(hit(7983, 44_090, 3_000));
+        let shown = calc.get_dps();
+        let mut ids: Vec<i32> = shown.map.keys().copied().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![7983, 15_130, OTHERS_ROW_ID]);
+        let others = &shown.map[&OTHERS_ROW_ID];
+        assert!(others.is_others);
+        let listed: f64 = shown.map.iter().filter(|(id, _)| **id != OTHERS_ROW_ID).map(|(_, d)| d.amount).sum();
+        let lost = (1_000_000 + mine as i64) - (1_000_000 - 500_000 - (shown_before - mine) as i64);
+        assert_eq!((listed + others.amount) as i64, lost, "the rows add up to what the boss lost");
+        let share: f64 = shown.map.values().map(|d| d.damage_contribution).sum();
+        assert!((share - 100.0).abs() < 0.01);
     }
 
     /// Someone joining between fights shows at once, not at the next hit:
@@ -2245,7 +2466,8 @@ mod tests {
         storage.append_damage(hit(2653, 44_090, 2_100));
         let shown = calc.get_dps();
         assert_eq!(shown.target_id, 44_090);
-        assert!(shown.map.contains_key(&15_130) && shown.map.contains_key(&2653));
+        // Oppi's; the stranger beside them is in Others on a world boss.
+        assert!(shown.map.contains_key(&15_130) && !shown.map.contains_key(&2653));
     }
 
     /// Before the meter knows who you are, an open-world boss is no one's

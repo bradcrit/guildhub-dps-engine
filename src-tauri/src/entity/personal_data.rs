@@ -34,12 +34,23 @@ pub struct PersonalData {
     /// mark beside the name.
     #[serde(default)]
     pub uses_a2tools: bool,
-    /// Healing done inside the fight's window (its first to last hit), self-heals
-    /// and HoTs included, and that per second of the fight.
+    /// The Others row on an open-world boss: everyone not in your party,
+    /// from the HP the boss lost (`DpsCalculator::world_boss_rows`).
     #[serde(default)]
-    pub heal: f64,
+    pub is_others: bool,
     #[serde(default)]
     pub hps: f64,
+    #[serde(default)]
+    pub heal_amount: f64,
+    /// Stagger taken off the shown targets' gauges in the fight
+    /// (`combat::stagger`), for the meter's Stagger mode.
+    #[serde(default)]
+    pub stagger: i64,
+    /// That stagger by skill, under the codes skills are shown by
+    /// (`normalize_skill_id`), for the row's tooltip in Stagger mode. Left
+    /// out when there is none.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub stagger_skills: HashMap<i32, i64>,
 }
 
 impl PersonalData {
@@ -55,8 +66,11 @@ impl PersonalData {
             gear_score: 0,
             is_supporter: false,
             uses_a2tools: false,
-            heal: 0.0,
+            is_others: false,
             hps: 0.0,
+            heal_amount: 0.0,
+            stagger: 0,
+            stagger_skills: HashMap::new(),
         }
     }
 
@@ -72,8 +86,11 @@ impl PersonalData {
             gear_score: 0,
             is_supporter: false,
             uses_a2tools: false,
-            heal: 0.0,
+            is_others: false,
             hps: 0.0,
+            heal_amount: 0.0,
+            stagger: 0,
+            stagger_skills: HashMap::new(),
         }
     }
 
@@ -88,6 +105,11 @@ impl PersonalData {
 
     pub fn merge_from(&mut self, other: &PersonalData) {
         self.amount += other.amount;
+        self.heal_amount += other.heal_amount;
+        self.stagger += other.stagger;
+        for (&skill, &value) in &other.stagger_skills {
+            *self.stagger_skills.entry(skill).or_default() += value;
+        }
         for (skill_code, other_skill) in &other.analyzed_data {
             let existing = self.analyzed_data.entry(*skill_code).or_insert_with(|| {
                 AnalyzedSkill::new(*skill_code, other_skill.skill_name.clone())

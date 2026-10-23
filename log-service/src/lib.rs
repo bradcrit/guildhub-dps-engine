@@ -28,8 +28,17 @@ const DOTS: &str = include_str!("../../src/data/dot_skill_ids.json");
 /// tens or hundreds of KB) and tight against anything built to make this Worker
 /// work. The second is on the fight's packets as version 2 stores them (see
 /// `read_slice`), so it takes or refuses a fight alike in every version.
-const MAX_GZIPPED: usize = 4 * 1024 * 1024;
-const MAX_RECORD_BYTES: usize = 24 * 1024 * 1024;
+// 16 MiB, as the site takes (was 4): a slice carries 30 minutes of the zone's
+// state before the pull, which in a crowded place passed 4 MiB for a short
+// fight (2026-10-17).
+const MAX_GZIPPED: usize = 16 * 1024 * 1024;
+// 36 MiB (was 24): a fight at a field boss with hundreds of players came to
+// 30-47 MiB from meters before 2.0.74, which kept every buff change from the
+// half hour before the pull. Memory, not this number, is the real bound: the
+// Worker has 128 MB, and reading and deriving a 32 MiB fight (343 players)
+// peaked at 77 MiB of heap, a 47 MiB one (577 players, 6 minutes) at 191 MiB
+// (2026-10-21). Above this a slice is refused, not run out of memory.
+const MAX_RECORD_BYTES: usize = 36 * 1024 * 1024;
 
 /// The slice inside an upload: zstd from meters 2.0.67 on, gzip before, told
 /// apart by their magic bytes, so every stored slice still derives. Read as it
@@ -44,6 +53,19 @@ fn read_slice(body: &[u8]) -> Option<Decoded> {
     }
 }
 
+/// Whether what `read_slice` refused begins as a slice does: then it was
+/// refused for its size, not for what it is.
+fn looks_like_slice(body: &[u8]) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    let read = if body.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
+        StreamingDecoder::new(body).ok().is_some_and(|mut r| r.read_exact(&mut magic).is_ok())
+    } else {
+        GzDecoder::new(body).read_exact(&mut magic).is_ok()
+    };
+    read && &magic == evidence_slice::MAGIC
+}
+
 #[event(fetch)]
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() != Method::Post || req.path() != "/derive" {
@@ -52,9 +74,15 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // Defence in depth: the binding is the real boundary, but a Worker that
     // does expensive work on request should not trust that nobody ever adds a
     // route to it by mistake.
-    let key = env.secret("LOG_SERVICE_KEY").map(|s| s.to_string()).unwrap_or_default();
+    // Two keys may be accepted, so the key can change without a gap:
+    // LOG_SERVICE_KEY and, while the callers move to a new one,
+    // LOG_SERVICE_KEY_PREVIOUS. One unset or empty accepts nothing.
     let presented = req.headers().get("x-a2-service-key")?.unwrap_or_default();
-    if key.is_empty() || !constant_time_eq(key.as_bytes(), presented.as_bytes()) {
+    let accepted = ["LOG_SERVICE_KEY", "LOG_SERVICE_KEY_PREVIOUS"].iter().any(|name| {
+        let key = env.secret(name).map(|s| s.to_string()).unwrap_or_default();
+        !key.is_empty() && constant_time_eq(key.as_bytes(), presented.as_bytes())
+    });
+    if !accepted {
         return Response::error("forbidden", 403);
     }
 
@@ -63,6 +91,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return error("too_large", "The slice is larger than any real fight.", 413);
     }
     let Some(decoded) = read_slice(&body) else {
+        if looks_like_slice(&body) {
+            return error("too_large", "The fight's records are larger than this service reads.", 413);
+        }
         return error(
             "not_a_slice",
             "Not a gzipped or zstd-compressed Evidence Slice this build reads, or larger than any real fight.",

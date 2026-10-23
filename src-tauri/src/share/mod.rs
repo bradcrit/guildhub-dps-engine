@@ -481,6 +481,7 @@ mod tests {
             dungeon_id: 600093,
             server_id: 0,
             buffs: None,
+            stagger: None,
         }
     }
 
@@ -494,6 +495,7 @@ mod tests {
             regen: 0,
             damage_received: 0,
             hits_received: 0,
+            received: None,
             dbid,
             server_id: (dbid >> 48) as u16,
             is_supporter: false,
@@ -643,6 +645,25 @@ pub fn names_from(storage: &DataStorage) -> NameMap {
     names
 }
 
+/// What cutting a slice needs from the meter's storage, taken with the
+/// fight's record: a save that runs later, after a combat reset, still
+/// blinds the party's names and names its uploader.
+pub struct SliceNames {
+    names: NameMap,
+    local_id: Option<i64>,
+    local_name: Option<String>,
+}
+
+impl SliceNames {
+    pub fn of(storage: &DataStorage) -> Self {
+        Self {
+            names: names_from(storage),
+            local_id: storage.local_player_id(),
+            local_name: storage.local_character_name(),
+        }
+    }
+}
+
 /// Cut and keep the slice for a fight the meter just saved, from memory.
 ///
 /// Called by the auto-save each time it writes the record, so the slice grows
@@ -652,7 +673,7 @@ pub fn names_from(storage: &DataStorage) -> NameMap {
 pub fn save_slice(
     app_data_dir: &Path,
     record: &FightRecord,
-    storage: &DataStorage,
+    names: &SliceNames,
 ) -> Result<usize, String> {
     let packets = ring::snapshot();
     let start = record.start_time_ms;
@@ -660,7 +681,7 @@ pub fn save_slice(
         return Err("no packets in memory for this fight".into());
     }
     let mut slice =
-        evidence_slice::build(&packets, start, start + record.duration_ms, &names_from(storage), slice_key()?)
+        evidence_slice::build(&packets, start, start + record.duration_ms, &names.names, slice_key()?)
             .map_err(|e| e.to_string())?;
     without_roster_ids(&mut slice);
     let compressed = compress_slice(&evidence_slice::encode(&slice))?;
@@ -668,7 +689,7 @@ pub fn save_slice(
     let dir = slices_dir(app_data_dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     crate::atomic_file::write(&slice_path(app_data_dir, &record.id), &compressed).map_err(|e| e.to_string())?;
-    let uploader = uploader_in(record, storage.local_player_id(), storage.local_character_name());
+    let uploader = uploader_in(record, names.local_id, names.local_name.clone());
     update_meta(app_data_dir, &record.id, |meta| meta.uploader_actor_id = uploader);
     Ok(compressed.len())
 }
@@ -958,6 +979,12 @@ pub async fn upload_detailed(
                 .into()
         }
         (429, _) => "Too many uploads in the last hour. Try again later.".into(),
+        // The recording carries 30 minutes of the zone before the pull, which
+        // in a crowded place can outgrow the site's limit.
+        (413, _) => format!(
+            "This fight's recording is too large to upload ({:.1} MB). Please send it to us              with Send logs to dev so we can look at it.",
+            compressed.len() as f64 / (1024.0 * 1024.0)
+        ),
         (_, _) => reply
             .get("message")
             .and_then(|m| m.as_str())

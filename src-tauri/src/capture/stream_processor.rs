@@ -277,6 +277,7 @@ impl StreamProcessor {
         self.parse_party_scope_packet(packet);
         self.parse_party_left_packet(packet);
         self.parse_odyle_energy_packet(packet);
+        self.parse_stagger_gauge_packet(packet);
         self.parse_self_stats_packet(packet);
         self.parse_death_packet(packet);
         self.parse_zone_change_packet(packet);
@@ -289,6 +290,14 @@ impl StreamProcessor {
         // Your entry counts and currencies (Homework).
         if let Some(update) = crate::capture::game_lists::parse(packet) {
             self.data_storage.note_game_list(update);
+        }
+        // Who holds the Abyss artifacts (with the Abyss map, and on entry).
+        if let Some(state) = crate::capture::abyss_artifacts::parse(packet) {
+            self.data_storage.note_abyss_artifacts(state);
+        }
+        // The Supply Requests boards (at login), for Profiteer.
+        if let Some(boards) = crate::capture::supply_requests::parse(packet) {
+            self.data_storage.note_supply_requests(boards);
         }
 
         if !parsed_damage && !parsed_name && !parsed_summon && !parsed_ownership && !parsed_hp {
@@ -366,6 +375,43 @@ impl StreamProcessor {
         };
         if let Some((basic, charged)) = energy {
             self.data_storage.set_odyle_energy(basic, charged, whole_list);
+        }
+    }
+
+    // ===== STAGGER GAUGE (05 E0) =====
+
+    /// A monster's stagger gauge, sent after every hit that takes stagger off
+    /// it:
+    ///
+    /// ```text
+    /// <len> 05 E0 <entity varint> 03 01 <max u32 LE> <rest u32 LE> <status u8>   its state
+    /// <len> 05 E0 <entity varint> 00 03 02                                         broken
+    /// ```
+    ///
+    /// The gauge counts down: `rest` is what is left. No update ever has
+    /// `rest` 0: the break is its own record. `max` is its size
+    /// (40 on Transcendent Bakarma in Story mode, solo; 150 on the two
+    /// minibosses before it). Who took what off it is `combat::stagger`'s.
+    ///
+    /// Seen on 2026-10-22 (Global EU, Story mode, solo Templar): 45 records,
+    /// all at the top level, none in a bundle (read there all the same,
+    /// since bundled packets come through here too). Punishment taking
+    /// Bakarma (entity 54651, `fb aa 03`) from 40 to 5:
+    /// `14 05e0 fbaa03 0301 28000000 05000000 02`, and Annihilate breaking a
+    /// miniboss (24627) at 9 left: `0c 05e0 b3c001 000302`.
+    ///
+    /// The status byte, as far as three monsters show it: `02` active (the
+    /// usual), `03` once as Bakarma's gauge came on at its phase (`02` 150 ms
+    /// later), `00` then `01` back at full after a wipe. Once after that reset
+    /// came `03 01 3c000000 28000000 00` (max 60, rest 40), not understood.
+    /// It is logged; it decides nothing but when a window opens.
+    fn parse_stagger_gauge_packet(&self, packet: &[u8]) {
+        match stagger_gauge_record(packet) {
+            Some(StaggerRecord::Gauge { entity, max, rest, status }) => {
+                self.data_storage.note_stagger_gauge(entity, max, rest, status);
+            }
+            Some(StaggerRecord::Break { entity }) => self.data_storage.note_stagger_break(entity),
+            None => {}
         }
     }
 
@@ -517,8 +563,9 @@ impl StreamProcessor {
         offset += 1;
         // Effect type: 0x02/0x0A = damage; 0x01/0x09 = heal; 0x0B = HoT.
         // 0x00 = status, 0x08 = buff. Exact match, NOT bitmask — 0x0B (HoT) has bit
-        // 1 set and would leak through a mask.
-        let is_damage = effect_type == 0x02 || effect_type == 0x0A;
+        // 1 set and would leak through a mask. Damage into a shield adds 0x04
+        // (0x06/0x0E), with the absorbing effects after the amount (#94).
+        let is_damage = matches!(effect_type, 0x02 | 0x0A | 0x06 | 0x0E);
         let is_heal = effect_type == 0x01 || effect_type == 0x09 || effect_type == 0x0B;
         if !is_damage && !is_heal {
             return;
@@ -569,6 +616,9 @@ impl StreamProcessor {
         }
 
         // Damage DoT: gated by the curated dot-skill allowlist.
+        // A tick may have taken stagger, if no hit is waiting for the gauge.
+        self.data_storage.note_stagger_hit(target_info.value, actor_info.value, skill_code, true);
+
         if !self.dot_damage_skill_ids.contains(&skill_code) {
             tracing::trace!("DOT: skill {} not in dot_ids (set size={})", skill_code, self.dot_damage_skill_ids.len());
             return;
@@ -893,7 +943,18 @@ impl StreamProcessor {
                 if let Some(&faction) = job.and(data.get(after + 6)).filter(|f| matches!(f, 1 | 2)) {
                     self.data_storage.note_self_faction(faction);
                 }
-                if let Some(cp) = record.combat_power {
+                // Then the gear score (equipment item level), twice: 383 for
+                // Naicha (2026-10-04), 2040 for Nullception (2026-10-11, as the
+                // character sheet showed). Taken only when both copies agree.
+                let gear = |at: usize| {
+                    data.get(after + at..after + at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                };
+                if let (Some(_), Some(gs), Some(again)) = (level, gear(11), gear(15)) {
+                    if gs == again && (1..=100_000).contains(&gs) {
+                        self.data_storage.note_self_gear_score(&sanitized, gs as i32);
+                    }
+                }
+                if let Some(cp) = self_combat_power(data.get(after..).unwrap_or_default()).or(record.combat_power) {
                     self.data_storage.note_self_combat_power(&sanitized, cp);
                 }
             } else {
@@ -1029,6 +1090,14 @@ impl StreamProcessor {
         // Mob/summon spawn: 0x3640 pre-2026-06, 0x3641 after the shift.
         if packet[offset] != 0x40 && packet[offset] != 0x41 {
             return false;
+        }
+        if packet[offset] == 0x41
+            && let Some((max, rest)) = spawn_stagger_gauge(packet)
+        {
+            let entity = read_varint(packet, offset + 2);
+            if entity.length > 0 {
+                self.data_storage.note_stagger_spawn(entity.value, max, rest);
+            }
         }
         self.parse_summon_spawn_at(packet, offset + 2)
     }
@@ -1570,6 +1639,11 @@ impl StreamProcessor {
             // Hit type 1 (Miss) and 6 (Resist) carry no damage: count them on
             // the skill and stop here, as the parser always did on these.
             if no_value {
+                // An entry of a hit with no value at all (switch 0) marks the
+                // hit before it as one that took stagger (`combat::stagger`).
+                if switch_value == 0 && !npc_skill {
+                    self.data_storage.note_stagger_hit_entry(target_value, actor_value, exact_skill_code as i32);
+                }
                 if !require_trusted && actor_value != target_value && !npc_skill {
                     if let Some(kind) = NoDamageHit::from_hit_type(dummy_type) {
                         let skill = self.normalize_skill_id(exact_skill_code as i32);
@@ -1838,6 +1912,12 @@ impl StreamProcessor {
                 // nor healing. A Water Spirit's attack sends one of these to
                 // its Spiritmaster (16990002, 20 MP), filed under 100011.
             } else if actor_value != target_value {
+                // A hit with a value joins the target's batch for its next
+                // stagger gauge update (`combat::stagger`). The skill as the
+                // record has it, e.g. 12090243 for Punishment.
+                if !npc_skill {
+                    self.data_storage.note_stagger_hit(target_value, actor_value, exact_skill_code as i32, false);
+                }
                 let mut pdp = ParsedDamagePacket::new();
                 if let Some(ts) = self.override_timestamp {
                     pdp.set_timestamp(ts);
@@ -1951,22 +2031,7 @@ impl StreamProcessor {
     // ===== HELPERS =====
 
     fn normalize_skill_id(&self, raw: i32) -> i32 {
-        if (30_000_000..=30_999_999).contains(&raw) {
-            return raw;
-        }
-        let base = raw - (raw % 10000);
-        let base_name = self.skill_lookup.get_skill_name(base);
-        if base_name.is_empty() {
-            return raw;
-        }
-        let raw_name = self.skill_lookup.get_skill_name(raw);
-        if raw_name.is_empty() {
-            return base;
-        }
-        if raw_name != base_name {
-            return raw;
-        }
-        base
+        normalize_skill_id(&self.skill_lookup, raw)
     }
 
     fn is_known_skill_code(&self, skill_code: i32) -> bool {
@@ -1993,6 +2058,91 @@ impl StreamProcessor {
 }
 
 // ===== FREE FUNCTIONS =====
+
+/// The skill code a hit record's code is shown under: its family's
+/// (12090243, Punishment, is 12090000) unless the table names it apart.
+pub fn normalize_skill_id(skill_lookup: &SkillLookup, raw: i32) -> i32 {
+    if (30_000_000..=30_999_999).contains(&raw) {
+        return raw;
+    }
+    let base = raw - (raw % 10000);
+    let base_name = skill_lookup.get_skill_name(base);
+    if base_name.is_empty() {
+        return raw;
+    }
+    let raw_name = skill_lookup.get_skill_name(raw);
+    if raw_name.is_empty() {
+        return base;
+    }
+    if raw_name != base_name {
+        return raw;
+    }
+    base
+}
+
+/// A stagger gauge record (`05 E0`, see
+/// `StreamProcessor::parse_stagger_gauge_packet`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaggerRecord {
+    Gauge { entity: i32, max: u32, rest: u32, status: u8 },
+    Break { entity: i32 },
+}
+
+/// The `05 E0` record a framed packet is, if it is one, read to its last
+/// byte.
+pub fn stagger_gauge_record(packet: &[u8]) -> Option<StaggerRecord> {
+    let length_info = read_varint(packet, 0);
+    if length_info.length <= 0 {
+        return None;
+    }
+    let offset = length_info.length as usize;
+    if packet.get(offset..offset + 2)? != [0x05, 0xE0] {
+        return None;
+    }
+    let entity = read_varint(packet, offset + 2);
+    if entity.length <= 0 {
+        return None;
+    }
+    let body = packet.get(offset + 2 + entity.length as usize..)?;
+    match body {
+        [0x00, 0x03, 0x02] => Some(StaggerRecord::Break { entity: entity.value }),
+        [0x03, 0x01, rest @ ..] if rest.len() == 9 => Some(StaggerRecord::Gauge {
+            entity: entity.value,
+            max: parse_u32_le(rest, 0),
+            rest: parse_u32_le(rest, 4),
+            status: rest[8],
+        }),
+        _ => None,
+    }
+}
+
+/// The stagger gauge a monster's spawn (`41 36`) carries, (max, rest), in
+/// the same form as its `05 E0` updates, as the frame's last 15 bytes:
+///
+/// ```text
+/// ... 01 00 2d 00 00 00 | 03 01 <max u32> <rest u32> <4 bytes> 00
+/// ```
+///
+/// The 4 bytes differ per monster (`0e7253c5`, `b67153be`, `437253c9`) and
+/// are not decoded. Anchored on the frame's end, not on the end of the
+/// spawn's abnormal list: `capture::abnormal` finds that end only where
+/// `07 02` (`AFTER_SPAWN_LIST`) follows it, and no boss spawn has one (4 of
+/// the 129 spawns in the 2026-10-22 capture do, no boss among them); these
+/// have `01 00 2d 00 00 00` there.
+///
+/// Over those 129 spawns exactly three end this way, Bakarma (40/40) and the
+/// two minibosses (150/150), and each got `05 E0` updates later: no false
+/// match. A spawn that does not end this way has no gauge.
+pub fn spawn_stagger_gauge(packet: &[u8]) -> Option<(u32, u32)> {
+    let tail = packet.get(packet.len().checked_sub(15)?..)?;
+    if tail[0] != 0x03 || tail[1] != 0x01 || tail[14] != 0x00 {
+        return None;
+    }
+    let (max, rest) = (parse_u32_le(tail, 2), parse_u32_le(tail, 6));
+    // Generous bounds (the largest seen is 1200, Enhanced Harcon): only to
+    // turn away bytes that merely look like the ending.
+    (rest > 0 && rest <= max && max <= 100_000).then_some((max, rest))
+}
 
 /// The varint that ends just before `end`, starting no earlier than
 /// `min_start` and at most three bytes back, whose value is in `range`.
@@ -2222,6 +2372,18 @@ fn parse_hit_tail_as(packet: &[u8], mut offset: usize, layout: i32, switch_value
             return None;
         }
     }
+    // A hit into a shield: the effects that absorbed part of it, a count and
+    // that many u32 ids. The value before them is what got through (#94).
+    if switch_value & 0x40 != 0 {
+        let absorbed = try_read_varint(packet, &mut offset)?;
+        if !(1..=8).contains(&absorbed) {
+            return None;
+        }
+        offset = offset.checked_add(4 * absorbed as usize)?;
+        if offset > packet.len() {
+            return None;
+        }
+    }
     let rest = &packet[offset.min(packet.len())..];
     let clean_end = rest.is_empty()
         || (rest.len() >= 2 && rest[1] == 0x00 && (1..=7).contains(&rest[0]))
@@ -2353,7 +2515,18 @@ fn parse_party_roster_at(data: &[u8], at: usize) -> Option<Roster> {
         // on the member's world id instead: it is repeated here as a u16 and we
         // already know its value from the top half of `dbid`. Combat power then
         // sits a fixed distance past it.
-        let Some(anchor) = find_u16(data, o, o + 10, server_id) else {
+        // A member on another world than their own has that world here
+        // instead, a byte further on: Aylinn, of 2308, as `07 fe 08` (2302)
+        // where the others had `00 09` (2026-10-17). Not finding it lost her
+        // and every member after her. Any world then, with a combat power
+        // where it would be.
+        let Some(anchor) = find_u16(data, o, o + 10, server_id).or_else(|| {
+            (o..o + 10).find(|&i| {
+                let world = data.get(i..i + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+                let power = data.get(i + 5..i + 13).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+                world.is_some_and(|w| (1000..=2999).contains(&w)) && power.is_some_and(|p| (1..=100_000_000).contains(&p))
+            })
+        }) else {
             break;
         };
         o = anchor + 2 + 2 + 1; // world id, a second u16, one tag byte
@@ -2870,6 +3043,23 @@ fn self_record_combat_power(data: &[u8], from: usize) -> Option<i64> {
 
 /// Every masked identity record in `data`:
 /// `<opcode 2B> <entity_id varint> <mask1 u32 LE> <mask2 u8> [mask2 & 0x01] <len u8><utf8 name>`.
+/// Your combat power, from the self record's end: two u64 (the first is the
+/// character sheet's: 109,396 for Nullception on 2026-10-16, and 27,564 for
+/// Nully) right before a count of 5 and the entries keyed 01 to 05 (a u16
+/// each). What comes before them varies (a legion name, buffs), so they are
+/// found by what follows. The second u64 is a little higher, or the same.
+fn self_combat_power(rest: &[u8]) -> Option<i64> {
+    let u64_at = |at: usize| rest.get(at..at + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+    (0..rest.len().saturating_sub(32)).find_map(|p| {
+        let tail = &rest[p + 16..p + 32];
+        if tail[0] != 5 || (0..5).any(|k| tail[1 + 3 * k] != k as u8 + 1) {
+            return None;
+        }
+        let (cp, other) = (u64_at(p)?, u64_at(p + 8)?);
+        ((1..100_000_000).contains(&cp) && (1..100_000_000).contains(&other)).then_some(cp as i64)
+    })
+}
+
 fn masked_records(data: &[u8]) -> Vec<MaskedRecord> {
     let mut out = Vec::new();
     if data.len() < 9 {
@@ -3493,6 +3683,7 @@ fn scanned_name_fields(data: &[u8], out: &mut Vec<NameField>) {
 mod tests {
     use super::*;
     use crate::combat::data_storage::SkillCombatData;
+    use crate::combat::stagger::{End, Outcome, StaggerWindow};
 
     fn hex_bytes(s: &str) -> Vec<u8> {
         s.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
@@ -3605,6 +3796,28 @@ mod tests {
         let Roster { members, complete, .. } = parse_party_roster_at(&data, 2).expect("a roster");
         assert_eq!(members.len(), 2);
         assert!(complete, "vacant slots after the last member end the roster");
+    }
+
+    /// A member on another world than their own: Aylinn (slot 4) is of 2308
+    /// but on 2302 (2026-10-17 19:45). The walk stopped at her, losing her
+    /// and RoyBatty, and the meter kept three of five.
+    #[test]
+    fn roster_reads_a_member_on_another_world() {
+        let hex = "029771931a001d416c6c20626f7373657320616c742072756e204c46206368616e74657205cc2709000003f0b3030000000009ff0202051e01f0b303000000000906416c66697261200000002d000000db0500000009cd1004be1201000000000000300000000000000001051e02e9b70200000002090553656c75650c0000002d000000f30600000209cd1004f85201000000000000790000000000000001051e03e212040000000009064e79786572611c0000002d000000cc0500000009cd1004210001000000000000250000000000000001051e04efd10200000004090641796c696e6e1c0000002d0000001d08000007fe08cd1004e85201000000000000750000000000000001051e05b28602000000240508526f794261747479210000002d000000990600002405cd1003234301000000000000b20000000000000001050009";
+        let data: Vec<u8> = (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap()).collect();
+        let Roster { members, complete, .. } = parse_party_roster_at(&data, 2).expect("a roster");
+        let got: Vec<(String, i64, u16)> = members.iter().map(|(n, m)| (n.clone(), m.combat_power, m.server_id)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Alfira".to_string(), 70334, 2304),
+                ("Selue".to_string(), 86776, 2306),
+                ("Nyxera".to_string(), 65569, 2304),
+                ("Aylinn".to_string(), 86760, 2308),
+                ("RoyBatty".to_string(), 82723, 1316),
+            ]
+        );
+        assert!(complete);
     }
 
     /// A Spiritmaster's spirits send `04 38` records to their owner on each
@@ -3842,6 +4055,36 @@ mod tests {
         assert_eq!(storage.get_mob_current_hp(25839), Some(100_000_000));
         hp(&mut p, "00E9A435"); // 900,000,000, over the spawn's 810 million
         assert_eq!(storage.get_mob_current_hp(25839), Some(100_000_000));
+    }
+
+    /// Hits into a shield (Global EU, 2026-10-06, effect 122307011 `c3 41 4a
+    /// 07`; from #94): switch bit 0x40 puts the absorbing effects after the
+    /// value, a count and that many u32 ids. Read as extra hits they added the
+    /// shield's id, 8,387, to each: 581 counted as 8,968, 317 as 8,704.
+    #[test]
+    fn a_hit_into_a_shield_is_its_value() {
+        for (record, value) in [
+            ("F3B7024600A17B680BC8001502000002D545244E02000000F462C50401C3414A070200", 581),
+            ("F3B7024400A17B181DD2001A026B5D135201000000F462BD0201C3414A070100", 317),
+        ] {
+            let (storage, mut p) = processor();
+            assert!(feed(&mut p, record));
+            let total: i64 = storage.get_combat_snapshot().values()
+                .flat_map(|t| t.actors.values()).map(|a| a.total_damage).sum();
+            assert_eq!(total, value, "{record}");
+        }
+    }
+
+    /// A DoT tick into the same shield: effect type 0x0E (0x0A with 0x04),
+    /// the absorbing effects after the amount. It was dropped; it is 77.
+    #[test]
+    fn a_dot_tick_into_a_shield_counts() {
+        let (storage, mut p) = processor();
+        p.set_dot_skill_ids(HashSet::from([13_730_007]));
+        p.parse_dot_packet(&hex("1B0538F3B7020EA17B020854D6514D01C3414A07D780D100"));
+        let total: i64 = storage.get_combat_snapshot().values()
+            .flat_map(|t| t.actors.values()).map(|a| a.total_damage).sum();
+        assert_eq!(total, 77);
     }
 
     /// A Wind Spirit's Malicious Whirlwind ticks on after the spirit is
@@ -4403,6 +4646,54 @@ mod tests {
         assert_eq!(me.name.as_deref(), Some("Naicha"));
         assert_eq!(storage.local_player_id(), Some(14957));
         assert_eq!((me.server_id, me.class, me.level), (1304, Some(crate::entity::job_class::JobClass::Cleric), Some(28)));
+        assert_eq!(me.gear_score, Some(383));
+    }
+
+    /// The start of another self record (2026-10-11): Nullception, server
+    /// 2312, level 45, gear score 2040 as the character sheet showed it.
+    #[test]
+    fn the_self_record_says_your_gear_score() {
+        let storage = Arc::new(DataStorage::new());
+        let processor = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        let record = hex("3336ef295fa1c128370b4e756c6c63657074696f6e080924000000022d000000f8070000f80700002d000000");
+        processor.scan_masked_identity(&record);
+        let me = storage.local_profile();
+        assert_eq!(me.name.as_deref(), Some("Nullception"));
+        assert_eq!((me.server_id, me.level, me.gear_score), (2312, Some(45), Some(2040)));
+    }
+
+    /// Nully's self record (2026-10-16 21:56): its start, then its end, where
+    /// the combat power is (27,564, as the character sheet showed it).
+    #[test]
+    fn the_self_record_says_your_combat_power() {
+        let storage = Arc::new(DataStorage::new());
+        let processor = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        let record = hex(concat!(
+            "3336a91d5f81c12837054e756c6c790809200000000223000000aa010000aa01000023000000",
+            "047c45a1010000000000aaa024000220050000000000000000000000000000000000000000000000000000000000000000",
+            "ac6b000000000000ac6b0000000000000501790002000003000004000005000005011900020000030000040000050000",
+            "010300000001000000",
+        ));
+        processor.scan_masked_identity(&record);
+        let me = storage.local_profile();
+        assert_eq!(me.name.as_deref(), Some("Nully"));
+        assert_eq!((me.level, me.gear_score, me.combat_power), (Some(35), Some(426), Some(27_564)));
+    }
+
+    /// The end of Nullception's self record while in a legion (2026-10-14):
+    /// its name sits before the combat power (100,387; the next u64 is
+    /// 100,687), and the entries after it also match once more further on,
+    /// with numbers too large to be one.
+    #[test]
+    fn the_combat_power_is_found_by_what_follows_it() {
+        let tail = hex(concat!(
+            "0000000321f4cb1fae9901000000000090010000ffbedf3fa1010000b959c03ba10100002005055241594f550000000001",
+            "2005000000000000000000000000000000000000000004000000000000000000000023880100000000004f890100000000",
+            "0005019a01020000032400040000050000050112010200000327000400000500000501000000300000000200000002000000",
+            "030000000400000004000000020000000500000002000000",
+        ));
+        assert_eq!(self_combat_power(&tail), Some(100_387));
+        assert_eq!(self_combat_power(&tail[..40]), None);
     }
 
     /// Two frames from a capture (2026-10-06 18:12:55): a `2a 37` record that
@@ -4495,5 +4786,319 @@ mod tests {
         let mut garbled = record.clone();
         garbled[13] = 0x07;
         assert!(!processor.scan_for_embedded_04_8d(&garbled));
+    }
+
+    // ===== Stagger gauge (05 E0), from the solo capture of 2026-10-22 =====
+    //
+    // Frames as the server sent them, with their length; `d8 29` is the
+    // player (Templar, entity 5336), `fb aa 03` Transcendent Bakarma (54651),
+    // `b3 c0 01` the first miniboss (24627).
+
+    const BAKARMA: i32 = 54651;
+    const MINIBOSS: i32 = 24627;
+    const PLAYER: i32 = 5336;
+    const BAKARMA_SPAWN: &str = "8f024136fbaa030c220047412300000200d89f47001ca2c6004c38460000874300c001c0cf24c0cf24640000006400000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000604110181969800ffffffffffffffff8075d52abb030000fbaa03013000d89f47001ca2c6004c3846110284969800ffffffffffffffff8075d52abb030000fbaa030100d89f47001ca2c6004c38461103bc060000ffffffffffffffff8075d52abb030000fbaa030100d89f47001ca2c6004c38461106d6010000ffffffffffffffff8075d52abb030000fbaa030100d89f47001ca2c6004c384601002d00000003012800000028000000437253c900";
+    const MINIBOSS_SPAWN: &str = "e9014136b3c0010c22000341230000028b6cccc64de0044600c8d7c50098b24300fe01e0a712e0a712640000006400000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000603110181969800ffffffffffffffff8075d52abb030000b3c00101288b6cccc64de0044600c8d7c5110284969800ffffffffffffffff8075d52abb030000b3c001018b6cccc64de0044600c8d7c51103bc060000ffffffffffffffff8075d52abb030000b3c001018b6cccc64de0044600c8d7c501002d000000030196000000960000000e7253c500";
+    /// Shield Smite on the miniboss: its hit and the two entries of the same
+    /// hit with no value.
+    const SHIELD_SMITE: [&str; 3] = [
+        "270438b3c0012600d829f4a2b8006a02000002432e1f48020000009e55e3290196040200",
+        "1f0438b3c0010000d829f4a2b8006a02462e1f48020000009e550200",
+        "1f0438b3c0010000d829f4a2b8006a02472e1f48020000009e550200",
+    ];
+
+    /// Each frame its own `consume_stream`, 10 ms apart from `from_ms`.
+    fn stream(p: &mut StreamProcessor, from_ms: i64, frames: &[&str]) {
+        stream_frames(p, from_ms, &frames.iter().map(|f| hex(f)).collect::<Vec<_>>());
+    }
+
+    fn stream_frames(p: &mut StreamProcessor, from_ms: i64, frames: &[Vec<u8>]) {
+        for (i, f) in frames.iter().enumerate() {
+            p.set_override_timestamp(Some(from_ms + 10 * i as i64));
+            assert_eq!(p.consume_stream(f), f.len(), "{f:02x?}");
+        }
+    }
+
+    /// `frame` with its actor (the player, `d8 29` at `at`) made 5352.
+    fn by_5352(frame: &str, at: usize) -> Vec<u8> {
+        let mut f = hex(frame);
+        assert_eq!(f[at], 0xd8);
+        f[at] = 0xe8;
+        f
+    }
+
+    /// Every stagger window with a deduction, times as captured.
+    fn stagger(storage: &DataStorage) -> Vec<StaggerWindow> {
+        storage.fight_stagger(0, i64::MAX)
+    }
+
+    fn hits(w: &StaggerWindow) -> Vec<(i32, i32, u32)> {
+        w.hits.iter().map(|h| (h.actor, h.skill, h.value)).collect()
+    }
+
+    #[test]
+    fn a_stagger_gauge_record_is_read_to_its_last_byte() {
+        assert_eq!(
+            stagger_gauge_record(&hex("1405e0fbaa030301280000000500000002")),
+            Some(StaggerRecord::Gauge { entity: BAKARMA, max: 40, rest: 5, status: 2 })
+        );
+        assert_eq!(stagger_gauge_record(&hex("0c05e0b3c001000302")), Some(StaggerRecord::Break { entity: MINIBOSS }));
+        assert_eq!(stagger_gauge_record(&hex("1405e0fbaa0303012800000005000000")), None, "cut short");
+        assert_eq!(stagger_gauge_record(&hex("1505e0fbaa03030128000000050000000200")), None, "a byte too many");
+        assert_eq!(stagger_gauge_record(&hex("0c05e0b3c001000303")), None);
+    }
+
+    /// Bakarma's gauge coming on at its phase (status `03`, then `02`), a
+    /// Vicious Strike that takes nothing, Punishment taking 35, then the wipe:
+    /// back to full with no break, 5 short.
+    #[test]
+    fn bakarma_wipe_punishment_takes_35_and_the_window_misses_by_5() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 10_000, &[
+            "1405e0fbaa030301280000002800000003",
+            "1405e0fbaa030301280000002800000002",
+            "270438fbaa032600d8296443b70006020000011b539647010000009e55c21001d3010100",
+            "250438fbaa030600d829837bb800090200000147e90f48020000009e55d487020200",
+            "1f0438fbaa030000d829837bb800090248e90f48020000009e550200",
+            "1f0438fbaa030000d829837bb800090249e90f48020000009e550200",
+            "1405e0fbaa030301280000000500000002",
+            "1405e0fbaa030301280000002800000000",
+            "1405e0fbaa030301280000002800000001",
+        ]);
+        let windows = stagger(&storage);
+        assert_eq!(windows.len(), 1);
+        let w = &windows[0];
+        assert_eq!((w.entity, w.max), (BAKARMA, 40));
+        assert_eq!(hits(w), vec![(PLAYER, 12090243, 35)], "Vicious Strike took nothing");
+        assert_eq!(w.result, Outcome::Missed);
+        assert_eq!(w.missing, 5);
+        assert!(!w.incomplete);
+        assert_eq!(w.start, 10_000, "the window opened with the first record (status 03)");
+        assert_eq!(w.end, 10_070, "the reset");
+        assert_eq!(w.hits[0].t, 10_030, "when Punishment hit");
+        assert_eq!(storage.stagger_gauge(BAKARMA), Some((40, 40)));
+    }
+
+    /// The four groups on the first miniboss, each after the update before it
+    /// in the capture (which sets the gauge's value), each its own test.
+    #[test]
+    fn miniboss_shield_smite_takes_10() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &["1405e0b3c0010301960000005500000002"]);
+        stream(&mut p, 100, &SHIELD_SMITE);
+        stream(&mut p, 200, &["1405e0b3c0010301960000004b00000002"]);
+        assert_eq!(hits(&stagger(&storage)[0]), vec![(PLAYER, 12100340, 10)]);
+    }
+
+    #[test]
+    fn miniboss_pummel_takes_3() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[
+            "1405e0b3c0010301960000002d00000002",
+            "240438b3c0010600d829ccb7b7007a03040002aba4c347010000009e55f30f0100",
+            "1f0438b3c0010000d829ccb7b7007a02ada4c347010000009e550100",
+            "1405e0b3c0010301960000002a00000002",
+        ]);
+        assert_eq!(hits(&stagger(&storage)[0]), vec![(PLAYER, 12040140, 3)]);
+    }
+
+    #[test]
+    fn miniboss_punishing_strike_takes_5() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[
+            "1405e0b3c0010301960000000e00000002",
+            "240438b3c0010600d829ec05b80086030000022b29e247010000009e55d0300100",
+            "1f0438b3c0010000d829ec05b80086022d29e247010000009e550100",
+            "1405e0b3c0010301960000000900000002",
+        ]);
+        assert_eq!(hits(&stagger(&storage)[0]), vec![(PLAYER, 12060140, 5)]);
+    }
+
+    #[test]
+    fn miniboss_annihilate_breaks_it_at_9_and_the_refill_takes_nothing() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[
+            "1405e0b3c0010301960000000900000002",
+            "280438b3c0012600d82934b0bb008802000002445b5049010000009e55dfb30101fc110100",
+            "1f0438b3c0010000d82934b0bb008802465b5049010000009e550100",
+            "1f0438b3c0010000d82934b0bb008802475b5049010000009e550100",
+            "0c05e0b3c001000302",
+            "1405e0b3c0010301960000009600000002",
+        ]);
+        let windows = stagger(&storage);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(hits(&windows[0]), vec![(PLAYER, 12300340, 9)]);
+        assert_eq!(windows[0].result, Outcome::Break);
+        assert_eq!(windows[0].missing, 0);
+        assert_eq!(storage.stagger_gauge(MINIBOSS), Some((150, 150)));
+        assert!(storage.stagger_open_window(MINIBOSS).is_none(), "refilled, no window yet");
+    }
+
+    #[test]
+    fn a_bosss_spawn_carries_its_gauge_in_its_last_15_bytes() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[BAKARMA_SPAWN, MINIBOSS_SPAWN]);
+        assert_eq!(storage.stagger_gauge(BAKARMA), Some((40, 40)));
+        assert_eq!(storage.stagger_gauge(MINIBOSS), Some((150, 150)));
+        assert!(storage.stagger_open_window(BAKARMA).is_none(), "a spawn opens no window");
+
+        // The same spawn without that ending has no gauge.
+        let mut cut = hex(BAKARMA_SPAWN);
+        cut.truncate(cut.len() - 15);
+        assert_eq!(spawn_stagger_gauge(&cut), None);
+        assert_eq!(spawn_stagger_gauge(&hex(SHIELD_SMITE[0])), None);
+        assert_eq!(spawn_stagger_gauge(&hex(MINIBOSS_SPAWN)), Some((150, 150)));
+    }
+
+    /// The miniboss's first stagger hit comes before its first update (Taunt
+    /// took 150 to 130): only its spawn says it started at 150.
+    #[test]
+    fn the_first_deduction_counts_from_the_spawns_value() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[MINIBOSS_SPAWN]);
+        stream(&mut p, 100, &SHIELD_SMITE);
+        stream(&mut p, 200, &["1405e0b3c0010301960000008c00000002"]);
+        let windows = stagger(&storage);
+        assert_eq!(hits(&windows[0]), vec![(PLAYER, 12100340, 10)]);
+        assert!(!windows[0].incomplete);
+        assert_eq!(windows[0].start, 200, "opened by its first deduction");
+    }
+
+    /// Without the spawn the first update only sets the gauge's value: what
+    /// was taken before it is lost, and the window says so.
+    #[test]
+    fn without_the_spawn_the_first_update_sets_the_value_and_the_window_is_incomplete() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 100, &SHIELD_SMITE);
+        stream(&mut p, 200, &["1405e0b3c0010301960000008c00000002"]);
+        assert!(stagger(&storage).is_empty(), "no deduction");
+        let open = storage.stagger_open_window(MINIBOSS).expect("open");
+        assert!(open.incomplete && open.hits.is_empty());
+        // What follows counts, in that incomplete window.
+        stream(&mut p, 300, &SHIELD_SMITE);
+        stream(&mut p, 400, &["1405e0b3c0010301960000008200000002"]);
+        let windows = stagger(&storage);
+        assert_eq!(hits(&windows[0]), vec![(PLAYER, 12100340, 10)]);
+        assert!(windows[0].incomplete);
+    }
+
+    /// A Punishment DoT tick (`05 38`) on Bakarma, 3519 from the player.
+    const PUNISHMENT_TICK: &str = "130538fbaa0302d8290040e00f48bf1b";
+
+    #[test]
+    fn a_dot_tick_does_not_take_a_hits_deduction_but_takes_one_with_none() {
+        let (storage, mut p) = processor();
+        p.set_dot_skill_ids(HashSet::from([12_090_000]));
+        let other = by_5352(PUNISHMENT_TICK, 7);
+        stream(&mut p, 0, &[BAKARMA_SPAWN, "1405e0fbaa030301280000002800000002"]);
+        stream_frames(&mut p, 100, &[
+            hex("250438fbaa030600d829837bb800090200000147e90f48020000009e55d487020200"),
+            other.clone(),
+            hex("1405e0fbaa030301280000000500000002"),
+        ]);
+        stream_frames(&mut p, 200, &[other, hex("1405e0fbaa030301280000000400000002")]);
+        let windows = stagger(&storage);
+        assert_eq!(hits(&windows[0]), vec![(PLAYER, 12090243, 35), (5352, 12090000, 1)]);
+        assert!(windows[0].hits.iter().all(|h| !h.ambiguous));
+    }
+
+    #[test]
+    fn another_actors_hit_since_the_last_update_makes_it_ambiguous() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[MINIBOSS_SPAWN]);
+        stream_frames(&mut p, 100, &[
+            by_5352(SHIELD_SMITE[0], 8),
+            hex(SHIELD_SMITE[0]),
+            hex("1405e0b3c0010301960000008c00000002"),
+        ]);
+        let windows = stagger(&storage);
+        assert_eq!(hits(&windows[0]), vec![(PLAYER, 12100340, 10)]);
+        assert!(windows[0].hits[0].ambiguous);
+    }
+
+    #[test]
+    fn a_summons_stagger_is_its_owners() {
+        let (storage, mut p) = processor();
+        storage.register_confirmed_summon_by_id(5352, PLAYER);
+        stream(&mut p, 0, &[MINIBOSS_SPAWN]);
+        stream_frames(&mut p, 100, &[by_5352(SHIELD_SMITE[0], 8), hex("1405e0b3c0010301960000008c00000002")]);
+        assert_eq!(hits(&stagger(&storage)[0]), vec![(PLAYER, 12100340, 10)]);
+    }
+
+    #[test]
+    fn a_deduction_with_no_hit_is_unknowns() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[MINIBOSS_SPAWN, "1405e0b3c0010301960000008c00000002"]);
+        assert_eq!(hits(&stagger(&storage)[0]), vec![(0, 0, 10)]);
+    }
+
+    /// Shaman Kumbahum (entity 51518, `be 92 03`), 2026-10-22: in one bundle
+    /// Poach (player 12205, `ad 5f`) with three entries of its own and no
+    /// value, then a Punishing Benediction proc, then the gauge 104 to 94.
+    /// The 10 are Poach's: the proc has no entries of its own.
+    #[test]
+    fn a_proc_between_the_hit_and_the_update_does_not_take_its_stagger() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[
+            "1405e0be92030301960000006800000002",
+            "260438be92032600ad5f5d17b90021020000024be94c48010000009e55c810012f0100",
+            "1f0438be92030000ad5f5d17b90021024ce94c48010000009e550100",
+            "1f0438be92030000ad5f5d17b90021024ee94c48010000009e550100",
+            "1f0438be92030000ad5f5d17b90021024fe94c48010000009e550100",
+            "240438be92030600ad5f913ec2002202000002af70e04b010000009e55aa070100",
+            "1405e0be92030301960000005e00000002",
+        ]);
+        assert_eq!(hits(&stagger(&storage)[0]), vec![(12205, 12130141, 10)]);
+    }
+
+    /// Enhanced Harcon (entity 65183, `9f fd 03`), 2026-10-22, a party of
+    /// five: a Punishing Benediction proc, Judgment (Templar 9348, `84 49`)
+    /// with an entry of its own, a Chanter's hit (10868, `f4 54`) with one,
+    /// then the gauge 947 to 942 and 940. In turn: Judgment 5, as solo, and
+    /// the Chanter 2.
+    #[test]
+    fn a_partys_hits_take_the_updates_after_them_in_turn() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[
+            "1405e09ffd030301b0040000b303000002",
+            "2404389ffd0306008449913ec2001d02000002af70e04b01000000ee64990a0100",
+            "2404389ffd0306008449d4c5ba001c03040002db46f54801000000ee6494640100",
+            "1f04389ffd0300008449d4c5ba001c02dc46f54801000000ee640100",
+            "2c04389ffd032600f454b66c13012a020800020629966b01000000ee64ad990103aa0faa0faa0f0100",
+            "1f04389ffd030000f454b66c13012a020729966b01000000ee640100",
+            "1405e09ffd030301b0040000ae03000002",
+            "1405e09ffd030301b0040000ac03000002",
+        ]);
+        let w = &stagger(&storage)[0];
+        assert_eq!(hits(w), vec![(9348, 12240340, 5), (10868, 18050230, 2)]);
+        assert!(w.hits.iter().all(|h| !h.ambiguous));
+    }
+
+    /// TCP does not respect the server's blocks: the hit and the update can
+    /// come in two reads.
+    #[test]
+    fn a_hit_and_its_update_in_two_reads() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[MINIBOSS_SPAWN]);
+        let block: Vec<u8> = SHIELD_SMITE.iter().flat_map(|f| hex(f)).collect();
+        assert_eq!(p.consume_stream(&block), block.len());
+        let update = hex("1405e0b3c0010301960000008c00000002");
+        assert_eq!(p.consume_stream(&update[..5]), 0, "a frame still arriving");
+        assert_eq!(p.consume_stream(&update), update.len());
+        assert_eq!(hits(&stagger(&storage)[0]), vec![(PLAYER, 12100340, 10)]);
+    }
+
+    #[test]
+    fn a_bosss_death_misses_its_open_window() {
+        let (storage, mut p) = processor();
+        stream(&mut p, 0, &[MINIBOSS_SPAWN]);
+        stream(&mut p, 100, &SHIELD_SMITE);
+        stream(&mut p, 200, &["1405e0b3c0010301960000008c00000002"]);
+        p.set_override_timestamp(Some(5_000));
+        storage.mark_entity_dead(MINIBOSS);
+        let w = &stagger(&storage)[0];
+        assert_eq!((w.result, w.missing, w.end), (Outcome::Missed, 140, 5_000));
+        assert_eq!(w.ended, End::Death);
+        assert_eq!(storage.stagger_gauge(MINIBOSS), None);
     }
 }

@@ -903,6 +903,11 @@ test('hiding settings runs its pause once per close, and only the settings windo
   assert.ok(!main.listeners.has('settings-hidden'));
 });
 
+test('auto-hide is unticked in the markup until turned on', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<input type="checkbox" class="autoHideMeterCheckbox" \/>/);
+});
+
 test('a full localStorage quota does not keep a setting from the backend', () => {
   const app = setupBridge({ setItem: () => { throw new Error('QuotaExceededError'); } });
   app.window.javaBridge.setSetting('dpsMeter.language', 'de');
@@ -913,7 +918,8 @@ test('a full localStorage quota does not keep a setting from the backend', () =>
 
 test('showing a reused settings window refills its form without wiring controls again', async () => {
   const values = {
-    'dpsMeter.bossLogsEnabled': 'true', 'dpsMeter.autoHideMeter': 'false', 'dpsMeter.saveRawPackets': 'true',
+    // No dpsMeter.autoHideMeter: never set is off, as the backend reads it.
+    'dpsMeter.bossLogsEnabled': 'true', 'dpsMeter.saveRawPackets': 'true',
     'dpsMeter.debugLoggingEnabled': 'true', 'dpsMeter.meterFillOpacity': '55', 'dpsMeter.playerLimit': '10',
     'dpsMeter.betaUi': 'false', 'dpsMeter.slimMode': 'true', 'dpsMeter.theme': 'frost',
     'dpsMeter.defaultMeterMode': 'allTargets', 'dpsMeter.allTargetsWindowMs': '60000',
@@ -968,7 +974,7 @@ test('showing a reused settings window refills its form without wiring controls 
   await app.syncSettingsForm();
   assert.deepEqual(remote, [['dpsMeter.roundDps', 'false'], ['dpsMeter.meterFillOpacity', '55']]);
   assert.equal(app.bossLogsCheckbox.checked, true);
-  assert.equal(app.autoHideMeterCheckbox.checked, false);
+  assert.equal(app.autoHideMeterCheckbox.checked, false, 'auto-hide never set shows unticked');
   assert.equal(app.saveRawPacketsCheckbox.checked, true);
   assert.equal(app.debugLoggingEnabled, true);
   assert.equal(app.meterOpacityInput.value, '55');
@@ -1062,7 +1068,7 @@ test('opening settings does not reapply the default target mode to an ongoing fi
     setUserName: (name, { syncBackend }) => { if (syncBackend) writes.push(['name', name]); },
     setDebugLogging: (value, { syncBackend }) => { if (syncBackend) writes.push(['debug', value]); },
     setOnlyShowUser() {}, setPinMeToTop() {}, setBetaUi() {}, setSlimMode() {},
-    setMainPlayerNamesBold() {}, setMainPlayerDpsBold() {}, applyTheme() {},
+    setMainPlayerNamesBold() {}, setMainPlayerDpsBold() {}, applyTheme() {}, applySettingsTheme() {}, applyFont() {},
   };
   const setupStart = core.indexOf('  setupSettingsPanel()');
   const initialization = core.slice(core.indexOf('    const syncBackend', setupStart),

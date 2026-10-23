@@ -207,6 +207,28 @@ const createDetailsUI = ({
     return formatDamageCompact(sum);
   };
 
+  // How the hits taken were met (the record's `received`, meter 2.0.76 on),
+  // for the selected players or the whole party: the share blocked with a
+  // shield or parried, then in brackets the share perfectly so. "-" when no
+  // player's record has the counts (older fights) or nobody took a hit.
+  const hitsTakenMet = (d, kind) => {
+    const ids = d !== lastUnfilteredDetails && Array.isArray(selectedAttackerIds) && selectedAttackerIds.length
+      ? selectedAttackerIds
+      : [...detailsActors.keys()];
+    let hits = 0, met = 0, perfect = 0, counted = false;
+    for (const id of ids) {
+      const actor = detailsActors.get(Number(id));
+      const r = actor?.received;
+      if (!r) continue;
+      counted = true;
+      hits += Number(actor.hitsReceived) || 0;
+      met += Number(kind === "block" ? r.shieldBlock : r.parry) || 0;
+      perfect += Number(kind === "block" ? r.perfectBlock : r.perfectParry) || 0;
+    }
+    if (!counted || hits <= 0) return "-";
+    return `${pctText((met * 100) / hits)} (${pctText((perfect * 100) / hits)})`;
+  };
+
   // Every hit's time (ms into the fight) and its share of the skill's
   // damage, from the skills' own hit times.
   const hitsOf = (skills, keep = () => true) => {
@@ -289,6 +311,18 @@ const createDetailsUI = ({
       getValue: (d) => peakDps(d),
     },
     { key: "details.stats.damageReceived", fallback: "Damage Taken", getValue: (d) => damageTaken(d) },
+    {
+      key: "details.stats.blockedTaken",
+      fallback: "Blocked (Perfect)",
+      tip: ["details.stats.blockedTakenTip", "Of the hits taken: blocked with a shield, and in brackets perfectly blocked"],
+      getValue: (d) => hitsTakenMet(d, "block"),
+    },
+    {
+      key: "details.stats.parriedTaken",
+      fallback: "Parried (Perfect)",
+      tip: ["details.stats.parriedTakenTip", "Of the hits taken: parried, and in brackets perfectly parried"],
+      getValue: (d) => hitsTakenMet(d, "parry"),
+    },
     { key: "details.stats.deaths", fallback: "Deaths", getValue: (d) => deathCount(d) },
     { key: "details.skills.hits", fallback: "Hits", getValue: (d) => formatCount(d?.totalHits) },
     { key: "details.stats.critRate", fallback: "Crit Rate", getValue: (d) => pctText(d?.totalCritPct) },
@@ -300,7 +334,12 @@ const createDetailsUI = ({
     },
     { key: "details.stats.perfectRate", fallback: "Perfect Rate", getValue: (d) => pctText(d?.totalPerfectPct) },
     { key: "details.stats.doubleRate", fallback: "Double Rate", getValue: (d) => pctText(d?.totalDoublePct) },
-    { key: "details.stats.parryRate", fallback: "Parry Rate", getValue: (d) => pctText(d?.totalParryPct) },
+    {
+      key: "details.stats.parryRate",
+      fallback: "Parry Rate",
+      tip: ["details.stats.parryRateTip", "Of your hits: the share the target parried"],
+      getValue: (d) => pctText(d?.totalParryPct),
+    },
     { key: "details.stats.regen", fallback: "Regen", getValue: (d) => formatDamageCompact(d?.totalRegen) },
   ];
 
@@ -633,8 +672,95 @@ const createDetailsUI = ({
     };
   };
 
+  const reducedMotion = () => !!window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  // While a fight's first show waits to build its skills, chart and
+  // timeline (renderRest), nothing else draws them: a resize as the window
+  // settled drew the whole chart, which then vanished to be drawn in.
+  let sectionsHeld = false;
+  // The chart's draw-in waits until every section is built (renderRest), so
+  // no section's build lands in the middle of it and drops its frames.
+  let pendingStarts = null;
+  const whenBuilt = (start) => {
+    if (pendingStarts) pendingStarts.push(start);
+    else requestAnimationFrame(start);
+  };
+  const startPending = () => {
+    const starts = pendingStarts || [];
+    pendingStarts = null;
+    starts.forEach((start) => start());
+  };
+  // Count every figure under `root` up from 0 to what it says, keeping its
+  // format ("1.23M", "45.6%", "1,234", "9:21"), and end on the exact text.
+  // For a fight's first show: figures that appear at once looked jarring.
+  const COUNTED = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g;
+  const countUpIn = (root, duration = 700) => {
+    if (!root || reducedMotion()) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const text = node.nodeValue || "";
+      if (!/\d/.test(text)) continue;
+      const pieces = [];
+      let last = 0;
+      text.replace(COUNTED, (match, at) => {
+        pieces.push(text.slice(last, at));
+        pieces.push({ value: parseFloat(match.replace(/,/g, "")), decimals: (match.split(".")[1] || "").length, grouped: match.includes(",") });
+        last = at + match.length;
+        return match;
+      });
+      pieces.push(text.slice(last));
+      nodes.push({ node, text, pieces });
+    }
+    if (!nodes.length) return;
+    const show = (p, f) => {
+      const v = p.value * f;
+      return p.grouped
+        ? v.toLocaleString("en-US", { minimumFractionDigits: p.decimals, maximumFractionDigits: p.decimals })
+        : v.toFixed(p.decimals);
+    };
+    for (const { node, pieces } of nodes) node.nodeValue = pieces.map((p) => (typeof p === "string" ? p : show(p, 0))).join("");
+    let start = 0;
+    const step = (now) => {
+      if (!start) start = now;
+      const t = Math.min(1, Math.max(0, (now - start) / duration));
+      const f = 1 - Math.pow(1 - t, 3);
+      for (const { node, text, pieces } of nodes) {
+        if (!node.isConnected) continue;
+        node.nodeValue = t >= 1 ? text : pieces.map((p) => (typeof p === "string" ? p : show(p, f))).join("");
+      }
+      if (t < 1) requestAnimationFrame(step);
+    };
+    // At once: the party and its figures go first, and the other sections
+    // are built after (renderRest), so nothing interrupts them.
+    requestAnimationFrame(step);
+  };
+
+  // While a replay plays, the party bars are drawn ten times a second; the
+  // replay's twenty-a-second step (advancePartyBars) moves each part of the
+  // way from its last length to its new one, so they do not jump. No
+  // transition: a running one makes the browser draw a frame at every
+  // screen refresh (2026-10-18).
+  const lastBarRatio = new Map();
+  let barSteps = null;
+  const advancePartyBars = () => {
+    if (!barSteps) return;
+    const p = Math.min(1, (performance.now() - barSteps.started) / 100);
+    for (const [fillEl, from, to] of barSteps.items) {
+      fillEl.style.transform = `scaleX(${(from + (to - from) * p).toFixed(4)})`;
+    }
+    if (p >= 1) barSteps = null;
+  };
+  // The first time a fight's figures show, its bars slide out from empty
+  // (render sets this; see `renderRest`).
+  let fillBarsFromZero = false;
   const renderPartyBars = (stats, battleTimeMs) => {
     if (!detailsPartyListEl) return;
+    const sliding = fillBarsFromZero && !reducedMotion();
+    fillBarsFromZero = false;
+    const slides = [];
+    const stepping = !sliding && detailsPanel.classList.contains("isReplayPlaying") && !reducedMotion();
+    const steps = [];
     detailsPartyListEl.innerHTML = "";
     const allActors = Array.isArray(stats) ? stats : [];
     if (allActors.length === 0) return;
@@ -654,21 +780,12 @@ const createDetailsUI = ({
     const localId = Number(window._dpsApp?.localPlayerId);
     detailsPartyListEl.classList.toggle("withPeak", showPeak);
 
-    const rerender = () => {
-      const ctx = buildPartyBarStats();
-      renderPartyBars(ctx?.stats || lastDetails?.perActorStats, ctx?.battleTimeMs || lastDetails?.battleTimeMs);
-    };
 
     // "All" bar
     const allBar = document.createElement("div");
     allBar.className = "detailsPartyBar" + (!selectedAttackerIds || selectedAttackerIds.length === 0 ? " isSelected" : "");
     allBar.innerHTML = `<div class="detailsPartyBarFill" style="transform:none;width:100%"></div><div class="detailsPartyBarContent"><span class="detailsPartyBarName">All</span></div>`;
-    allBar.addEventListener("click", async () => {
-      selectedAttackerIds = null;
-      selectedAttackerLabel = labelText("details.all", "All");
-      rerender();
-      await refreshDetailsView();
-    });
+    allBar.dataset.partyAll = "1";
     detailsPartyListEl.appendChild(allBar);
 
     actors.forEach((actor) => {
@@ -692,7 +809,26 @@ const createDetailsUI = ({
       fillEl.className = "detailsPartyBarFill";
       // A width rather than a stretch, so a bar texture keeps its size.
       fillEl.style.transform = "none";
-      fillEl.style.width = `${(Math.max(0, Math.min(1, ratio)) * 100).toFixed(2)}%`;
+      const clamped = Math.max(0, Math.min(1, ratio));
+      const fillWidth = `${(clamped * 100).toFixed(2)}%`;
+      const was = lastBarRatio.get(actorId);
+      lastBarRatio.set(actorId, clamped);
+      if (stepping) {
+        // Stretched while stepping: a transform, not a width, so no layout.
+        fillEl.style.width = "100%";
+        fillEl.style.transformOrigin = "left center";
+        fillEl.style.transform = `scaleX(${(was ?? clamped).toFixed(4)})`;
+        if (was !== undefined && was !== clamped) steps.push([fillEl, was, clamped]);
+      } else {
+        fillEl.style.width = fillWidth;
+      }
+      if (sliding) {
+        // A transform, not the width: the width made every frame lay the
+        // page out again, and the slide stuttered.
+        fillEl.classList.add("isSliding");
+        fillEl.style.transform = "scaleX(0)";
+        slides.push(fillEl);
+      }
 
       const contentEl = document.createElement("div");
       contentEl.className = "detailsPartyBarContent";
@@ -795,21 +931,41 @@ const createDetailsUI = ({
       bar.appendChild(fillEl);
       bar.appendChild(contentEl);
 
-      bar.addEventListener("click", async () => {
-        if (isSelected) {
-          selectedAttackerIds = null;
-          selectedAttackerLabel = labelText("details.all", "All");
-        } else {
-          selectedAttackerIds = [actorId];
-          selectedAttackerLabel = name;
-        }
-        rerender();
-        await refreshDetailsView();
-      });
+      // Clicks are taken by one listener on the list (below renderPartyBars).
+      bar.dataset.actorId = String(actorId);
+      bar.dataset.actorName = name;
 
       detailsPartyListEl.appendChild(bar);
     });
+    barSteps = steps.length ? { started: performance.now(), items: steps } : null;
+    if (sliding) {
+      requestAnimationFrame(() => {
+        slides.forEach((fillEl, i) => {
+          fillEl.style.transitionDelay = `${i * 40}ms`;
+          fillEl.style.transform = "scaleX(1)";
+        });
+      });
+      countUpIn(detailsPartyListEl);
+    }
   };
+  // One click listener for the party list: its bars are rebuilt with every
+  // redraw (ten a second during a replay), and a listener on each bar was
+  // added afresh each time (2026-10-18).
+  detailsPartyListEl?.addEventListener("click", async (event) => {
+    const bar = event.target instanceof Element ? event.target.closest(".detailsPartyBar") : null;
+    if (!bar || !detailsPartyListEl.contains(bar)) return;
+    const actorId = Number(bar.dataset.actorId);
+    if (bar.dataset.partyAll || !(actorId > 0) || selectedAttackerIds?.includes?.(actorId)) {
+      selectedAttackerIds = null;
+      selectedAttackerLabel = labelText("details.all", "All");
+    } else {
+      selectedAttackerIds = [actorId];
+      selectedAttackerLabel = bar.dataset.actorName || resolveActorLabel(actorId);
+    }
+    const ctx = buildPartyBarStats();
+    renderPartyBars(ctx?.stats || lastDetails?.perActorStats, ctx?.battleTimeMs || lastDetails?.battleTimeMs);
+    await refreshDetailsView();
+  });
 
   // Hit results from the record's flags byte and hit type, after Front:
   // [column, skill field, shown as]. Misses and resists are not hits, so
@@ -1126,7 +1282,9 @@ const createDetailsUI = ({
       const cap = Math.max(170, Math.round((skillsContainer.clientWidth || 0) * 0.24));
       const nameWidth = skillsContainer.clientWidth > 0 ? Math.min(lastMeasuredNameWidth, cap) : lastMeasuredNameWidth;
       const template = `${nameWidth}px ${dataCols.map((col) => GRID_COL_DEFS[col]).join(" ")}`;
-      skillsContainer.style.setProperty("--skill-grid-cols", template);
+      if (skillsContainer.style.getPropertyValue("--skill-grid-cols") !== template) {
+        skillsContainer.style.setProperty("--skill-grid-cols", template);
+      }
     } else {
       const cols = visibleCols.map((col) => GRID_COL_DEFS[col]);
       skillsContainer.style.setProperty("--skill-grid-cols", cols.join(" "));
@@ -1159,7 +1317,30 @@ const createDetailsUI = ({
   bindSkillHeaderSorting();
   updateGridColumns();
 
-  const renderSkills = (details, { compact = false } = {}) => {
+  // What renderSkills measured last: the names it showed, their widths and
+  // the font they were measured in.
+  let lastNameKey = "";
+  let nameFont = "";
+  const nameWidths = new Map();
+  const nameCanvas = document.createElement("canvas").getContext("2d");
+  // While a replay plays, the skill table shows its first rows only, and
+  // says how many more there are (renderFigures).
+  let skillsMoreEl = null;
+  const showSkillsMore = (hidden) => {
+    if (!skillsMoreEl && hidden > 0 && skillsListEl?.parentElement) {
+      skillsMoreEl = document.createElement("div");
+      skillsMoreEl.className = "skillsReplayMore";
+      skillsListEl.after(skillsMoreEl);
+    }
+    if (!skillsMoreEl) return;
+    skillsMoreEl.hidden = !(hidden > 0);
+    if (hidden > 0) {
+      skillsMoreEl.textContent = labelText("details.replay.moreSkills", "+{n} more, shown when paused")
+        .replace("{n}", String(hidden));
+    }
+  };
+  const renderSkills = (details, { compact = false, limit = 0 } = {}) => {
+    if (sectionsHeld) return;
     const skills =
       detailsMode === "heal"
         ? (Array.isArray(details?.healSkills) ? details.healSkills : [])
@@ -1210,34 +1391,61 @@ const createDetailsUI = ({
     const displaySkills = foldDotRows([...groupedSkills.values()]);
 
     displaySkills.sort(compareSkillSort);
-    const topDisplay = compact ? displaySkills.slice(0, COMPACT_MAX_SKILLS) : displaySkills;
+    const limited = !compact && limit > 0 && displaySkills.length > limit;
+    const topDisplay = compact
+      ? displaySkills.slice(0, COMPACT_MAX_SKILLS)
+      : limited ? displaySkills.slice(0, limit) : displaySkills;
+    showSkillsMore(limited ? displaySkills.length - limit : 0);
 
     // In heal mode there's no target-total to normalise against, so percentages are
     // relative to the total healing shown (aggregatedDamage = summed heal amounts).
     const totalDamage = detailsMode === "heal" ? 0 : Number(details?.totalDmg);
-    const aggregatedDamage = topDisplay.reduce((sum, s) => sum + (s._combinedDmg || 0), 0);
+    const aggregatedDamage = (limited ? displaySkills : topDisplay).reduce((sum, s) => sum + (s._combinedDmg || 0), 0);
     const percentBaseTotal = totalDamage > 0 ? totalDamage : aggregatedDamage;
 
     ensureSkillSlots(topDisplay.length);
 
-    // Measure longest skill name and set name column width
-    const iconSize = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--details-skill-icon-size") || "36", 10);
-    const iconMargin = 6;
-    const namePad = 4;
-    const measureCanvas = document.createElement("canvas").getContext("2d");
-    // .skillRow .cell is 0.875em of the panel font and .skillNameText another
-    // 0.84em inside it (styles.css), so the name renders at their product.
-    // Measuring at any other size sizes the column for text never drawn.
-    const fontSize = parseFloat(getComputedStyle(skillsListEl).fontSize) * 0.875 * 0.84;
-    measureCanvas.font = `700 ${fontSize}px ${getComputedStyle(skillsListEl).fontFamily}`;
-    let maxNameWidth = 0;
-    topDisplay.forEach((skill) => {
-      const w = measureCanvas.measureText(skill?.name ?? "").width;
-      if (w > maxNameWidth) maxNameWidth = w;
-    });
-    const arrowSpace = 14; // dotToggle: 10px width + 2px margin each side
-    lastMeasuredNameWidth = Math.ceil(iconSize + iconMargin + arrowSpace + maxNameWidth + namePad);
-    updateGridColumns();
+    // Measure longest skill name and set name column width. Only when the
+    // names shown change: reading the styles after the rows were rebuilt laid
+    // the page out at once, and a replay redraws the table ten times a second
+    // (it lagged a whole browser by the end of a long fight, 2026-10-18).
+    // A replay keeps the columns of the whole fight, playing or paused: at
+    // its start a player has one or two skills, and the name column was
+    // measured from those and shrank (2026-10-18). Ending it measures again.
+    const nameKey = `${detailsMode}|${topDisplay.map((s) => s?.name ?? "").join("")}`;
+    const holdColumns = (limited || limit > 0 || detailsPanel.classList.contains("isReplaying")) && lastMeasuredNameWidth > 0;
+    if (!holdColumns && (nameKey !== lastNameKey || !(lastMeasuredNameWidth > 0))) {
+      lastNameKey = nameKey;
+      const iconSize = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--details-skill-icon-size") || "36", 10);
+      const iconMargin = 6;
+      const namePad = 4;
+      // .skillRow .cell is 0.875em of the panel font and .skillNameText another
+      // 0.84em inside it (styles.css), so the name renders at their product.
+      // Measuring at any other size sizes the column for text never drawn.
+      const fontSize = parseFloat(getComputedStyle(skillsListEl).fontSize) * 0.875 * 0.84;
+      const font = `700 ${fontSize}px ${getComputedStyle(skillsListEl).fontFamily}`;
+      if (font !== nameFont) {
+        nameFont = font;
+        nameWidths.clear();
+      }
+      nameCanvas.font = font;
+      let maxNameWidth = 0;
+      topDisplay.forEach((skill) => {
+        const name = skill?.name ?? "";
+        let w = nameWidths.get(name);
+        if (w === undefined) {
+          w = nameCanvas.measureText(name).width;
+          nameWidths.set(name, w);
+        }
+        if (w > maxNameWidth) maxNameWidth = w;
+      });
+      const arrowSpace = 14; // dotToggle: 10px width + 2px margin each side
+      const measured = Math.ceil(iconSize + iconMargin + arrowSpace + maxNameWidth + namePad);
+      if (measured !== lastMeasuredNameWidth) {
+        lastMeasuredNameWidth = measured;
+        updateGridColumns();
+      }
+    }
 
     for (let i = 0; i < skillSlots.length; i++) {
       const view = skillSlots[i];
@@ -1680,8 +1888,8 @@ const createDetailsUI = ({
   // Which of the timeline's sections show (chart, buffs, casts): the chips at
   // the bar's right; kept between openings.
   const SECTIONS_KEY = "dpsMeter.timelineSections";
-  const FTL_SECTIONS = ["dps", "buffs", "casts"];
-  const ftlShown = { dps: true, buffs: true, casts: true };
+  const FTL_SECTIONS = ["dps", "buffs", "stagger", "casts"];
+  const ftlShown = { dps: true, buffs: true, stagger: true, casts: true };
   try {
     const saved = JSON.parse(localStorage.getItem(SECTIONS_KEY) || "null");
     if (saved && typeof saved === "object") {
@@ -1710,6 +1918,80 @@ const createDetailsUI = ({
       if (k === "casts") renderTimeline(lastDetails);
     }
   }));
+
+  // Each section's heading folds it, keeping the heading: the chart and the
+  // casts (kept between openings), and each player's buffs (this window).
+  const FOLD_KEY = "dpsMeter.timelineFolded";
+  const ftlFolded = { dps: false, casts: false };
+  try {
+    const saved = JSON.parse(localStorage.getItem(FOLD_KEY) || "null");
+    if (saved && typeof saved === "object") for (const k of Object.keys(ftlFolded)) ftlFolded[k] = saved[k] === true;
+  } catch { /* all open */ }
+  const foldHeading = (heading, isFolded, onToggle) => {
+    if (!heading || heading.dataset.foldable) return;
+    heading.dataset.foldable = "1";
+    heading.classList.add("ftlFoldHeading");
+    heading.setAttribute("role", "button");
+    heading.tabIndex = 0;
+    // The text in a span of its own, which takes the heading's translation
+    // key: setting the heading's text (a language or DMG/HEAL change) would
+    // drop the chevron.
+    if (heading.dataset.i18n) {
+      const text = document.createElement("span");
+      text.className = "ftlFoldText";
+      text.dataset.i18n = heading.dataset.i18n;
+      text.append(...heading.childNodes);
+      delete heading.dataset.i18n;
+      heading.append(text);
+    }
+    const chevron = document.createElement("i");
+    chevron.className = "ftlFoldChevron";
+    chevron.setAttribute("aria-hidden", "true");
+    heading.prepend(chevron);
+    const sync = () => heading.setAttribute("aria-expanded", String(!isFolded()));
+    sync();
+    const toggle = (event) => {
+      if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      onToggle();
+      sync();
+    };
+    heading.addEventListener("click", toggle);
+    heading.addEventListener("keydown", toggle);
+  };
+  for (const [k, cls] of [["dps", "ftlGroupDps"], ["casts", "ftlGroupCasts"]]) {
+    const groupEl = fightTimeline?.querySelector?.(`.${cls}`);
+    groupEl?.classList?.toggle?.("isFolded", ftlFolded[k]);
+    foldHeading(groupEl?.querySelector?.(".ftlGroupTitle"), () => ftlFolded[k], () => {
+      ftlFolded[k] = !ftlFolded[k];
+      groupEl.classList.toggle("isFolded", ftlFolded[k]);
+      try { localStorage.setItem(FOLD_KEY, JSON.stringify(ftlFolded)); } catch { /* not kept */ }
+      // A canvas folded away has no width: draw it again when it opens.
+      if (!ftlFolded[k] && lastDetails) {
+        if (k === "dps") renderDpsChart(lastDetails);
+        else renderTimeline(lastDetails);
+      }
+    });
+  }
+  // Each player's buffs fold by the group's heading (buffTimeline.js
+  // draws them afresh, so the folded names are remembered here).
+  const foldedBuffGroups = new Set();
+  const buffBodyEl = fightTimeline?.querySelector?.(".buffBody");
+  const foldBuffGroups = () => {
+    buffBodyEl?.querySelectorAll?.(".buffGroup").forEach((g) => {
+      const heading = g.querySelector(".buffGroupHeader");
+      const name = heading?.firstElementChild?.textContent || "";
+      g.classList.toggle("isFolded", foldedBuffGroups.has(name));
+      foldHeading(heading, () => foldedBuffGroups.has(name), () => {
+        if (foldedBuffGroups.has(name)) foldedBuffGroups.delete(name);
+        else foldedBuffGroups.add(name);
+        g.classList.toggle("isFolded", foldedBuffGroups.has(name));
+      });
+    });
+  };
+  if (buffBodyEl && typeof MutationObserver === "function") {
+    new MutationObserver(foldBuffGroups).observe(buffBodyEl, { childList: true });
+  }
 
   // The canvases are drawn to their width: draw again when it changes.
   let ftlWidth = 0;
@@ -1804,8 +2086,46 @@ const createDetailsUI = ({
     if (dpsChartCanvas.title !== title) dpsChartCanvas.title = title;
   });
 
+  // The chart's lines draw in from the left the first time a fight shows:
+  // what is drawn is kept and revealed over a moment, not drawn again.
+  let chartRevealSeq = 0;
+  let chartRevealPending = false;
+  const revealChart = () => {
+    const w = dpsChartCanvas.width;
+    const h = dpsChartCanvas.height;
+    if (!w || !h || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+    const snap = document.createElement("canvas");
+    snap.width = w;
+    snap.height = h;
+    snap.getContext("2d").drawImage(dpsChartCanvas, 0, 0);
+    const ctx = dpsChartCanvas.getContext("2d");
+    const token = chartRevealSeq;
+    let start = 0;
+    const duration = 750;
+    const paint = (now) => {
+      if (token !== chartRevealSeq) return;
+      if (!start) start = now;
+      const p = Math.min(1, (now - start) / duration);
+      const shown = Math.max(1, Math.round(w * (1 - Math.pow(1 - p, 3))));
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(snap, 0, 0, shown, h, 0, 0, shown, h);
+      ctx.restore();
+      if (p < 1) requestAnimationFrame(paint);
+    };
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.restore();
+    whenBuilt(() => requestAnimationFrame(paint));
+  };
+
   const renderDpsChart = (details) => {
     if (!dpsChartCanvas || !dpsChartXAxis || !dpsChartLegend) return;
+    if (sectionsHeld) return;
+    // A redraw (a refresh, a resize) ends a reveal still under way.
+    chartRevealSeq++;
 
     // Use unfiltered skills for DPS lines + boss health; filtered details for ping + battleTime
     const unfilteredDetails = lastUnfilteredDetails || details;
@@ -2148,6 +2468,10 @@ const createDetailsUI = ({
 
     // Pointing at a cross names who died (see the listener below).
     dpsChartCanvas.deathMarks = deathMarks;
+    if (chartRevealPending) {
+      chartRevealPending = false;
+      revealChart();
+    }
 
     // ── Legend: a line per player, in the colour it is drawn in (the one
     // selected solid, the rest dashed), then the boss's HP and the ping. ──
@@ -2215,6 +2539,7 @@ const createDetailsUI = ({
   };
 
   const renderTimeline = (details) => {
+    if (sectionsHeld) return;
     if (!timelineCanvas || !timelineViewport || !timelineLegend || !timelineXAxis) return;
 
     const laneSource = detailsMode === "heal" ? details?.healSkills : details?.skills;
@@ -2410,20 +2735,32 @@ const createDetailsUI = ({
   // ── Buffs ──
   // A History fight's come with its record; a live fight's are asked for
   // once per refresh at most. They sit in the fight timeline, on its axis.
+  // A fight's actor as the buff and stagger sections name and colour it.
+  const describeActor = (id) => {
+    const actor = detailsActors.get(Number(id));
+    if (!actor) return null;
+    const job = actor.job || getActorJob(id);
+    const name = actor.nickname && actor.nickname !== String(id) ? actor.nickname : `#${id}`;
+    return { name, job, color: getJobColor(job) };
+  };
   const buffTimeline = typeof window.createBuffTimeline === "function"
     ? window.createBuffTimeline({
       root: fightTimeline,
-      describeActor: (id) => {
-        const actor = detailsActors.get(Number(id));
-        if (!actor) return null;
-        const job = actor.job || getActorJob(id);
-        const name = actor.nickname && actor.nickname !== String(id) ? actor.nickname : `#${id}`;
-        return { name, job, color: getJobColor(job) };
-      },
+      describeActor,
     })
     : null;
   let liveBuffs = null;
   let liveBuffsPending = false;
+
+  // ── Stagger ──
+  // Each boss gauge's windows on the same axis: a History fight's from its
+  // record, a live fight's with its buffs (get_fight_buffs).
+  const staggerPanel = typeof window.createStaggerPanel === "function"
+    ? window.createStaggerPanel({
+      root: fightTimeline,
+      describeActor,
+    })
+    : null;
 
   const buffTargetId = () => {
     if (historyRecord) return Number(historyRecord.targetId) || null;
@@ -2472,19 +2809,35 @@ const createDetailsUI = ({
       actorIds: [...detailsActors.keys()],
     };
     if (historyRecord) {
+      const durationMs = ftlDurationMs || Number(historyRecord.durationMs) || 0;
       buffTimeline.setData({
         ...common,
         older: !Array.isArray(historyRecord.buffs),
         tracks: Array.isArray(historyRecord.buffs) ? historyRecord.buffs : [],
-        durationMs: ftlDurationMs || Number(historyRecord.durationMs) || 0,
+        durationMs,
+      });
+      staggerPanel?.setData({
+        targetId,
+        targetName: common.targetName,
+        older: !Array.isArray(historyRecord.stagger),
+        windows: Array.isArray(historyRecord.stagger) ? historyRecord.stagger : [],
+        durationMs,
       });
       return;
     }
     const shown = targetId && liveBuffs && Number(liveBuffs.targetId) === targetId ? liveBuffs : null;
+    const durationMs = ftlDurationMs || Number(shown?.durationMs) || 0;
     buffTimeline.setData({
       ...common,
       tracks: shown ? shown.buffs : (targetId ? null : []),
-      durationMs: ftlDurationMs || Number(shown?.durationMs) || 0,
+      durationMs,
+      loading: !!targetId && !shown,
+    });
+    staggerPanel?.setData({
+      targetId,
+      targetName: common.targetName,
+      windows: shown ? (Array.isArray(shown.stagger) ? shown.stagger : []) : (targetId ? null : []),
+      durationMs,
       loading: !!targetId && !shown,
     });
   };
@@ -2500,7 +2853,7 @@ const createDetailsUI = ({
     window.dpsData.getFightBuffs(targetId)
       .then((result) => {
         if (seq !== openSeq || historyRecord) return;
-        liveBuffs = result || { targetId, durationMs: 0, buffs: [] };
+        liveBuffs = result || { targetId, durationMs: 0, buffs: [], stagger: [] };
         showBuffs();
       })
       .catch(() => {})
@@ -2978,15 +3331,20 @@ const createDetailsUI = ({
     }
     selectedAttackerLabel = selectedAttackerLabel || String(row.name ?? "");
     updateHeaderText();
+    // The fight's first show: bars slide out and figures count up.
+    // On a2tools.app (the log page's viewer sets __A2_WEB_LOG__) the final
+    // state at once: the staged entrance suits a window opening, but on the
+    // page it only delayed the figures and flashed (2026-10-18).
+    const firstShow = stagedForSeq !== openSeq && !window.__A2_WEB_LOG__;
+    fillBarsFromZero = firstShow;
+    if (firstShow) pendingStarts = [];
     const partyBarCtx = buildPartyBarStats();
     renderPartyBars(partyBarCtx?.stats || details?.perActorStats, partyBarCtx?.battleTimeMs || details?.battleTimeMs);
     renderStats(details, { compact: activeCompactMode });
-    renderSkills(details, { compact: activeCompactMode });
-    renderDpsChart(details);
-    renderTimeline(details);
-    renderBuffs();
+    if (firstShow) countUpIn(detailsPanel.querySelector(".detailsStats"));
     lastRow = row;
     lastDetails = details;
+    renderRest(details);
 
     // Unfiltered details are now fetched in parallel by refreshDetailsView,
     // so lastUnfilteredDetails is already set before render() is called.
@@ -2994,6 +3352,64 @@ const createDetailsUI = ({
     if (cacheRowId) {
       detailsCacheByRowId.set(cacheRowId, details);
     }
+  };
+
+  // The rest of the page after the players and the totals. The first time a
+  // fight shows, one section a frame, each fading in: built in one go, a
+  // long fight held the window for a second or more, and it would not move
+  // or answer meanwhile (2026-10-18). Refreshes of a fight already shown
+  // draw everything at once, as before.
+  let stagedForSeq = -1;
+  let stageToken = 0;
+  const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+  const popIn = (el) => {
+    if (!el) return;
+    el.classList.remove("detailsPopIn");
+    void el.offsetWidth;
+    el.classList.add("detailsPopIn");
+  };
+  const renderRest = (details) => {
+    const token = ++stageToken;
+    const steps = [
+      [() => renderSkills(details, { compact: activeCompactMode }), () => detailsPanel.querySelector(".detailsSkills")],
+      [() => { chartRevealPending = true; renderDpsChart(details); chartRevealPending = false; }, () => fightTimeline],
+      [() => renderTimeline(details), null],
+      [() => renderBuffs(), null],
+    ];
+    if (stagedForSeq === openSeq || window.__A2_WEB_LOG__) {
+      stagedForSeq = openSeq;
+      sectionsHeld = false;
+      for (const [step] of steps) step();
+      chartRevealPending = false;
+      startPending();
+      return;
+    }
+    stagedForSeq = openSeq;
+    sectionsHeld = true;
+    (async () => {
+      // The skills right after the party's bars start (they slide on the
+      // GPU and stay smooth; the counting figures hitch once). The chart and
+      // timeline once the party has finished animating.
+      const partyDone = performance.now() + 760;
+      for (const [i, [step, section]] of steps.entries()) {
+        if (i === 1 && !reducedMotion()) {
+          const left = partyDone - performance.now();
+          if (left > 0) await new Promise((resolve) => setTimeout(resolve, left));
+        }
+        await nextFrame();
+        // A newer render took over: it draws everything itself.
+        if (token !== stageToken) return startPending();
+        sectionsHeld = false;
+        step();
+        popIn(section?.());
+        sectionsHeld = true;
+      }
+      sectionsHeld = false;
+      // Let the last section's layout and paint land, then animate.
+      await nextFrame();
+      await nextFrame();
+      startPending();
+    })();
   };
 
   const getCachedDetails = (rowId) => {
@@ -3132,6 +3548,7 @@ const createDetailsUI = ({
     historyRecord = null;
     liveBuffs = null;
     buffTimeline?.clear();
+    staggerPanel?.clear();
     window._historyDetailsOverride = null;
     fightStartMs = 0;
     fightBossName = "";
@@ -3209,6 +3626,12 @@ const createDetailsUI = ({
 
     // Clear stats/skills while loading
     clearDetailsValues();
+    // The players at once, in the order their damage will put them, with
+    // empty bars: the figures fill them when they are ready.
+    const waiting = Object.entries(historyActorDamage)
+      .sort((a, b) => b[1] - a[1])
+      .map(([actorId]) => ({ actorId: Number(actorId), totalDmg: 0, contributionPct: 0 }));
+    renderPartyBars(waiting, -1);
 
     if (seq !== openSeq) return;
     const fakeRow = { id: null, job: "", name: record.bossName };
@@ -3269,7 +3692,8 @@ const createDetailsUI = ({
       heal ? "details.skills.healPctTooltip" : "details.skills.dmgPctTooltip", heal ? "Healing %" : "Damage %");
     fightTimeline?.classList?.toggle?.("isHealMode", heal);
     detailsPanel?.classList?.toggle?.("isHealMode", heal);
-    const chartTitle = fightTimeline?.querySelector?.(".ftlGroupDps .ftlGroupTitle");
+    const chartTitle = fightTimeline?.querySelector?.(".ftlGroupDps .ftlGroupTitle .ftlFoldText")
+      || fightTimeline?.querySelector?.(".ftlGroupDps .ftlGroupTitle");
     if (chartTitle) {
       chartTitle.dataset.i18n = heal ? "details.hpsChart" : "details.dpsChart";
       chartTitle.textContent = heal
@@ -3326,6 +3750,59 @@ const createDetailsUI = ({
     const ctx = buildPartyBarStats();
     renderPartyBars(ctx?.stats || lastDetails?.perActorStats, ctx?.battleTimeMs || lastDetails?.battleTimeMs);
   };
+
+  // ── Fight replay hooks (fightReplay.js) ──
+  // A saved fight replayed to a moment: fightReplay.js cuts the record to it
+  // and has the party, the stats and the skills drawn from the cut here. The
+  // window's own state (lastDetails, the targets) stays the whole fight's, so
+  // the timeline, a sort or a reload still draw that; the replay draws over
+  // them again. renderFigures(null) draws the whole fight's figures.
+  let replaySkillsAt = 0;
+  window.fightReplay?.attach?.({
+    advancePartyBars,
+    root: detailsPanel,
+    timeline: fightTimeline,
+    timelineScroll: fightTimelineScroll,
+    figureEls: () => [detailsPartyListEl, detailsStatsEl, skillsListEl],
+    record: () => historyRecord,
+    isOpen: () => detailsPanel.classList.contains("open"),
+    metrics: () => ftlMetrics(),
+    durationMs: () => ftlDurationMs,
+    selection: () => ({ attackerIds: selectedAttackerIds, targetId: selectedTargetId }),
+    targets: () => detailsTargets,
+    getDetails,
+    renderFigures: (cut) => {
+      if (!lastDetails) return;
+      const kept = [lastDetails, lastUnfilteredDetails, detailsTargets];
+      if (cut) {
+        lastDetails = cut.details;
+        lastUnfilteredDetails = cut.unfiltered;
+        detailsTargets = [cut.target];
+      }
+      try {
+        const ctx = buildPartyBarStats();
+        renderPartyBars(ctx?.stats || lastDetails?.perActorStats, ctx?.battleTimeMs || lastDetails?.battleTimeMs);
+        renderStats(lastDetails, { compact: activeCompactMode });
+        // While a replay plays, the skill table's first ten rows, once a
+        // second: the whole table, even at that rate, was three quarters of
+        // the page's work (2026-10-18). A pause, a seek or the end draws all
+        // of it, exact.
+        const now = performance.now();
+        if (!cut?.playing) {
+          renderSkills(lastDetails, { compact: activeCompactMode });
+        } else if (now - replaySkillsAt >= 1000) {
+          replaySkillsAt = now;
+          renderSkills(lastDetails, { compact: activeCompactMode, limit: 10 });
+        }
+        // Damage taken has no times: it stays the whole fight's, greyed.
+        const shownStats = detailsMode === "heal" ? HEAL_STATUS : STATUS;
+        statSlots.forEach((slot, i) => slot.statEl.classList.toggle("isWholeFight",
+          !!cut && shownStats[i]?.key === "details.stats.damageReceived"));
+      } finally {
+        [lastDetails, lastUnfilteredDetails, detailsTargets] = kept;
+      }
+    },
+  });
 
   return { open, close, isOpen, isPinned, render, updateLabels, refresh, updateGridColumns, openHistoryFight, resetDetailsMode, refreshPartyStat };
 };

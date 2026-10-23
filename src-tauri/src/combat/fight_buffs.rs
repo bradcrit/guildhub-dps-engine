@@ -67,7 +67,7 @@ fn code_of(end: End) -> u8 {
     }
 }
 
-fn is_false(b: &bool) -> bool {
+pub(crate) fn is_false(b: &bool) -> bool {
     !*b
 }
 
@@ -267,6 +267,10 @@ pub struct LiveFightBuffs {
     pub start_time_ms: i64,
     pub duration_ms: i64,
     pub buffs: Vec<BuffTrack>,
+    /// The fight's stagger windows so far (`combat::stagger`), fetched with
+    /// the buffs: Details shows both on the same timeline.
+    #[serde(default)]
+    pub stagger: Vec<crate::combat::stagger::StaggerWindow>,
 }
 
 #[cfg(test)]

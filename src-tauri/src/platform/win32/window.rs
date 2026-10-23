@@ -52,6 +52,72 @@ pub fn hide_without_focus(window: &tauri::WebviewWindow) {
     }
 }
 
+/// The window in front now (the game, while playing), for `never_activate`
+/// to give the front back to.
+pub fn front_window() -> Option<isize> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    (!hwnd.0.is_null()).then_some(hwnd.0 as isize)
+}
+
+/// Whether the window in front is the meter's own (any of its windows) or
+/// the game's: what a tool window stays on top for (`keep_on_top_while_ours`).
+pub fn front_is_ours_or_game() -> bool {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return true;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    pid == unsafe { GetCurrentProcessId() } || crate::platform::window_detector::is_aion2_foreground()
+}
+
+/// If `window` has the front, give it back to `before` (the window in front
+/// when it was made): a widget's page has just loaded, which is when WebView2
+/// can take it.
+pub fn give_front_back(window: &tauri::WebviewWindow, before: Option<isize>) {
+    let (Some(hwnd), Some(before)) = (hwnd_of(window), before) else { return };
+    unsafe {
+        if GetForegroundWindow() == hwnd && before != hwnd.0 as isize {
+            let back = SetForegroundWindow(HWND(before as *mut _)).as_bool();
+            tracing::info!("A widget's page took the front as it loaded; given back: {back}");
+        }
+    }
+}
+
+/// A small window that must never take the front from the game (a plugin's
+/// alert icon): it still gets clicks and drags, but is never activated
+/// (`WS_EX_NOACTIVATE`). Built with focus off, it still took the front as
+/// its page was created (WebView2), and an alert icon appearing tabbed a
+/// player out of the game (2026-10-18). For ten seconds after it is built,
+/// if it has the front anyway, the front goes back to `before`: three were
+/// too few on a busy PC, where WebView2 takes longer to start (Hirai, still
+/// tabbed out on 2.0.71, borderless). Its page loading checks once more
+/// (`give_front_back`).
+pub fn never_activate(window: &tauri::WebviewWindow, before: Option<isize>) {
+    let Some(hwnd) = hwnd_of(window) else { return };
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
+    }
+    let Some(before) = before else { return };
+    let own = hwnd.0 as isize;
+    if before == own {
+        return;
+    }
+    std::thread::spawn(move || {
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            unsafe {
+                if GetForegroundWindow().0 as isize == own {
+                    let back = SetForegroundWindow(HWND(before as *mut _)).as_bool();
+                    tracing::info!("A widget took the front; given back to the window before it: {back}");
+                }
+            }
+        }
+    });
+}
+
 /// A window to be shown and hidden with the functions above is built visible
 /// (without focus), so tao applies its frameless style and marks it visible,
 /// then hidden with `hide_without_focus` if it should start hidden. Built
@@ -67,7 +133,10 @@ pub fn minimize_off_top(window: &tauri::WebviewWindow) {
             0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
-        let _ = ShowWindow(hwnd, SW_MINIMIZE);
+        // SW_MINIMIZE activates the next window in the Z order: the game, even
+        // with an overlay (NVIDIA's) in front, and the game then locks the
+        // mouse to the middle of the screen.
+        let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
     }
 }
 
@@ -105,6 +174,18 @@ pub fn hide_in_place(window: &tauri::WebviewWindow) {
     hide_without_focus(window);
 }
 
+/// The meter places its own windows here.
+pub fn places_own_windows() -> bool {
+    true
+}
+
+/// Windows are placed by the meter itself here (Linux on Wayland asks KWin).
+pub fn keep_places(
+    _save: impl Fn(&str, (i32, i32, i32, i32)) + Send + Sync + 'static,
+    _load: impl Fn(&str) -> Option<(i32, i32, i32, i32)> + Send + Sync + 'static,
+) {
+}
+
 /// Nothing is hidden in place here.
 pub fn is_hidden_in_place(_window: &tauri::WebviewWindow) -> bool {
     false
@@ -113,4 +194,9 @@ pub fn is_hidden_in_place(_window: &tauri::WebviewWindow) -> bool {
 /// Nothing is hidden in place here: windows are shown as usual.
 pub fn reveal_in_place(_window: &tauri::WebviewWindow) -> bool {
     false
+}
+
+/// Whether a tray icon can be shown: always, in the notification area.
+pub fn tray_supported() -> bool {
+    true
 }

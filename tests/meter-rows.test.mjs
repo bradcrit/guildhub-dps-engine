@@ -38,3 +38,40 @@ test("by name as before, and nobody's without either", () => {
   const unknown = app("").buildRowsFromMapObject(map, null);
   assert.equal(unknown.some((r) => r.isUser), false);
 });
+
+test("stagger is a mode of the DPS/DMG button, read from each row, unless turned off", () => {
+  const dps = app("Mine");
+  dps.updateDisplayToggleLabel = () => {};
+  // Off by default: only once turned on is Stagger in the cycle.
+  assert.deepEqual(Array.from(dps.displayModes()), ["totalDamage", "both", "hps", "totalHeal"]);
+  dps.showStaggerMode = true;
+  const rows = dps.buildRowsFromMapObject({ 5: { ...row("Mine", 10), stagger: 35 }, 6: row("Other", 20) });
+  assert.deepEqual(Array.from(rows, (r) => r.stagger).sort(), [0, 35]);
+  dps.setDisplayMode("stagger");
+  assert.equal(dps.displayMode, "stagger");
+  const mine = rows.find((r) => r.id === "5");
+  assert.deepEqual({ ...dps.getMetricForRow(mine) }, { value: 35, text: "35" });
+  assert.deepEqual(Array.from(dps.displayModes()), ["totalDamage", "both", "hps", "totalHeal", "stagger"]);
+  dps.showStaggerMode = false;
+  dps.setDisplayMode("stagger");
+  assert.equal(dps.displayMode, "dps");
+  dps.showHealModes = false;
+  dps.showStaggerMode = true;
+  assert.deepEqual(Array.from(dps.displayModes()), ["totalDamage", "both", "stagger"]);
+});
+
+test("in Stagger mode a row's tooltip lists its stagger by skill, most first", () => {
+  const dps = app("Mine");
+  const names = { 12090000: "Punishment", 12040000: "Pummel", 12120000: "Taunt" };
+  dps.i18n = { getSkillName: (code, fallback) => names[code] ?? fallback, t: (_, fallback) => fallback };
+  const [mine] = dps.buildRowsFromMapObject({
+    5: { ...row("Mine", 10), stagger: 70, staggerSkills: { 12040000: 15, 12090000: 35, 12120000: 20 } },
+  });
+  const details = dps.staggerTooltipDetails(mine);
+  assert.equal(details.mode, "stagger");
+  assert.deepEqual(Array.from(details.skills, (s) => [s.name, s.dmg, s.code]), [
+    ["Punishment", 35, 12090000],
+    ["Taunt", 20, 12120000],
+    ["Pummel", 15, 12040000],
+  ]);
+});

@@ -2,6 +2,11 @@
 //! application's windows, but KWin runs scripts and a script can call D-Bus:
 //! the one loaded here tells the meter each time the active window changes,
 //! for "Hide when AION2 isn't focused". Other desktops are not covered.
+//!
+//! On Wayland it also keeps the meter's windows where they were left (#76):
+//! no application may place its own windows there, but a KWin script may.
+//! The script reports where each of the meter's windows was moved or resized
+//! to, and puts each back there when it appears again.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -13,21 +18,180 @@ const PLUGIN: &str = "a2tools-dps-meter-focus";
 
 /// Values are passed as strings: KWin hands JavaScript numbers to D-Bus as
 /// doubles, which an integer argument would refuse. KWin 6 has
-/// `windowActivated`, KWin 5 `clientActivated`.
+/// `windowActivated` and `windowAdded`, KWin 5 `clientActivated` and
+/// `clientAdded`. `__PID__` is the meter's process id: only its windows are
+/// placed.
 const SCRIPT: &str = r#"// A2Tools DPS Meter: tells the meter which window is active, so it can hide
-// while the game is not in front. Loaded by the meter at each start.
+// while the game is not in front, and keeps the meter's own windows where
+// they were left. Loaded by the meter at each start.
+var SERVICE = "app.a2tools.DpsMeter", PATH = "/Focus", IFACE = "app.a2tools.DpsMeter.Focus";
+var MY_PID = __PID__;
 function report(w) {
-    callDBus("app.a2tools.DpsMeter", "/Focus", "app.a2tools.DpsMeter.Focus", "Active",
+    callDBus(SERVICE, PATH, IFACE, "Active",
              w ? String(w.pid) : "0", w ? String(w.resourceClass) : "", w ? String(w.caption) : "");
 }
+function mine(w) {
+    return !!w && Number(w.pid) === MY_PID;
+}
+// A plugin's widget (an alert's icon), titled "<plugin> · <name>".
+function widget(w) {
+    return mine(w) && String(w.caption).indexOf(" · ") >= 0;
+}
+// The last window not ours to be active, and our widgets that just appeared:
+// Wayland activates a new window, so each icon an alert opened took the
+// focus from the game (a tester, mid-PvP, 2026-10-17). An icon activated
+// because it appeared hands the focus straight back; one clicked keeps it.
+var lastOther = null;
+var fresh = [];
+// The active window and the one before it. KWin activates a new window
+// before it announces it (windowActivated, then windowAdded: seen on KDE
+// Plasma 6, 2026-10-19), so an icon is already active when follow() meets it.
+var current = null, previous = null;
+function activate(w) {
+    if (workspace.windowActivated) workspace.activeWindow = w;
+    else workspace.activeClient = w;
+}
+function onActivated(w) {
+    if (w !== current) {
+        previous = current;
+        current = w;
+    }
+    if (w && !mine(w)) lastOther = w;
+    var i = fresh.indexOf(w);
+    if (i >= 0) {
+        fresh.splice(i, 1);
+        if (lastOther) {
+            activate(lastOther);
+            return;
+        }
+    }
+    report(w);
+}
+function remember(w) {
+    var g = w.frameGeometry;
+    callDBus(SERVICE, PATH, IFACE, "Geometry", String(w.caption), String(Math.round(g.x)), String(Math.round(g.y)),
+             String(Math.round(g.width)), String(Math.round(g.height)));
+}
+function onScreen(r) {
+    var area = workspace.virtualScreenGeometry;
+    if (!area) return true;
+    // Enough of its top edge on screen to be seen and dragged back.
+    return r.x + 48 <= area.x + area.width && r.x + r.width >= area.x + 48
+        && r.y >= area.y - 8 && r.y + 32 <= area.y + area.height;
+}
+// How long a window is held at its place: the meter sizes its windows to
+// their content just after they appear, and KWin keeps a resized window's
+// centre where it was, so the overlay, 300 px tall at first, came down
+// 120 px once it shrank to its rows (a CachyOS player, 2026-10-19).
+var HOLD_MS = 4000;
+function place(w) {
+    callDBus(SERVICE, PATH, IFACE, "Placement", String(w.caption), function (answer) {
+        var p = String(answer).split(",").map(Number);
+        if (p.length !== 4 || p.some(isNaN)) return;
+        var g = w.frameGeometry;
+        // A width or height of 0: the window keeps its own size.
+        var r = { x: p[0], y: p[1], width: p[2] > 0 ? p[2] : g.width, height: p[3] > 0 ? p[3] : g.height };
+        if (!onScreen(r)) return;
+        w.frameGeometry = r;
+        // Moved by a resize while held: back to its place, at its new size.
+        // Never against the player's own move or resize.
+        var until = Date.now() + HOLD_MS;
+        var held = false;
+        if (w.interactiveMoveResizeStarted) w.interactiveMoveResizeStarted.connect(function () { until = 0; });
+        else if (w.clientStartUserMovedResized) w.clientStartUserMovedResized.connect(function () { until = 0; });
+        w.frameGeometryChanged.connect(function () {
+            if (held || Date.now() > until || w.move || w.resize) return;
+            var now = w.frameGeometry;
+            if (Math.round(now.x) === r.x && Math.round(now.y) === r.y) return;
+            held = true;
+            w.frameGeometry = { x: r.x, y: r.y, width: now.width, height: now.height };
+            held = false;
+        });
+    });
+}
+function follow(w) {
+    if (!mine(w)) return;
+    // An icon already active as it is added: KWin activated it first. The
+    // focus goes back to the window active before it. (The KWin rule for
+    // icons keeps them from taking it at all; this is for when the rule is
+    // missing, as KWin can lose it.)
+    var aw = workspace.activeWindow || workspace.activeClient;
+    if (widget(w) && aw === w && previous && previous !== w && !previous.deleted) activate(previous);
+    else if (widget(w)) {
+        fresh.push(w);
+        if (fresh.length > 32) fresh.shift();
+    }
+    var done = w.interactiveMoveResizeFinished || w.clientFinishUserMovedResized;
+    if (done) done.connect(function () { remember(w); });
+    place(w);
+}
+// A window of the meter going away (hidden: on KDE the meter unmaps the
+// windows it hides) leaves its place behind, so it comes back there.
+function gone(w) {
+    if (mine(w) && onScreen(w.frameGeometry)) remember(w);
+}
+if (workspace.windowRemoved) workspace.windowRemoved.connect(gone);
+else if (workspace.clientRemoved) workspace.clientRemoved.connect(gone);
 if (workspace.windowActivated) {
-    workspace.windowActivated.connect(report);
+    workspace.windowActivated.connect(onActivated);
     report(workspace.activeWindow);
+    workspace.windowAdded.connect(follow);
+    workspace.windowList().forEach(follow);
 } else {
-    workspace.clientActivated.connect(report);
+    workspace.clientActivated.connect(onActivated);
     report(workspace.activeClient);
+    workspace.clientAdded.connect(follow);
+    workspace.clientList().forEach(follow);
 }
 "#;
+
+/// A window's place and size, as KWin gives them: x, y, width, height.
+pub type Rect = (i32, i32, i32, i32);
+
+/// Where the meter keeps the places KWin reports, by window title.
+pub struct Places {
+    pub save: Box<dyn Fn(&str, Rect) + Send + Sync>,
+    pub load: Box<dyn Fn(&str) -> Option<Rect> + Send + Sync>,
+}
+
+static PLACES: OnceLock<Places> = OnceLock::new();
+
+/// The meter runs on X11 (`GDK_BACKEND=x11`, XWayland) in a Wayland session.
+/// It places and remembers its own windows then, but KWin keeps a new X11
+/// window inside the X11 work area: one rectangle for every monitor, its
+/// bottom the top of the lowest panel on any of them. So a widget left below
+/// that line on another monitor came back above it at each start (Ping on a
+/// 1440 px monitor, a panel on a 1080 px one: back at the 1232 line). KWin
+/// places only widgets then, where the meter left them (`load`).
+static X11_IN_WAYLAND: AtomicBool = AtomicBool::new(false);
+
+/// The script is running, so KWin puts each of the meter's windows back where
+/// it was each time it appears (`place` in the script).
+static PLACING: AtomicBool = AtomicBool::new(false);
+
+/// Keep the meter's windows where they were left, through KWin (#76). Only
+/// in a Wayland session: under X11 the meter places its own windows, as on
+/// Windows (in a Wayland session too, but for its widgets: X11_IN_WAYLAND).
+pub fn keep_places(places: Places) {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let x11 = std::env::var("GDK_BACKEND").is_ok_and(|b| b.starts_with("x11"));
+        X11_IN_WAYLAND.store(x11, Ordering::Relaxed);
+        let _ = PLACES.set(places);
+    }
+}
+
+/// Whether the meter places and remembers its own windows, KWin placing only
+/// its widgets (see X11_IN_WAYLAND).
+pub fn places_own_windows() -> bool {
+    X11_IN_WAYLAND.load(Ordering::Relaxed)
+}
+
+/// Whether KWin puts the meter's windows back where they were whenever they
+/// appear: on native Wayland in KDE, with the script running. A window can
+/// then be hidden for good and shown again at its place.
+pub fn kwin_places_windows() -> bool {
+    PLACING.load(Ordering::Relaxed) && PLACES.get().is_some() && !X11_IN_WAYLAND.load(Ordering::Relaxed)
+}
 
 /// 0: not known (no report yet, or not KDE). 1: the game or one of the
 /// meter's own windows is active. 2: something else is.
@@ -43,6 +207,25 @@ static CONNECTION: OnceLock<zbus::blocking::Connection> = OnceLock::new();
 
 /// Told when the game or the meter gains or loses the front.
 static ON_CHANGE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// Whether a screenshot tool (Spectacle) is the active window, and who is
+/// told when that changes (`watch_screenshot_tool`).
+static SCREENSHOT: AtomicBool = AtomicBool::new(false);
+static ON_SCREENSHOT: OnceLock<Box<dyn Fn(bool) + Send + Sync>> = OnceLock::new();
+
+/// Be told when a screenshot tool becomes, or stops being, the active window.
+pub fn watch_screenshot_tool(on_change: impl Fn(bool) + Send + Sync + 'static) {
+    let _ = ON_SCREENSHOT.set(Box::new(on_change));
+}
+
+/// KDE's Spectacle, by its window class (Plasma 6: `org.kde.spectacle`,
+/// Plasma 5: `spectacle`). Its area selection is drawn under the meter's
+/// windows (the overlay layer, see `kwin_rules`), so they took the drag
+/// (Zoe, CachyOS, 2026-10-20).
+fn is_screenshot_tool(class: &str) -> bool {
+    let class = class.trim().to_ascii_lowercase();
+    class == "org.kde.spectacle" || class == "spectacle"
+}
 
 /// Whether the game (or the meter) is the active window, if KWin has said
 /// and the game has been recognised.
@@ -62,6 +245,13 @@ struct Focus;
 #[zbus::interface(name = "app.a2tools.DpsMeter.Focus")]
 impl Focus {
     fn active(&self, pid: String, class: String, caption: String) {
+        let shot = is_screenshot_tool(&class);
+        if SCREENSHOT.swap(shot, Ordering::Relaxed) != shot {
+            tracing::info!("KWin: screenshot tool {}", if shot { "in front: the meter lets clicks through" } else { "gone" });
+            if let Some(on_screenshot) = ON_SCREENSHOT.get() {
+                on_screenshot(shot);
+            }
+        }
         let who = classify(pid.parse().unwrap_or(0), &class, &caption);
         if who == Who::Game && !SEEN_GAME.swap(true, Ordering::Relaxed) {
             tracing::info!("KWin: the game's window is active (class {class:?})");
@@ -72,6 +262,32 @@ impl Focus {
                 on_change();
             }
         }
+    }
+
+    /// One of the meter's windows was moved or resized by the player.
+    fn geometry(&self, caption: String, x: String, y: String, width: String, height: String) {
+        // On X11 the meter saves its own windows' places as they move.
+        if places_own_windows() {
+            return;
+        }
+        let Some(places) = PLACES.get() else { return };
+        let n = |v: &str| v.trim().parse::<i32>().ok();
+        if let (Some(x), Some(y), Some(w), Some(h)) = (n(&x), n(&y), n(&width), n(&height))
+            && w > 0
+            && h > 0
+        {
+            (places.save)(&caption, (x, y, w, h));
+        }
+    }
+
+    /// Where one of the meter's windows belongs, `"x,y,width,height"`, or ""
+    /// to leave it where KWin put it.
+    fn placement(&self, caption: String) -> String {
+        PLACES
+            .get()
+            .and_then(|places| (places.load)(&caption))
+            .map(|(x, y, w, h)| format!("{x},{y},{w},{h}"))
+            .unwrap_or_default()
     }
 }
 
@@ -114,7 +330,8 @@ pub fn watch(on_change: impl Fn() + Send + Sync + 'static) -> Result<(), String>
 
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     let path = dir.join("a2tools-dps-meter-focus.js");
-    std::fs::write(&path, SCRIPT).map_err(|e| format!("writing the script: {e}"))?;
+    let script = SCRIPT.replace("__PID__", &std::process::id().to_string());
+    std::fs::write(&path, script).map_err(|e| format!("writing the script: {e}"))?;
 
     let kwin = zbus::blocking::Proxy::new(&connection, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting")
         .map_err(|e| format!("KWin scripting: {e}"))?;
@@ -128,6 +345,7 @@ pub fn watch(on_change: impl Fn() + Send + Sync + 'static) -> Result<(), String>
     kwin.call_method("start", &()).map_err(|e| format!("starting the script: {e}"))?;
     let _ = ON_CHANGE.set(Box::new(on_change));
     let _ = CONNECTION.set(connection);
+    PLACING.store(true, Ordering::Relaxed);
     tracing::info!("KWin reports the active window (script {id})");
     Ok(())
 }
@@ -135,6 +353,14 @@ pub fn watch(on_change: impl Fn() + Send + Sync + 'static) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spectacle_is_known_by_its_class() {
+        assert!(is_screenshot_tool("org.kde.spectacle"));
+        assert!(is_screenshot_tool("spectacle"));
+        assert!(!is_screenshot_tool("org.kde.konsole"));
+        assert!(!is_screenshot_tool(""));
+    }
 
     #[test]
     fn the_game_is_known_by_title_or_class_and_the_meter_by_itself() {

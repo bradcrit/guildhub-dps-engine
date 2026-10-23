@@ -161,8 +161,13 @@ fn query_pointer() -> Option<(i32, i32, u32)> {
 /// window, so the pointer watch the lock uses elsewhere lost it over the
 /// desktop or a native Wayland window and the button could not be clicked.
 /// An input region needs no pointer. Returns whether it was applied.
+///
+/// A window `hide_in_place` hid never takes the mouse, whatever asks: it is
+/// invisible but still there, and took every click over it once a screenshot
+/// tool left the front (`screenshot_tool` gives every window the mouse back).
 pub fn click_through_except(window: &tauri::WebviewWindow, ignore: bool, keep: Option<(f64, f64, f64, f64, f64)>) -> bool {
     use gtk::{cairo, prelude::*};
+    let (ignore, keep) = if is_hidden_in_place(window) { (true, None) } else { (ignore, keep) };
     let window = window.clone();
     super::dialog::on_gtk_thread(move || {
         let gtk_window = window.gtk_window().ok()?;
@@ -228,8 +233,17 @@ fn hidden_in_place() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// window back, so a window that stays mapped is the only one that stays where
 /// it was left. Without a compositor nothing can be transparent, and it is
 /// hidden as before.
+///
+/// Where KWin puts the meter's windows back as they appear (KDE on native
+/// Wayland, `focus::kwin_places_windows`) a window is hidden for good: there
+/// the invisible window, kept mapped and above everything (the plugin windows
+/// rule), still took every click over it (#100).
 pub fn hide_in_place(window: &tauri::WebviewWindow) {
     use gtk::prelude::*;
+    if super::focus::kwin_places_windows() {
+        hide_without_focus(window);
+        return;
+    }
     let target = window.clone();
     let concealed = super::dialog::on_gtk_thread(move || {
         let gtk_window = target.gtk_window().ok()?;
@@ -252,9 +266,9 @@ pub fn hide_in_place(window: &tauri::WebviewWindow) {
         hide_without_focus(window);
         return;
     }
-    let _ = window.set_ignore_cursor_events(true);
-    let _ = window.set_skip_taskbar(true);
     hidden_in_place().lock().unwrap_or_else(|p| p.into_inner()).insert(window.label().to_string());
+    click_through_except(window, true, None);
+    let _ = window.set_skip_taskbar(true);
 }
 
 /// Show a window `hide_in_place` hid, where it is; false if it was not hidden
@@ -264,7 +278,7 @@ pub fn reveal_in_place(window: &tauri::WebviewWindow) -> bool {
     if !was {
         return false;
     }
-    let _ = window.set_ignore_cursor_events(false);
+    click_through_except(window, false, None);
     let _ = window.set_skip_taskbar(false);
     let target = window.clone();
     super::dialog::on_gtk_thread(move || {
@@ -275,6 +289,23 @@ pub fn reveal_in_place(window: &tauri::WebviewWindow) -> bool {
     });
     let _ = window.set_always_on_top(true);
     true
+}
+
+/// Keep the meter's windows where they were left (#76): on Wayland through
+/// KWin, which may place windows where an application may not
+/// (`focus::keep_places`). `save` gets a window's title and its place (x, y,
+/// width, height); `load` answers where a window of that title belongs.
+pub fn keep_places(
+    save: impl Fn(&str, (i32, i32, i32, i32)) + Send + Sync + 'static,
+    load: impl Fn(&str) -> Option<(i32, i32, i32, i32)> + Send + Sync + 'static,
+) {
+    super::focus::keep_places(super::focus::Places { save: Box::new(save), load: Box::new(load) });
+}
+
+/// Whether the meter places its own windows and KWin only its widgets
+/// (`focus::places_own_windows`).
+pub fn places_own_windows() -> bool {
+    super::focus::places_own_windows()
 }
 
 /// Whether `hide_in_place` has this window hidden.
@@ -342,4 +373,34 @@ pub fn release_size(window: &tauri::WebviewWindow, min: tauri::LogicalSize<f64>)
         max_width: None,
         max_height: None,
     });
+}
+
+/// Windows only (see the Windows version): here the window manager decides
+/// what takes focus.
+pub fn front_window() -> Option<isize> {
+    None
+}
+
+/// The game or the meter in front, where the desktop says (KDE); else
+/// assumed, so tool windows stay on top as before.
+pub fn front_is_ours_or_game() -> bool {
+    crate::platform::window_detector::is_aion2_foreground()
+}
+
+/// Windows only (see the Windows version).
+pub fn never_activate(_window: &tauri::WebviewWindow, _before: Option<isize>) {}
+
+/// Windows only (see the Windows version).
+pub fn give_front_back(_window: &tauri::WebviewWindow, _before: Option<isize>) {}
+
+/// Whether a tray icon can be shown. GTK's tray is an AppIndicator, whose
+/// library (libayatana-appindicator, or the older libappindicator) is loaded
+/// as the icon is built, and building one without it aborts the meter. Not
+/// every desktop has it, so it is looked for first.
+pub fn tray_supported() -> bool {
+    ["libayatana-appindicator3.so.1", "libappindicator3.so.1"]
+        .iter()
+        // SAFETY: loading runs the library's initialisers only, as the
+        // tray's own loading would.
+        .any(|name| unsafe { libloading::Library::new(name) }.is_ok())
 }

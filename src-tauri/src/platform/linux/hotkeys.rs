@@ -42,6 +42,18 @@ const APP_ID: &str = "com.a2tools.dps-meter";
 const RELOAD: &str = "reset";
 const TOGGLE: &str = "toggle";
 const LOCK: &str = "lock";
+const PLUGINS: &str = "plugins";
+
+/// A binding's shortcut id and the description the desktop shows.
+fn shortcut_of(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name {
+        "reload" => (RELOAD, "Reset the meter"),
+        "toggle" => (TOGGLE, "Show or hide the meter"),
+        "lock" => (LOCK, "Turn the click-through lock on or off"),
+        "plugins" => (PLUGINS, "Bring back the open plugin windows"),
+        _ => return None,
+    })
+}
 
 /// Off until the user turns them on (Settings → Keybinds): the desktop asks
 /// to approve the shortcuts, which should not appear unasked.
@@ -62,22 +74,13 @@ impl HotkeyManager {
         }
     }
 
-    /// Start the helper with the three shortcuts and act on what it reports.
+    /// Start the helper with the shortcuts and act on what it reports.
     /// The numbers are the Win32 modifier flags and virtual-key codes settings
     /// store (`parse_hotkey_label`); a key of 0 leaves that shortcut out.
-    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &self,
-        reload_mods: u32,
-        reload_vk: u32,
-        toggle_mods: u32,
-        toggle_vk: u32,
-        lock_mods: u32,
-        lock_vk: u32,
-        on_reload: impl Fn() + Send + 'static,
-        on_toggle: impl Fn() + Send + 'static,
-        on_lock: impl Fn() + Send + 'static,
-        on_status: impl Fn(&'static str, bool) + Send + 'static,
+        bindings: Vec<crate::platform::hotkeys::Binding>,
+        on_status: impl Fn(&'static str, &'static str, Option<String>) + Send + 'static,
     ) {
         use std::io::BufRead;
         use std::process::{Command, Stdio};
@@ -89,14 +92,11 @@ impl HotkeyManager {
             }
         }
         let mut args = Vec::new();
-        for (id, description, mods, vk) in [
-            (RELOAD, "Reset the meter", reload_mods, reload_vk),
-            (TOGGLE, "Show or hide the meter", toggle_mods, toggle_vk),
-            (LOCK, "Turn the click-through lock on or off", lock_mods, lock_vk),
-        ] {
-            if vk != 0 {
+        for binding in &bindings {
+            let Some((id, description)) = shortcut_of(binding.name) else { continue };
+            if binding.vk != 0 {
                 args.push("--shortcut".to_string());
-                args.push(format!("{id}\t{description}\t{}", trigger(mods, vk).unwrap_or_default()));
+                args.push(format!("{id}\t{description}\t{}", trigger(binding.mods, binding.vk).unwrap_or_default()));
             }
         }
         let path = std::env::current_exe()
@@ -126,15 +126,24 @@ impl HotkeyManager {
             for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
                 let mut parts = line.splitn(3, ' ');
                 match (parts.next(), parts.next(), parts.next()) {
-                    (Some("fire"), Some(id), _) => match id {
-                        RELOAD => on_reload(),
-                        TOGGLE => on_toggle(),
-                        LOCK => on_lock(),
-                        _ => {}
-                    },
-                    (Some("status"), Some(id), Some(state)) => {
+                    (Some("fire"), Some(id), _) => {
+                        let fired = bindings.iter().find(|b| shortcut_of(b.name).is_some_and(|(s, _)| s == id));
+                        if let Some(binding) = fired {
+                            (binding.on_fire)();
+                        }
+                    }
+                    (Some("status"), Some(id), Some(rest)) => {
+                        // "<state>" or "<state> <the key the desktop gave>".
+                        let (state, assigned) = rest.split_once(' ').unwrap_or((rest, ""));
+                        let state = match state {
+                            "ok" => "ok",
+                            "unset" => "unset",
+                            _ => "taken",
+                        };
+                        let assigned = Some(assigned.trim().to_string()).filter(|a| !a.is_empty());
                         if let Some(key) = status_key(id) {
-                            on_status(key, state == "ok");
+                            info!("Hotkey {key}: {state}{}", assigned.as_deref().map(|a| format!(" ({a})")).unwrap_or_default());
+                            on_status(key, state, assigned);
                         }
                     }
                     (Some("error"), _, _) => warn!("Global hotkeys unavailable: {}", &line[6.min(line.len())..]),
@@ -142,6 +151,34 @@ impl HotkeyManager {
                 }
             }
         });
+    }
+
+    /// Open the desktop's own shortcut settings, where the player gives the
+    /// meter's shortcuts their keys: KDE keeps the key it stored the first
+    /// time and takes no new suggestion after, so a key changed in the meter's
+    /// Settings changes nothing there (and a dismissed first dialog leaves
+    /// them all without a key, as a CachyOS player's were, 2026-10-19).
+    /// KDE's and GNOME's settings by name; elsewhere the portal's own
+    /// ConfigureShortcuts, through the helper.
+    pub fn open_desktop_settings(&self) -> Result<(), String> {
+        use std::io::Write;
+        use std::process::Command;
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_uppercase();
+        let tries: &[&[&str]] = if desktop.contains("KDE") {
+            &[&["systemsettings", "kcm_keys"], &["kcmshell6", "kcm_keys"], &["kcmshell5", "kcm_keys"]]
+        } else if desktop.contains("GNOME") {
+            &[&["gnome-control-center", "keyboard"]]
+        } else {
+            &[]
+        };
+        for args in tries {
+            if Command::new(args[0]).args(&args[1..]).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        let mut slot = self.child.lock().unwrap_or_else(|p| p.into_inner());
+        let stdin = slot.as_mut().and_then(|c| c.stdin.as_mut()).ok_or("keybinds are off")?;
+        writeln!(stdin, "configure").map_err(|e| e.to_string())
     }
 
     /// Stop the helper. Its portal session ends with it, so the desktop
@@ -159,7 +196,7 @@ impl HotkeyManager {
 /// `--shortcut "<id>\t<description>\t<trigger>"`, print what happens, and
 /// exit when the meter closes our stdin (or dies). Returns the exit code.
 pub fn run_helper() -> i32 {
-    use std::io::{Read, Write};
+    use std::io::Write;
 
     let mut wanted: Vec<(&'static str, &'static str, Option<String>)> = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -172,7 +209,7 @@ pub fn run_helper() -> i32 {
         let (Some(id), Some(description)) = (fields.next(), fields.next()) else { continue };
         let trigger = fields.next().filter(|t| !t.is_empty()).map(str::to_string);
         // Known ids only: they are what the portal and Hyprland are told.
-        let Some(id) = [RELOAD, TOGGLE, LOCK].into_iter().find(|known| *known == id) else { continue };
+        let Some(id) = [RELOAD, TOGGLE, LOCK, PLUGINS].into_iter().find(|known| *known == id) else { continue };
         let description: &'static str = Box::leak(description.to_string().into_boxed_str());
         wanted.push((id, description, trigger));
     }
@@ -181,11 +218,20 @@ pub fn run_helper() -> i32 {
         return 2;
     }
 
-    // The meter closing our stdin, or exiting, ends us too.
+    // The meter closing our stdin, or exiting, ends us too. A "configure"
+    // line asks the portal to show its shortcut settings for our session.
     std::thread::spawn(|| {
-        let mut sink = [0u8; 64];
-        let mut stdin = std::io::stdin();
-        while matches!(stdin.read(&mut sink), Ok(n) if n > 0) {}
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if line.trim() == "configure" {
+                if let Err(e) = configure() {
+                    let mut out = std::io::stdout().lock();
+                    let _ = writeln!(out, "error ConfigureShortcuts: {e}");
+                    let _ = out.flush();
+                }
+            }
+        }
         std::process::exit(0);
     });
 
@@ -195,7 +241,12 @@ pub fn run_helper() -> i32 {
         let _ = out.flush();
     };
     let slot = Mutex::new(None);
-    let status = |id: &str, ok: bool| say(format!("status {id} {}", if ok { "ok" } else { "taken" }));
+    let status = |id: &str, state: &str, assigned: Option<&str>| {
+        say(match assigned {
+            Some(a) => format!("status {id} {state} {a}"),
+            None => format!("status {id} {state}"),
+        })
+    };
     match listen(&wanted, &slot, &status, |id| say(format!("fire {id}"))) {
         Ok(()) => 0,
         Err(e) => {
@@ -258,6 +309,7 @@ fn status_key(id: &str) -> Option<&'static str> {
         RELOAD => Some("reload"),
         TOGGLE => Some("toggle"),
         LOCK => Some("lock"),
+        PLUGINS => Some("plugins"),
         _ => None,
     }
 }
@@ -266,7 +318,7 @@ fn status_key(id: &str) -> Option<&'static str> {
 /// result (`a(sa{sv})`, each with its `trigger_description`). A shortcut the
 /// desktop bound to nothing, because its suggested keys were taken, comes
 /// back with an empty description. `None` when the desktop says nothing.
-fn assigned(results: &HashMap<String, OwnedValue>) -> Option<Vec<(String, bool)>> {
+fn assigned(results: &HashMap<String, OwnedValue>) -> Option<Vec<(String, Option<String>)>> {
     let list = results.get("shortcuts")?;
     let array = list.downcast_ref::<zbus::zvariant::Array>().ok()?;
     let mut out = Vec::new();
@@ -279,28 +331,28 @@ fn assigned(results: &HashMap<String, OwnedValue>) -> Option<Vec<(String, bool)>
             .get::<&str, Value>(&"trigger_description")
             .ok()
             .flatten()
-            .is_some_and(|v| non_empty_text(&v));
+            .and_then(|v| text_of(&v));
         out.push((id.as_str().to_string(), described));
     }
     Some(out)
 }
 
-/// A string with something in it, through any `v` wrapping.
-fn non_empty_text(value: &Value) -> bool {
+/// The text in it, through any `v` wrapping, if any.
+fn text_of(value: &Value) -> Option<String> {
     match value {
-        Value::Str(s) => !s.as_str().trim().is_empty(),
-        Value::Value(inner) => non_empty_text(inner),
-        _ => false,
+        Value::Str(s) => Some(s.as_str().trim().to_string()).filter(|t| !t.is_empty()),
+        Value::Value(inner) => text_of(inner),
+        _ => None,
     }
 }
 
 /// Register, open a session, bind the shortcuts and call `fire` with each
-/// activated shortcut's id until the connection closes. `status(id, bound)`
-/// reports, per shortcut, whether a key is behind it.
+/// activated shortcut's id until the connection closes. `status(id, state,
+/// key)` reports, per shortcut, the key the desktop gave it, or `unset`.
 fn listen(
     wanted: &[(&'static str, &'static str, Option<String>)],
     slot: &Mutex<Option<Connection>>,
-    status: &dyn Fn(&str, bool),
+    status: &dyn Fn(&str, &str, Option<&str>),
     fire: impl Fn(&str),
 ) -> zbus::Result<()> {
     let connection = Connection::session()?;
@@ -371,12 +423,19 @@ fn listen(
         // knows which it could.
         hyprland_bind(wanted, status);
     } else if let Some(assigned) = assigned(&bound) {
-        for (id, ok) in assigned {
-            status(&id, ok);
+        // The key the desktop gave each, or none: on KDE the first one stays,
+        // and a dismissed first dialog left them all without one. Not
+        // "taken": the desktop says no more than that it has no key.
+        for (id, key) in assigned {
+            match key {
+                Some(key) => status(&id, "ok", Some(&key)),
+                None => status(&id, "unset", None),
+            }
         }
     }
 
     *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(connection.clone());
+    *session_slot().lock().unwrap_or_else(|p| p.into_inner()) = Some((connection.clone(), session.clone()));
     for message in activations {
         let body = message.body();
         let Ok((from, id, _time, _options)) =
@@ -391,6 +450,24 @@ fn listen(
     Ok(())
 }
 
+/// The portal session, for `configure`.
+fn session_slot() -> &'static Mutex<Option<(Connection, String)>> {
+    static SLOT: std::sync::OnceLock<Mutex<Option<(Connection, String)>>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Ask the portal to show its settings for our shortcuts (GlobalShortcuts
+/// version 2, ConfigureShortcuts).
+fn configure() -> zbus::Result<()> {
+    let Some((connection, session)) = session_slot().lock().unwrap_or_else(|p| p.into_inner()).clone() else {
+        return Err(zbus::Error::Failure("no portal session".into()));
+    };
+    let portal = proxy(&connection, PORTAL_PATH, SHORTCUTS)?;
+    let session_path = ObjectPath::try_from(session.as_str())?;
+    let options: HashMap<&str, Value> = HashMap::new();
+    portal.call::<_, _, ()>("ConfigureShortcuts", &(&session_path, "", options))
+}
+
 /// Hyprland binds nothing on its own: its portal takes no suggested keys, and
 /// the user would have to add a `global` bind for each shortcut. So on
 /// Hyprland the meter adds them itself, at run time through `hyprctl`, for
@@ -398,7 +475,7 @@ fn listen(
 /// again). A key combination that is already bound, by the user or by an
 /// earlier start, is left alone, so nothing of theirs is shadowed and nothing
 /// fires twice.
-fn hyprland_bind(wanted: &[(&'static str, &'static str, Option<String>)], status: &dyn Fn(&str, bool)) {
+fn hyprland_bind(wanted: &[(&'static str, &'static str, Option<String>)], status: &dyn Fn(&str, &str, Option<&str>)) {
     use std::process::Command;
     let run = |args: &[&str]| -> Option<String> {
         let out = Command::new("hyprctl").args(args).output().ok()?;
@@ -411,14 +488,21 @@ fn hyprland_bind(wanted: &[(&'static str, &'static str, Option<String>)], status
         return;
     };
     let listed: Vec<serde_json::Value> = serde_json::from_str(&listed).unwrap_or_default();
-    let existing: Vec<(u64, String)> = run(&["binds", "-j"])
+    // Each bind's keys, and what it runs (`global` and its shortcut's name).
+    let existing: Vec<(u64, String, String)> = run(&["binds", "-j"])
         .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(&s).ok())
         .unwrap_or_default()
         .iter()
         .map(|b| {
+            let runs = format!(
+                "{} {}",
+                b.get("dispatcher").and_then(|d| d.as_str()).unwrap_or(""),
+                b.get("arg").and_then(|a| a.as_str()).unwrap_or("")
+            );
             (
                 b.get("modmask").and_then(|m| m.as_u64()).unwrap_or(0),
                 b.get("key").and_then(|k| k.as_str()).unwrap_or("").to_lowercase(),
+                runs,
             )
         })
         .collect();
@@ -434,9 +518,14 @@ fn hyprland_bind(wanted: &[(&'static str, &'static str, Option<String>)], status
             continue;
         };
         let Some((mods, key)) = hyprland_keys(trigger) else { continue };
-        if existing.iter().any(|(m, k)| *m == mods.mask && *k == key.to_lowercase()) {
-            info!("Hyprland: {} is already bound; left for {name}", trigger);
-            status(id, false);
+        if let Some((_, _, runs)) = existing.iter().find(|(m, k, _)| *m == mods.mask && *k == key.to_lowercase()) {
+            // Ours, from an earlier start this session: it works.
+            if runs.trim() == format!("global {name}") {
+                status(id, "ok", Some(trigger.as_str()));
+            } else {
+                info!("Hyprland: {} is already bound; left for {name}", trigger);
+                status(id, "taken", None);
+            }
             continue;
         }
         // Lua config (current Hyprland) first, then the hyprlang `keyword`.
@@ -448,7 +537,7 @@ fn hyprland_bind(wanted: &[(&'static str, &'static str, Option<String>)], status
         let ok = run(&["eval", &lua]).is_some_and(|s| s.trim() == "ok")
             || run(&["keyword", "bind", &format!("{}, {}, global, {}", mods.space_joined(), key, name)])
                 .is_some_and(|s| s.trim() == "ok");
-        status(id, ok);
+        status(id, if ok { "ok" } else { "taken" }, ok.then_some(trigger.as_str()));
         if ok {
             info!("Hyprland: bound {trigger} to {name}");
         } else {

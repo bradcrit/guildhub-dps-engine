@@ -3,6 +3,7 @@ pub mod dps_calculator;
 pub mod fight_buffs;
 pub mod nearby_players;
 pub mod ping_tracker;
+pub mod stagger;
 
 // Owns the capture threads and the tokio channel they feed.
 #[cfg(feature = "desktop")]
