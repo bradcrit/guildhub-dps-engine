@@ -32,7 +32,7 @@
 //! | Route                  | Answer                                          |
 //! |------------------------|-------------------------------------------------|
 //! | `GET  /v1/status`      | version, Npcap, capture, game window            |
-//! | `GET  /v1/dps`         | the meter's current view (`DpsData`, plus `targetDead`) |
+//! | `GET  /v1/dps`         | the meter's current view (`DpsData`, plus `targetDead`, `targetStagger`) |
 //! | `GET  /v1/self`        | your character, its Odyle energy, entry counts and currencies (`lists`), the ping |
 //! | `GET  /v1/events`      | SSE, see below                                  |
 //! | `GET  /v1/fights`      | saved fights (`FightSummary[]`)                 |
@@ -552,9 +552,17 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                     // would stay on the last reading ("1.7 %"). Whether the
                     // target died is known — said alongside, as targetDead.
                     let dead = dps.target_id > 0 && calc.storage.is_entity_dead(dps.target_id);
+                    // The target's stagger gauge now, for the bar under its HP:
+                    // {"max","rest","broken"}, null when it has none.
+                    let stagger = (dps.target_id > 0)
+                        .then(|| calc.storage.stagger_live_gauge(dps.target_id))
+                        .flatten()
+                        .filter(|&(max, _, _)| max > 0)
+                        .map(|(max, rest, broken)| serde_json::json!({ "max": max, "rest": rest, "broken": broken }));
                     let mut view = serde_json::to_value(&dps).unwrap_or_default();
                     if let Some(fields) = view.as_object_mut() {
                         fields.insert("targetDead".into(), dead.into());
+                        fields.insert("targetStagger".into(), stagger.unwrap_or_default());
                     }
                     serde_json::to_string(&view).unwrap_or_default()
                 })
