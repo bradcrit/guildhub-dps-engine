@@ -287,6 +287,10 @@ impl StreamProcessor {
         if let Some(spotted) = crate::capture::positions::parse(packet) {
             self.data_storage.note_spotted(spotted);
         }
+        // The objects in range (the Hidden Cube hint).
+        if let Some(record) = crate::capture::objects::parse(packet) {
+            self.data_storage.note_object(record);
+        }
         // The field bosses on a map the player opened (boss timers).
         if let Some(map) = crate::capture::boss_map::parse(packet, crate::clock::now_ms()) {
             self.data_storage.note_boss_map(map);

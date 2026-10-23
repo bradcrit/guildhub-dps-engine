@@ -90,6 +90,12 @@
 //! is how old your spot is (null: none yet), `pos` (`{"x","y"}`) that spot
 //! on the ground in metres, to the nearest 10 (null: none yet) — the pet
 //! tracker tells from it that you left an area.
+//! `cubes` (`{"cubes":[{"metres","above"}]}`) on every change and once on
+//! connecting: the Hidden Cubes in range (`capture::objects`), closest first,
+//! from when the game sends one until it goes out of range, is opened or a
+//! zone load. `metres` is how far it is on the ground, `above` how far above
+//! you (below: negative), both whole metres, while your spot is at most
+//! CUBE_POS_MAX_AGE_MS old, else null.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -134,6 +140,9 @@ const SELF_RATE: Duration = Duration::from_secs(1);
 const TARGET_HIT_MS: i64 = 15_000;
 /// Distances (`npcs`) from your spot while it is at most this old.
 const SELF_POS_MAX_AGE_MS: i64 = 60_000;
+/// Distances (`cubes`) from your spot while it is at most this old: off a
+/// fight the game tells your spot only every few seconds.
+const CUBE_POS_MAX_AGE_MS: i64 = 5_000;
 /// How often field boss HP is looked at (as upstream's sender does).
 const BOSS_HP_EVERY: Duration = Duration::from_secs(3);
 /// A map read longer ago than this isn't passed on (waiting for the server).
@@ -207,6 +216,8 @@ struct Engine {
     pvp: watch::Sender<Arc<str>>,
     /// The mobs in sight as JSON (`npcs_json`).
     npcs: watch::Sender<Arc<str>>,
+    /// The Hidden Cubes in range as JSON (`cubes_json`).
+    cubes: watch::Sender<Arc<str>>,
     /// One-off events for the stream: (name, JSON).
     events: broadcast::Sender<(&'static str, String)>,
     /// The character name the parent read off the game's screen — put on your
@@ -258,6 +269,20 @@ impl Engine {
         // Your spot on the ground in metres, to the nearest 10 (else the event is new at every step).
         let pos = me.map(|(p, _)| serde_json::json!({ "x": (p.x / 1000.0).round() as i64 * 10, "y": (p.y / 1000.0).round() as i64 * 10 }));
         serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos }).to_string()
+    }
+
+    /// The Hidden Cubes in range (see the top of this file).
+    fn cubes_json(&self) -> String {
+        let cubes: Vec<_> = self
+            .storage
+            .hidden_cubes(CUBE_POS_MAX_AGE_MS)
+            .into_iter()
+            .map(|spot| {
+                let (metres, above) = spot.map_or((None, None), |(m, a)| (Some(m.round() as i32), Some(a.round() as i32)));
+                serde_json::json!({ "metres": metres, "above": above })
+            })
+            .collect();
+        serde_json::json!({ "cubes": cubes }).to_string()
     }
 
     /// The pet records ready to be passed on, oldest first, as (event, JSON):
@@ -579,6 +604,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (me, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (pvp, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (npcs_in_sight, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let (cubes, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (events, _) = broadcast::channel(64);
     let engine = Arc::new(Engine {
         token,
@@ -593,6 +619,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         me,
         pvp,
         npcs: npcs_in_sight,
+        cubes,
         events,
         screen_name: Mutex::new(None),
         ping: ping.clone(),
@@ -725,6 +752,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let npcs = engine.npcs_json();
                 if **engine.npcs.borrow() != *npcs {
                     engine.npcs.send_replace(Arc::from(npcs));
+                }
+                let cubes = engine.cubes_json();
+                if **engine.cubes.borrow() != *cubes {
+                    engine.cubes.send_replace(Arc::from(cubes));
                 }
                 let server = engine.storage.local_profile().server_id;
                 for event in engine.storage.take_boss_events() {
@@ -1026,6 +1057,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     let mut me = engine.me.subscribe();
     let mut pvp = engine.pvp.subscribe();
     let mut npcs = engine.npcs.subscribe();
+    let mut cubes = engine.cubes.subscribe();
     let mut events = engine.events.subscribe();
     let mut beat = tokio::time::interval(HEARTBEAT_EVERY);
     beat.tick().await;
@@ -1033,6 +1065,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     me.mark_changed();
     pvp.mark_changed();
     npcs.mark_changed();
+    cubes.mark_changed();
     loop {
         let frame = tokio::select! {
             changed = dps.changed() => {
@@ -1074,6 +1107,16 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
                     continue;
                 }
                 format!("event: npcs\ndata: {current}\n\n")
+            }
+            changed = cubes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let current = cubes.borrow_and_update().clone();
+                if current.is_empty() {
+                    continue;
+                }
+                format!("event: cubes\ndata: {current}\n\n")
             }
             event = events.recv() => match event {
                 Ok((name, data)) => format!("event: {name}\ndata: {data}\n\n"),

@@ -10,6 +10,7 @@ pub mod evidence_slice;
 pub mod frame_tap;
 pub mod framing;
 pub mod game_lists;
+pub mod objects;
 pub mod packet_accumulator;
 pub mod positions;
 pub mod stream_assembler;

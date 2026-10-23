@@ -9,6 +9,7 @@ use crate::capture::game_lists::{EntryCount, ListUpdate};
 use crate::combat::nearby_players::{DeathRecap, KillRecord, NearbyPlayer, NearbyPlayers};
 use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow};
 
+use crate::capture::objects::{ObjectRecord, HIDDEN_CUBE};
 use crate::capture::positions::{Position, Spotted};
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
@@ -619,6 +620,9 @@ struct Inner {
     /// The last known spot of the other entities in sight, until they die,
     /// despawn or a zone load.
     entity_positions: HashMap<i32, Position>,
+    /// The Hidden Cubes in range: entity -> spot, until they go out of range,
+    /// are opened or a zone load (`capture::objects`).
+    hidden_cubes: HashMap<i32, Position>,
     /// Power-scalar values observed per actor in its damage records. A summon
     /// inherits its owner's, so this links the two when no spawn packet (and
     /// therefore no `parent_key`) ever arrives — the case for a Cleric's Divine
@@ -814,6 +818,7 @@ impl DataStorage {
                 my_last_hit: None,
                 self_position: None,
                 entity_positions: HashMap::new(),
+                hidden_cubes: HashMap::new(),
                 actor_power_scalars: HashMap::new(),
                 hostile_target_ids: HashSet::new(),
                 dead_entity_ids: HashSet::new(),
@@ -978,6 +983,35 @@ impl DataStorage {
                 }
             }
         }
+    }
+
+    /// An object record (`capture::objects`): only Hidden Cubes are kept.
+    pub fn note_object(&self, record: ObjectRecord) {
+        let mut inner = self.inner.write();
+        match record {
+            ObjectRecord::InRange(id, code, pos) if code == HIDDEN_CUBE => {
+                // How far the game sends a cube, while your spot is fresh enough to tell.
+                if let Some((me, _)) = inner.self_position.filter(|(_, at)| now_ms() - at <= 2_000) {
+                    tracing::info!("Hidden Cube in range, {:.0} m away", me.metres_to(&pos));
+                }
+                inner.hidden_cubes.insert(id, pos);
+            }
+            ObjectRecord::InRange(..) => {}
+            ObjectRecord::Gone(id) => {
+                inner.hidden_cubes.remove(&id);
+            }
+        }
+    }
+
+    /// The Hidden Cubes in range, closest first: how far each is on the
+    /// ground and how far above you (metres, below: negative) — None while
+    /// your spot is unknown or more than `self_max_age_ms` old.
+    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<Option<(f32, f32)>> {
+        let inner = self.inner.read();
+        let me = inner.self_position.filter(|(_, at)| now_ms() - at <= self_max_age_ms).map(|(pos, _)| pos);
+        let mut cubes: Vec<_> = inner.hidden_cubes.values().map(|pos| me.map(|me| (me.metres_to(pos), (pos.z - me.z) / 100.0))).collect();
+        cubes.sort_by(|a, b| a.map(|a| a.0).unwrap_or(f32::MAX).total_cmp(&b.map(|b| b.0).unwrap_or(f32::MAX)));
+        cubes
     }
 
     /// Your last known spot and how long ago it was told (ms).
@@ -2340,6 +2374,7 @@ impl DataStorage {
         let from = inner.current_map_id.replace(map_id);
         inner.mobs_in_sight.clear();
         inner.entity_positions.clear();
+        inner.hidden_cubes.clear();
         inner.zone_generation += 1;
         if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
             inner.instance_generation += 1;

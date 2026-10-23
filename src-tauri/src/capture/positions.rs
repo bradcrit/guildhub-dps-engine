@@ -110,7 +110,7 @@ fn varint_len(packet: &[u8], i: usize) -> Option<usize> {
 /// Three floats that can be a spot in the world: the maps span a few
 /// kilometres either way, never close to 0 on both axes — anything else is
 /// the wrong offset.
-fn position_at(packet: &[u8], i: usize) -> Option<Position> {
+pub(crate) fn position_at(packet: &[u8], i: usize) -> Option<Position> {
     let f = |k: usize| packet.get(i + 4 * k..i + 4 * k + 4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
     let pos = Position { x: f(0)?, y: f(1)?, z: f(2)? };
     let plausible = |v: f32| v.is_finite() && v.abs() < 5_000_000.0;
