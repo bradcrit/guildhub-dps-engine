@@ -87,7 +87,9 @@
 //! directly last, within TARGET_HIT_MS), else null. Each npc has `metres`, how
 //! far the closest of them is from you, while your spot is known and at most
 //! SELF_POS_MAX_AGE_MS old (`capture::positions`), else null; `posAge` (ms)
-//! is how old your spot is (null: none yet).
+//! is how old your spot is (null: none yet), `pos` (`{"x","y"}`) that spot
+//! on the ground in metres, to the nearest 10 (null: none yet) — the pet
+//! tracker tells from it that you left an area.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -251,8 +253,11 @@ impl Engine {
             .collect();
         let target = self.storage.my_target(TARGET_HIT_MS);
         // In whole seconds, so the event isn't new every second for nothing.
-        let pos_age = self.storage.self_position().map(|(_, age)| age / 1000 * 1000);
-        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age }).to_string()
+        let me = self.storage.self_position();
+        let pos_age = me.map(|(_, age)| age / 1000 * 1000);
+        // Your spot on the ground in metres, to the nearest 10 (else the event is new at every step).
+        let pos = me.map(|(p, _)| serde_json::json!({ "x": (p.x / 1000.0).round() as i64 * 10, "y": (p.y / 1000.0).round() as i64 * 10 }));
+        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos }).to_string()
     }
 
     /// The pet records ready to be passed on, oldest first, as (event, JSON):
