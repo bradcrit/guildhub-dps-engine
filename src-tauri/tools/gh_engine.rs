@@ -67,7 +67,19 @@
 //! (`{"at","name","class","itemLevel","killingBlow","damage","hits","skill",
 //! "total","helpers","abyss"}`: the last hit yours, your damage, hits and top
 //! skill, everyone's damage and how many others hit them, in the 15 s before).
-//! `self` also has your `itemLevel` while a party roster states it.
+//! `self` also has your `itemLevel` while a party roster states it, and `map`:
+//! the map id of the last zone load (null before one).
+//!
+//! Pets (the game's own records, read as A2Tools' Pet Soul Tracker reads
+//! them; a pet collection is shared by a server's characters): `petList`
+//! (`{"server","at","levels":[{"pet","level"}],"points":[{"pet","points"}]}`)
+//! once per world entry — each pet's level and its souls toward the next —
+//! passed on PET_LIST_SETTLE_MS after it was read, so that a server switch
+//! has named the new server by then; `petSouls`
+//! (`{"server","at","souls":[{"pet","amount"}]}`) as souls are picked up,
+//! one kill can feed several pets; `petLevel` (`{"server","at","pet","level"}`)
+//! when a pet reaches a level (the game resets its souls to 0 then, and
+//! doesn't send this for every step). `pet` is the game's pet id (1001 …).
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -97,6 +109,9 @@ use a2tools_dps_meter_lib::entity::job_class::JobClass;
 use a2tools_dps_meter_lib::history::fight_history::{FightHistoryManager, is_plain_name};
 use a2tools_dps_meter_lib::i18n::lookup::{self, NpcLookup, SkillLookup};
 use a2tools_dps_meter_lib::platform;
+use a2tools_dps_meter_lib::capture::frame_tap;
+use a2tools_dps_meter_lib::capture::stream_processor::read_varint;
+use a2tools_dps_meter_lib::plugins::decoder::{Decoder, DecoderSpec};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How often the meter's view is recalculated (upstream's default rate).
@@ -111,6 +126,24 @@ const BOSS_HP_EVERY: Duration = Duration::from_secs(3);
 const MAP_MAX_AGE_MS: i64 = 10 * 60_000;
 /// The same map, unchanged, is passed on again after this long at the earliest.
 const MAP_RESEND_SAME_MS: i64 = 5 * 60_000;
+/// A pet list is passed on this long after it was read (see the top of this file).
+const PET_LIST_SETTLE_MS: i64 = 3_000;
+/// Most pet records kept while the server isn't known yet.
+const MAX_PENDING_PETS: usize = 256;
+/// The pet records, as `plugins::decoder` specs; each name's event in `pet_event`.
+const PET_DECODERS: &str = r#"[
+    { "name": "pet-list", "opcode": "00 90", "fields": [
+        { "type": "skip:4" },
+        { "name": "levels", "type": "list", "count": "varint", "fields": [
+            { "name": "pet", "type": "u32" }, { "type": "skip:4" }, { "name": "level", "type": "u32" } ] },
+        { "name": "points", "type": "list", "count": "varint", "fields": [
+            { "name": "pet", "type": "u32" }, { "name": "points", "type": "u32" } ] } ] },
+    { "name": "pet-souls", "opcode": "0D 90", "fields": [
+        { "name": "souls", "type": "list", "count": "u8", "fields": [
+            { "name": "pet", "type": "u32" }, { "name": "amount", "type": "u32" } ] } ] },
+    { "name": "pet-level", "opcode": "14 90", "fields": [
+        { "type": "skip:2" }, { "name": "pet", "type": "u32" }, { "name": "level", "type": "u32" } ] }
+]"#;
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEAD: usize = 8 * 1024;
@@ -174,6 +207,9 @@ struct Engine {
     /// (`remember_faction`).
     factions: Mutex<HashMap<String, u8>>,
     factions_path: PathBuf,
+    /// Pet records read (`PET_DECODERS`), waiting to be passed on: when read
+    /// (unix ms), the decoder's name, what it read.
+    pets: Arc<Mutex<Vec<(i64, String, serde_json::Value)>>>,
 }
 
 impl Engine {
@@ -189,6 +225,31 @@ impl Engine {
                 Err(e) => tracing::warn!("Could not save fight {}: {e}", record.id),
             }
         }
+    }
+
+    /// The pet records ready to be passed on, oldest first, as (event, JSON):
+    /// everything up to a pet list younger than PET_LIST_SETTLE_MS, which
+    /// waits with what came after it.
+    fn take_pet_events(&self, server: u16, now: i64) -> Vec<(&'static str, String)> {
+        let mut pets = self.pets.lock();
+        let ready = pets
+            .iter()
+            .position(|(at, name, _)| name == "pet-list" && now - at < PET_LIST_SETTLE_MS)
+            .unwrap_or(pets.len());
+        pets.drain(..ready)
+            .filter_map(|(at, name, data)| {
+                let mut body = data.as_object()?.clone();
+                body.insert("server".into(), server.into());
+                body.insert("at".into(), at.into());
+                let event = match name.as_str() {
+                    "pet-list" => "petList",
+                    "pet-souls" => "petSouls",
+                    "pet-level" => "petLevel",
+                    _ => return None,
+                };
+                Some((event, serde_json::Value::Object(body).to_string()))
+            })
+            .collect()
     }
 
     /// Upstream's 30-second save: boss fights that changed since the last one.
@@ -254,6 +315,7 @@ impl Engine {
             "odyle": odyle,
             "lists": lists,
             "ping": self.ping.current_ping_ms(),
+            "map": self.storage.current_map_id(),
         })
         .to_string()
     }
@@ -507,7 +569,35 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 .unwrap_or_default(),
         ),
         factions_path: args.data_dir.join("factions.json"),
+        pets: Arc::new(Mutex::new(Vec::new())),
     });
+
+    // The pet records, off every frame the parser reads.
+    {
+        let decoders: Vec<Decoder> = serde_json::from_str::<Vec<DecoderSpec>>(PET_DECODERS)
+            .map_err(|e| e.to_string())
+            .and_then(|specs| specs.iter().map(Decoder::compile).collect())
+            .unwrap_or_else(|e| {
+                tracing::warn!("Pet decoders: {e}");
+                Vec::new()
+            });
+        let pets = engine.pets.clone();
+        frame_tap::set(Some(Arc::new(move |packet: &[u8]| {
+            let len = read_varint(packet, 0).length;
+            if len <= 0 {
+                return;
+            }
+            let at = len as usize;
+            let Some(opcode) = packet.get(at..at + 2) else { return };
+            for d in decoders.iter().filter(|d| d.opcode == opcode) {
+                let Some(data) = d.decode(&packet[at + 2..]) else { continue };
+                let mut pets = pets.lock();
+                if pets.len() < MAX_PENDING_PETS {
+                    pets.push((a2tools_dps_meter_lib::clock::now_ms(), d.name.clone(), data));
+                }
+            }
+        })));
+    }
 
     {
         let engine = Arc::downgrade(&engine);
@@ -603,9 +693,12 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                     let kill = serde_json::json!({ "npc": event.npc, "at": at_ms, "server": (server != 0).then_some(server) }).to_string();
                     let _ = engine.events.send(("bossKill", kill));
                 }
-                // The server isn't known yet (the meter started mid-game): the maps wait for it.
+                // The server isn't known yet (the meter started mid-game): the maps and pets wait for it.
                 if server == 0 {
                     continue;
+                }
+                for (name, body) in engine.take_pet_events(server, a2tools_dps_meter_lib::clock::now_ms()) {
+                    let _ = engine.events.send((name, body));
                 }
                 // Field boss HP, every BOSS_HP_EVERY: the bosses whose percent
                 // changed, and the ones still fought once a minute.
@@ -948,6 +1041,21 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
 mod tests {
     use super::*;
     use a2tools_dps_meter_lib::capture::boss_map::BossOnMap;
+
+    /// The pet decoders compile, and a soul pickup for two pets (a capture
+    /// from a player, 2026-10-19) reads as both.
+    #[test]
+    fn the_pet_decoders_read_a_soul_pickup() {
+        let specs: Vec<DecoderSpec> = serde_json::from_str(PET_DECODERS).unwrap();
+        let decoders: Vec<Decoder> = specs.iter().map(|s| Decoder::compile(s).unwrap()).collect();
+        assert_eq!(decoders.len(), 3);
+        let souls = decoders.iter().find(|d| d.opcode == [0x0D, 0x90]).unwrap();
+        let body = [0x02, 0xF7, 0x03, 0, 0, 1, 0, 0, 0, 0x60, 0x04, 0, 0, 1, 0, 0, 0];
+        assert_eq!(
+            souls.decode(&body).unwrap(),
+            serde_json::json!({"souls": [{"pet": 1015, "amount": 1}, {"pet": 1120, "amount": 1}]})
+        );
+    }
 
     #[test]
     fn a_map_event_names_the_bosses_by_their_npc_code() {

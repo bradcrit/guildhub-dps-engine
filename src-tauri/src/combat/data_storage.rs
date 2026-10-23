@@ -931,6 +931,11 @@ impl DataStorage {
         self.nearby.lock().set_self_faction(faction);
     }
 
+    /// The map the last zone load named (`21 36`), None before one.
+    pub fn current_map_id(&self) -> Option<i32> {
+        self.inner.read().current_map_id
+    }
+
     /// The map the last zone load named is the Abyss (`nearby_players::ABYSS_MAPS`).
     pub fn in_abyss(&self) -> bool {
         self.inner.read().current_map_id.is_some_and(|map| crate::combat::nearby_players::ABYSS_MAPS.contains(&map))
