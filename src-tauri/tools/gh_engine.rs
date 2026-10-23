@@ -80,6 +80,9 @@
 //! one kill can feed several pets; `petLevel` (`{"server","at","pet","level"}`)
 //! when a pet reaches a level (the game resets its souls to 0 then, and
 //! doesn't send this for every step). `pet` is the game's pet id (1001 …).
+//! `npcs` (`{"npcs":[{"npc","count"}]}`) on every change and once on
+//! connecting: the living mobs in sight by NPC code, from their spawn until
+//! they die, despawn or a zone load — what the pet tracker farms nearby.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -191,6 +194,8 @@ struct Engine {
     me: watch::Sender<Arc<str>>,
     /// The players of the other faction in sight as JSON (`pvp_json`).
     pvp: watch::Sender<Arc<str>>,
+    /// The mobs in sight as JSON (`npcs_json`).
+    npcs: watch::Sender<Arc<str>>,
     /// One-off events for the stream: (name, JSON).
     events: broadcast::Sender<(&'static str, String)>,
     /// The character name the parent read off the game's screen — put on your
@@ -225,6 +230,17 @@ impl Engine {
                 Err(e) => tracing::warn!("Could not save fight {}: {e}", record.id),
             }
         }
+    }
+
+    /// The living mobs in sight, by NPC code (see the top of this file).
+    fn npcs_json(&self) -> String {
+        let npcs: Vec<_> = self
+            .storage
+            .mobs_in_sight()
+            .into_iter()
+            .map(|(npc, count)| serde_json::json!({ "npc": npc, "count": count }))
+            .collect();
+        serde_json::json!({ "npcs": npcs }).to_string()
     }
 
     /// The pet records ready to be passed on, oldest first, as (event, JSON):
@@ -545,6 +561,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (dps, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (me, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (pvp, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let (npcs_in_sight, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (events, _) = broadcast::channel(64);
     let engine = Arc::new(Engine {
         token,
@@ -558,6 +575,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         dps,
         me,
         pvp,
+        npcs: npcs_in_sight,
         events,
         screen_name: Mutex::new(None),
         ping: ping.clone(),
@@ -686,6 +704,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let pvp = engine.pvp_json();
                 if **engine.pvp.borrow() != *pvp {
                     engine.pvp.send_replace(Arc::from(pvp));
+                }
+                let npcs = engine.npcs_json();
+                if **engine.npcs.borrow() != *npcs {
+                    engine.npcs.send_replace(Arc::from(npcs));
                 }
                 let server = engine.storage.local_profile().server_id;
                 for event in engine.storage.take_boss_events() {
@@ -986,12 +1008,14 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     let mut dps = engine.dps.subscribe();
     let mut me = engine.me.subscribe();
     let mut pvp = engine.pvp.subscribe();
+    let mut npcs = engine.npcs.subscribe();
     let mut events = engine.events.subscribe();
     let mut beat = tokio::time::interval(HEARTBEAT_EVERY);
     beat.tick().await;
     dps.mark_changed();
     me.mark_changed();
     pvp.mark_changed();
+    npcs.mark_changed();
     loop {
         let frame = tokio::select! {
             changed = dps.changed() => {
@@ -1023,6 +1047,16 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
                     continue;
                 }
                 format!("event: pvp\ndata: {current}\n\n")
+            }
+            changed = npcs.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let current = npcs.borrow_and_update().clone();
+                if current.is_empty() {
+                    continue;
+                }
+                format!("event: npcs\ndata: {current}\n\n")
             }
             event = events.recv() => match event {
                 Ok((name, data)) => format!("event: {name}\ndata: {data}\n\n"),

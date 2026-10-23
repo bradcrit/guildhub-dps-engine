@@ -608,6 +608,9 @@ struct Inner {
     roster_dungeon_id: i32,
     /// The map the last zone load (`21 36`) named; None until one is seen.
     current_map_id: Option<i32>,
+    /// The mobs in sight: entity -> NPC code, from their spawn until they
+    /// die, despawn or a zone load (`mobs_in_sight`).
+    mobs_in_sight: HashMap<i32, i32>,
     /// Power-scalar values observed per actor in its damage records. A summon
     /// inherits its owner's, so this links the two when no spawn packet (and
     /// therefore no `parent_key`) ever arrives — the case for a Cleric's Divine
@@ -799,6 +802,7 @@ impl DataStorage {
                 current_dungeon_id: 0,
                 roster_dungeon_id: 0,
                 current_map_id: None,
+                mobs_in_sight: HashMap::new(),
                 actor_power_scalars: HashMap::new(),
                 hostile_target_ids: HashSet::new(),
                 dead_entity_ids: HashSet::new(),
@@ -929,6 +933,15 @@ impl DataStorage {
     /// Your faction, from your self record.
     pub fn note_self_faction(&self, faction: u8) {
         self.nearby.lock().set_self_faction(faction);
+    }
+
+    /// The living mobs in sight by NPC code: how many of each.
+    pub fn mobs_in_sight(&self) -> std::collections::BTreeMap<i32, u32> {
+        let mut counts = std::collections::BTreeMap::new();
+        for &code in self.inner.read().mobs_in_sight.values() {
+            *counts.entry(code).or_insert(0) += 1;
+        }
+        counts
     }
 
     /// The map the last zone load named (`21 36`), None before one.
@@ -1820,6 +1833,9 @@ impl DataStorage {
     pub fn append_mob(&self, mid: i32, code: i32) {
         let mut inner = self.inner.write();
         let before = inner.mob_storage.insert(mid, code);
+        if !inner.dead_entity_ids.contains(&mid) {
+            inner.mobs_in_sight.insert(mid, code);
+        }
         // An Abyss core seen up, once per entity (online builds only, as kills).
         #[cfg(feature = "online")]
         if before != Some(code)
@@ -1921,6 +1937,7 @@ impl DataStorage {
         inner.boss_hp_sent.remove(&entity_id);
         self.stagger.lock().note_gone(entity_id, now_ms(), true);
         inner.dead_entity_ids.insert(entity_id);
+        inner.mobs_in_sight.remove(&entity_id);
         inner.hp_floored_ids.remove(&entity_id);
         inner.death_log.push_back((entity_id, now_ms(), None));
         while inner.death_log.len() > MAX_DEATHS {
@@ -2032,6 +2049,7 @@ impl DataStorage {
     pub fn note_despawn(&self, id: i32) {
         self.stagger.lock().note_gone(id, now_ms(), false);
         let mut inner = self.inner.write();
+        inner.mobs_in_sight.remove(&id);
         if inner.summon_storage.contains_key(&id) {
             inner.despawned_summon_ids.insert(id);
         }
@@ -2261,6 +2279,7 @@ impl DataStorage {
         // an entity that is gone.
         inner.loot_identity.scope_counts.clear();
         let from = inner.current_map_id.replace(map_id);
+        inner.mobs_in_sight.clear();
         inner.zone_generation += 1;
         if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
             inner.instance_generation += 1;
