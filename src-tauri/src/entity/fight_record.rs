@@ -42,6 +42,11 @@ pub struct FightRecord {
     /// region, which a2tools.app groups uploaded logs by.
     #[serde(default)]
     pub server_id: u16,
+    /// When the instance it was fought in was entered (unix ms,
+    /// `DataStorage::run_started_at`): the fights of one dungeon run share
+    /// it. 0 in the open world, and when the meter started inside.
+    #[serde(default, skip_serializing_if = "is_zero_ms")]
+    pub run_at: i64,
     /// The buffs and debuffs on the fight's actors and its target
     /// (`combat::fight_buffs`). `None` in a fight saved before the meter
     /// recorded them, and in one derived from an Evidence Slice (which holds
@@ -169,4 +174,8 @@ mod tests {
         none_seen.buffs = Some(Vec::new());
         assert_eq!(serde_json::to_value(&none_seen).unwrap()["buffs"], serde_json::json!([]));
     }
+}
+
+fn is_zero_ms(n: &i64) -> bool {
+    *n == 0
 }

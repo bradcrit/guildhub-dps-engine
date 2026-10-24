@@ -1258,6 +1258,8 @@ impl DpsCalculator {
             // target's. A window still open is saved as missed, and stays
             // open here: this fight is saved again while it goes on.
             let stagger = self.data_storage.fight_stagger(target_data.first_damage_time, target_data.last_damage_time);
+            let dungeon_id = fight_dungeon(&self.npc_lookup, mob_code, roster_dungeon);
+            let run_at = if dungeon_id > 0 { self.data_storage.run_started_at(target_data.first_damage_time) } else { 0 };
             let record = FightRecord {
                 id,
                 boss_name,
@@ -1272,8 +1274,9 @@ impl DpsCalculator {
                 is_train,
                 app_version: crate::entity::fight_record::APP_VERSION.to_string(),
                 mob_code,
-                dungeon_id: fight_dungeon(&self.npc_lookup, mob_code, roster_dungeon),
+                dungeon_id,
                 server_id: self.data_storage.fight_server_id(),
+                run_at,
                 buffs: Some(buffs),
                 stagger: Some(stagger),
             };

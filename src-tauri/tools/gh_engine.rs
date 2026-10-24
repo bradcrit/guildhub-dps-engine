@@ -99,6 +99,13 @@
 //! zone load. `metres` is how far it is on the ground, `above` how far above
 //! you (below: negative), both whole metres, while your spot is at most
 //! CUBE_POS_MAX_AGE_MS old, else null.
+//! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
+//! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
+//! list — or "item", one item that went into your inventory (a boss's soul,
+//! Kinah from a mob). `item` is the game's item id. `dungeon` the instance
+//! you are in (0: the open world), `runAt` when it was entered (unix ms,
+//! the fights of that run carry it as `runAt`; 0 when not seen). Your own
+//! loot only: the game says nothing of anyone else's.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -116,6 +123,7 @@ use a2tools_dps_meter_lib::capture::boss_map::BossMap;
 use a2tools_dps_meter_lib::capture::captured_payload::CapturedPayload;
 use a2tools_dps_meter_lib::capture::field_bosses::FIELD_BOSSES;
 use a2tools_dps_meter_lib::capture::game_lists::CURRENCIES;
+use a2tools_dps_meter_lib::capture::loot::{Loot, LootReader};
 use a2tools_dps_meter_lib::capture::combat_port_detector::CombatPortDetector;
 use a2tools_dps_meter_lib::capture::pcap_capturer::PcapCapturer;
 use a2tools_dps_meter_lib::combat::capture_dispatcher::CaptureDispatcher;
@@ -162,6 +170,8 @@ const MAP_RESEND_SAME_MS: i64 = 5 * 60_000;
 const PET_LIST_SETTLE_MS: i64 = 3_000;
 /// Most pet records kept while the server isn't known yet.
 const MAX_PENDING_PETS: usize = 256;
+/// Most loot records kept until the next SELF_RATE tick passes them on.
+const MAX_PENDING_LOOT: usize = 256;
 /// The pet records, as `plugins::decoder` specs; each name's event in `pet_event`.
 const PET_DECODERS: &str = r#"[
     { "name": "pet-list", "opcode": "00 90", "fields": [
@@ -246,6 +256,8 @@ struct Engine {
     /// Pet records read (`PET_DECODERS`), waiting to be passed on: when read
     /// (unix ms), the decoder's name, what it read.
     pets: Arc<Mutex<Vec<(i64, String, serde_json::Value)>>>,
+    /// Loot read (`capture::loot`), waiting to be passed on: when read (unix ms), what.
+    loot: Arc<Mutex<Vec<(i64, Loot)>>>,
 }
 
 impl Engine {
@@ -316,6 +328,20 @@ impl Engine {
                     _ => return None,
                 };
                 Some((event, serde_json::Value::Object(body).to_string()))
+            })
+            .collect()
+    }
+
+    /// The loot read since the last call, as `loot` events (see the top of this file).
+    fn take_loot_events(&self) -> Vec<String> {
+        let found = std::mem::take(&mut *self.loot.lock());
+        let dungeon = self.storage.current_dungeon_id();
+        found
+            .into_iter()
+            .map(|(at, loot)| {
+                let items: Vec<_> = loot.items.iter().map(|&(item, count)| serde_json::json!({ "item": item, "count": count })).collect();
+                let run_at = if dungeon > 0 { self.storage.run_started_at(at) } else { 0 };
+                serde_json::json!({ "at": at, "source": loot.source.as_str(), "dungeon": dungeon, "runAt": run_at, "items": items }).to_string()
             })
             .collect()
     }
@@ -646,9 +672,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         ),
         factions_path: args.data_dir.join("factions.json"),
         pets: Arc::new(Mutex::new(Vec::new())),
+        loot: Arc::new(Mutex::new(Vec::new())),
     });
 
-    // The pet records, off every frame the parser reads.
+    // The pet records and your loot, off every frame the parser reads.
     {
         let decoders: Vec<Decoder> = serde_json::from_str::<Vec<DecoderSpec>>(PET_DECODERS)
             .map_err(|e| e.to_string())
@@ -658,7 +685,15 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 Vec::new()
             });
         let pets = engine.pets.clone();
+        let loot = engine.loot.clone();
+        let loot_reader = Mutex::new(LootReader::new());
         frame_tap::set(Some(Arc::new(move |packet: &[u8]| {
+            if let Some(found) = loot_reader.lock().read(packet) {
+                let mut loot = loot.lock();
+                if loot.len() < MAX_PENDING_LOOT {
+                    loot.push((a2tools_dps_meter_lib::clock::now_ms(), found));
+                }
+            }
             let len = read_varint(packet, 0).length;
             if len <= 0 {
                 return;
@@ -787,6 +822,9 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                     let BossEventKind::Killed { at_ms } = event.kind else { continue };
                     let kill = serde_json::json!({ "npc": event.npc, "at": at_ms, "server": (server != 0).then_some(server) }).to_string();
                     let _ = engine.events.send(("bossKill", kill));
+                }
+                for body in engine.take_loot_events() {
+                    let _ = engine.events.send(("loot", body));
                 }
                 // The server isn't known yet (the meter started mid-game): the maps and pets wait for it.
                 if server == 0 {

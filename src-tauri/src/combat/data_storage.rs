@@ -18,6 +18,9 @@ use crate::entity::summon_resolver;
 
 /// Maximum idle gap before a fight is considered ended and a new one begins.
 const IDLE_RESET_MS: i64 = 30_000;
+/// Instance changes remembered for `run_started_at` — far more than a fight
+/// saved late (the 30 s save, the 75 s settle) can lie back.
+const INSTANCE_ENTRIES_KEPT: usize = 16;
 
 /// A zone-change auto-reset is ignored if any damage was recorded within this
 /// window, so an in-combat self-teleport (boss knockback/pull) can't wipe an
@@ -606,6 +609,10 @@ struct Inner {
     /// enters or leaves an instance (`instance_generation`).
     zone_generation: u64,
     instance_generation: u64,
+    /// When each of the last instance changes happened (clock ms, oldest
+    /// first, at most INSTANCE_ENTRIES_KEPT): a dungeon run starts at the
+    /// one before its fights (`run_started_at`).
+    instance_entries: Vec<i64>,
     /// When the party last ended (`end_party`), clock ms; `NEVER_MS` if it
     /// has not.
     party_ended_at_ms: i64,
@@ -864,6 +871,7 @@ impl DataStorage {
                 party_generation: 0,
                 zone_generation: 0,
                 instance_generation: 0,
+                instance_entries: Vec::new(),
                 party_ended_at_ms: NEVER_MS,
                 pending_nicknames: HashMap::new(),
                 permanent_nicknames: HashMap::new(),
@@ -2547,6 +2555,10 @@ impl DataStorage {
         inner.zone_generation += 1;
         if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
             inner.instance_generation += 1;
+            if inner.instance_entries.len() >= INSTANCE_ENTRIES_KEPT {
+                inner.instance_entries.remove(0);
+            }
+            inner.instance_entries.push(now_ms());
         }
         let dungeon = dungeon_of_map(inner.roster_dungeon_id, Some(map_id));
         if dungeon != inner.current_dungeon_id {
@@ -2567,6 +2579,14 @@ impl DataStorage {
 
     pub fn current_dungeon_id(&self) -> i32 {
         self.inner.read().current_dungeon_id
+    }
+
+    /// When the instance that `at_ms` (clock ms) fell in was entered: the last
+    /// instance change at or before it. 0 when none was seen since the meter
+    /// started (it started inside), or the one before has been forgotten.
+    /// Names a dungeon run: its fights and loot share it.
+    pub fn run_started_at(&self, at_ms: i64) -> i64 {
+        self.inner.read().instance_entries.iter().rev().find(|&&at| at <= at_ms).copied().unwrap_or(0)
     }
 
     pub fn get_party_members(&self) -> HashMap<String, PartyMember> {
