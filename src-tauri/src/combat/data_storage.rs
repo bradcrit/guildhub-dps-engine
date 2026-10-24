@@ -501,6 +501,19 @@ const BOSS_HP_KEEP_ALIVE_MS: i64 = 60_000;
 /// out of range, or left alone until it recovered).
 const RESET_RISE: u8 = 5;
 
+/// Where a Hidden Cube is from you (`hidden_cubes`), in metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CubeSpot {
+    /// How far on the ground.
+    pub metres: f32,
+    /// How far above you (below: negative).
+    pub above: f32,
+    /// How far east (west: negative) — the world's +x, right on the map.
+    pub east: f32,
+    /// How far north (south: negative) — the world's -y, up on the map.
+    pub north: f32,
+}
+
 /// A field boss's HP for the sender (`take_boss_hp`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BossHp {
@@ -1094,14 +1107,24 @@ impl DataStorage {
         }
     }
 
-    /// The Hidden Cubes in range, closest first: how far each is on the
-    /// ground and how far above you (metres, below: negative) — None while
-    /// your spot is unknown or more than `self_max_age_ms` old.
-    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<Option<(f32, f32)>> {
+    /// The Hidden Cubes in range, closest first: where each is from you —
+    /// None while your spot is unknown or more than `self_max_age_ms` old.
+    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<Option<CubeSpot>> {
         let inner = self.inner.read();
         let me = inner.self_position.filter(|(_, at)| now_ms() - at <= self_max_age_ms).map(|(pos, _)| pos);
-        let mut cubes: Vec<_> = inner.hidden_cubes.values().map(|pos| me.map(|me| (me.metres_to(pos), (pos.z - me.z) / 100.0))).collect();
-        cubes.sort_by(|a, b| a.map(|a| a.0).unwrap_or(f32::MAX).total_cmp(&b.map(|b| b.0).unwrap_or(f32::MAX)));
+        let mut cubes: Vec<_> = inner
+            .hidden_cubes
+            .values()
+            .map(|pos| {
+                me.map(|me| CubeSpot {
+                    metres: me.metres_to(pos),
+                    above: (pos.z - me.z) / 100.0,
+                    east: (pos.x - me.x) / 100.0,
+                    north: (me.y - pos.y) / 100.0,
+                })
+            })
+            .collect();
+        cubes.sort_by(|a, b| a.map_or(f32::MAX, |a| a.metres).total_cmp(&b.map_or(f32::MAX, |b| b.metres)));
         cubes
     }
 

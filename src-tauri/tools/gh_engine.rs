@@ -93,12 +93,13 @@
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
 //! since, by the mobs that left sight (`DataStorage::self_estimate`) — tens
 //! of metres off.
-//! `cubes` (`{"cubes":[{"metres","above"}]}`) on every change and once on
-//! connecting: the Hidden Cubes in range (`capture::objects`), closest first,
-//! from when the game sends one until it goes out of range, is opened or a
-//! zone load. `metres` is how far it is on the ground, `above` how far above
-//! you (below: negative), both whole metres, while your spot is at most
-//! CUBE_POS_MAX_AGE_MS old, else null.
+//! `cubes` (`{"cubes":[{"metres","above","east","north"}]}`) on every change
+//! and once on connecting: the Hidden Cubes in range (`capture::objects`),
+//! closest first, from when the game sends one until it goes out of range, is
+//! opened or a zone load. `metres` is how far it is on the ground, `above` how
+//! far above you (below: negative), both whole metres; `east` / `north` where
+//! it lies from you (west / south: negative, metres to 0.1 — up on the map is
+//! north). All while your spot is at most CUBE_POS_MAX_AGE_MS old, else null.
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -299,9 +300,14 @@ impl Engine {
             .storage
             .hidden_cubes(CUBE_POS_MAX_AGE_MS)
             .into_iter()
-            .map(|spot| {
-                let (metres, above) = spot.map_or((None, None), |(m, a)| (Some(m.round() as i32), Some(a.round() as i32)));
-                serde_json::json!({ "metres": metres, "above": above })
+            .map(|spot| match spot {
+                Some(s) => serde_json::json!({
+                    "metres": s.metres.round() as i32,
+                    "above": s.above.round() as i32,
+                    "east": (s.east * 10.0).round() / 10.0,
+                    "north": (s.north * 10.0).round() / 10.0,
+                }),
+                None => serde_json::json!({ "metres": null, "above": null, "east": null, "north": null }),
             })
             .collect();
         serde_json::json!({ "cubes": cubes }).to_string()
