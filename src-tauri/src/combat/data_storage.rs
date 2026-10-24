@@ -486,6 +486,12 @@ const IN_COMBAT_MS: i64 = 10_000;
 const SIGHT_LEARN_MAX_AGE_MS: i64 = 1_000;
 /// …and this far (cm) at most: farther, its spot was old.
 const SIGHT_MAX_RADIUS: f32 = 15_000.0;
+/// A mob in sight farther than this (m) is measured from a spot of yours that
+/// is wrong (another map's, a guess gone astray) — no distance then.
+const MOB_METRES_MAX: f32 = 500.0;
+/// A map load drops your spot unless it was told this shortly before (ms): a
+/// teleport's spot may come just ahead of the load that names the new map.
+const SPOT_BEFORE_LOAD_MS: i64 = 3_000;
 /// The last this many distances per code; the median counts.
 const SIGHT_KEPT: usize = 15;
 /// A mob leaving sight farther than its distance plus this (cm) from your
@@ -1086,7 +1092,9 @@ impl DataStorage {
             *count += 1;
             if let (Some(me), Some(pos)) = (me, inner.entity_positions.get(entity)) {
                 let metres = me.metres_to(pos);
-                *nearest = Some(nearest.map_or(metres, |n| n.min(metres)));
+                if metres <= MOB_METRES_MAX {
+                    *nearest = Some(nearest.map_or(metres, |n| n.min(metres)));
+                }
             }
         }
         mobs
@@ -2622,6 +2630,12 @@ impl DataStorage {
         inner.entity_positions.clear();
         inner.self_guess = None;
         inner.hidden_cubes.clear();
+        // Another map: its spots aren't the old one's — distances from your
+        // spot there came out kilometres (the pet tracker's "14686 m").
+        if from != Some(map_id) && inner.self_position.is_some_and(|(_, at)| now_ms() - at > SPOT_BEFORE_LOAD_MS) {
+            inner.self_position = None;
+            inner.followed = None;
+        }
         inner.zone_generation += 1;
         if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
             inner.instance_generation += 1;
@@ -3699,6 +3713,31 @@ mod tests {
         storage.set_followed(131_000.0, 2_000.0, 1_000);
         storage.note_spotted(Spotted::You(spot(131_500.0, 2_500.0)));
         assert_eq!(at(73_500), Some(((131_500, 2_500), Some(500), false)));
+        crate::clock::set_override(None);
+    }
+
+    #[test]
+    fn another_map_drops_your_spot_from_the_old_one() {
+        let storage = DataStorage::new();
+        let spot = |x: f32, y: f32| Position { x, y, z: 15_000.0 };
+        crate::clock::set_override(Some(0));
+        storage.note_map_load(1010);
+        storage.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
+        // The same map again (a teleport within it): kept.
+        crate::clock::set_override(Some(10_000));
+        storage.note_map_load(1010);
+        assert!(storage.self_position().is_some());
+        // Another map: gone — unless told just before the load (the teleport's own spot).
+        storage.note_map_load(2020);
+        assert!(storage.self_position().is_none());
+        storage.note_spotted(Spotted::You(spot(-50_000.0, 7_000.0)));
+        crate::clock::set_override(Some(11_000));
+        storage.note_map_load(3030);
+        assert_eq!(storage.self_position().map(|(p, _)| p.x), Some(-50_000.0));
+        // A mob kilometres off is measured from a wrong spot: no distance.
+        storage.append_mob(5, 777);
+        storage.note_spotted(Spotted::Entity(5, spot(1_500_000.0, 7_000.0)));
+        assert_eq!(storage.mobs_in_sight(60_000).get(&777), Some(&(1, None)));
         crate::clock::set_override(None);
     }
 
