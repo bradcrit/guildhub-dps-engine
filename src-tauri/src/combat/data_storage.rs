@@ -471,13 +471,15 @@ const IN_COMBAT_MS: i64 = 10_000;
 /// Your spot past its telling (`self_estimate`): moved toward the middle of
 /// what's in sight, all the way once it is this old… The game tells your spot
 /// only with a fight, a buff or a teleport; off those, the middle of what's in
-/// sight was half as far from you as your last spot (positions_scan, two
-/// captures of 2026-10-24: 26 gaps, median 28 m against 64 m, p90 62 m
-/// against 128 m). Nothing sharper came of the packets: no record carries your
-/// spot in between, and what leaves sight isn't told.
+/// sight near you is closer to you than your last spot (positions_scan).
+/// Nothing sharper came of the packets: no record carries your spot in
+/// between, and what leaves sight isn't told — the middle of everything
+/// "in sight" drifted hundreds of metres back along a flight.
 const SELF_GUESS_FULL_MS: i64 = 5_000;
-/// …from this many spots in sight at least…
+/// …from this many spots in sight at least, those this far (cm) at most
+/// from where you can be by now (most spawns come into sight within ~75 m)…
 const SELF_GUESS_MIN_SPOTS: usize = 3;
+const SELF_GUESS_SIGHT: f32 = 8_000.0;
 /// …but never farther from your spot than a mount gets since (cm/ms; 304 m
 /// in ~12 s seen).
 const SELF_GUESS_SPEED: f32 = 2.5;
@@ -513,28 +515,24 @@ fn push_boss_event(inner: &mut Inner, event: BossEvent) {
 
 /// See `DataStorage::self_estimate`.
 fn self_estimate(inner: &Inner, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
-    let told = inner.self_position.map(|(pos, at)| (pos, now_ms() - at)).filter(|(_, age)| *age <= self_max_age_ms);
-    let spots = &inner.entity_positions;
-    let middle = (spots.len() >= SELF_GUESS_MIN_SPOTS).then(|| {
-        let n = spots.len() as f32;
-        let (x, y) = spots.values().fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
-        Position { x: x / n, y: y / n, z: told.map_or(spots.values().map(|p| p.z).sum::<f32>() / n, |(me, _)| me.z) }
-    });
-    match (told, middle) {
-        (Some((me, age)), Some(middle)) => {
-            let toward = (age as f32 / SELF_GUESS_FULL_MS as f32).min(1.0);
-            let mut guess = Position { x: me.x + (middle.x - me.x) * toward, y: me.y + (middle.y - me.y) * toward, z: me.z };
-            let (away, reach) = (me.metres_to(&guess) * 100.0, 500.0 + age as f32 * SELF_GUESS_SPEED);
-            if away > reach {
-                guess.x = me.x + (guess.x - me.x) * reach / away;
-                guess.y = me.y + (guess.y - me.y) * reach / away;
-            }
-            Some((guess, Some(age), toward > 0.0))
-        }
-        (Some((me, age)), None) => Some((me, Some(age), false)),
-        (None, Some(middle)) => Some((middle, None, true)),
-        (None, None) => None,
+    let (me, age) = inner.self_position.map(|(pos, at)| (pos, now_ms() - at)).filter(|(_, age)| *age <= self_max_age_ms)?;
+    let reach = 500.0 + age as f32 * SELF_GUESS_SPEED;
+    // Only what you can have in sight from where you can be by now: what
+    // left sight is never told, and stays behind when you travel.
+    let near: Vec<&Position> = inner.entity_positions.values().filter(|p| me.metres_to(p) * 100.0 <= reach + SELF_GUESS_SIGHT).collect();
+    if near.len() < SELF_GUESS_MIN_SPOTS {
+        return Some((me, Some(age), false));
     }
+    let n = near.len() as f32;
+    let (x, y) = near.iter().fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
+    let toward = (age as f32 / SELF_GUESS_FULL_MS as f32).min(1.0);
+    let mut guess = Position { x: me.x + (x / n - me.x) * toward, y: me.y + (y / n - me.y) * toward, z: me.z };
+    let away = me.metres_to(&guess) * 100.0;
+    if away > reach {
+        guess.x = me.x + (guess.x - me.x) * reach / away;
+        guess.y = me.y + (guess.y - me.y) * reach / away;
+    }
+    Some((guess, Some(age), toward > 0.0))
 }
 
 pub struct DataStorage {
@@ -2194,6 +2192,15 @@ impl DataStorage {
         }
     }
 
+    /// `id` left sight (`42 36` flag 1): no longer among the mobs in sight,
+    /// its spot no longer counts (`self_estimate`). It comes back under the
+    /// same id.
+    pub fn note_out_of_sight(&self, id: i32) {
+        let mut inner = self.inner.write();
+        inner.mobs_in_sight.remove(&id);
+        inner.entity_positions.remove(&id);
+    }
+
     pub fn is_entity_dead(&self, entity_id: i32) -> bool {
         self.inner.read().dead_entity_ids.contains(&entity_id)
     }
@@ -3477,13 +3484,20 @@ mod tests {
         assert_eq!(x_at(0), Some((100_000, Some(0), false)));
         assert_eq!(x_at(2_500), Some((105_333, Some(2_500), true)));
         assert_eq!(x_at(5_000), Some((110_667, Some(5_000), true)));
-        // Too old to tell from: the middle alone.
-        assert_eq!(x_at(61_000), Some((110_667, None, true)));
-        // Never farther than a mount gets since: 5 m + 2.5 m per second.
+        // Too old to tell from: nothing.
+        assert_eq!(x_at(61_000), None);
+        // What's out of sight from where you can be is left out: left behind.
         storage.note_spotted(Spotted::Entity(4, spot(1_000_000.0, 0.0)));
-        crate::clock::set_override(Some(1_000));
+        assert_eq!(x_at(5_000), Some((110_667, Some(5_000), true)));
+        // Never farther than a mount gets since: 5 m + 2.5 m per second.
+        crate::clock::set_override(Some(10_000));
+        storage.note_spotted(Spotted::You(spot(95_000.0, 0.0)));
+        assert_eq!(x_at(15_000), Some((95_000 + 500 + 12_500, Some(5_000), true)));
+        // Out of sight (`42 36` flag 1): no longer counted.
+        storage.note_out_of_sight(3);
+        crate::clock::set_override(Some(0));
         storage.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
-        assert_eq!(x_at(6_000), Some((100_000 + 500 + 12_500, Some(5_000), true)));
+        assert_eq!(x_at(5_000), Some((100_000, Some(5_000), false)));
         crate::clock::set_override(None);
     }
 

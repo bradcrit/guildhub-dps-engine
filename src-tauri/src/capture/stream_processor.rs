@@ -74,6 +74,8 @@ pub struct StreamProcessor {
 /// The `42 36` flag of an entity leaving the world, a spirit unsummoned among
 /// others (197 of the 370 in a 2026-10-06 capture were linked spirits).
 const DESPAWN_FLAG: i32 = 7;
+/// The `42 36` flag of an entity leaving sight (see `parse_death_packet`).
+const OUT_OF_SIGHT_FLAG: i32 = 1;
 
 impl StreamProcessor {
     pub fn new(data_storage: Arc<DataStorage>, skill_lookup: Arc<SkillLookup>, npc_lookup: Arc<NpcLookup>) -> Self {
@@ -524,8 +526,10 @@ impl StreamProcessor {
         }
         pos += skip_info.length as usize;
 
-        // Death flag: 1 = zone-init (entity loaded dead), 3 = combat death,
-        // 7 = gone from the world.
+        // Death flag: 1 = out of sight, 3 = combat death, 7 = gone from the
+        // world. (Upstream read 1 as "loaded dead"; in two captures of
+        // 2026-10-24 none of 728 was dead, 53 came back into sight under the
+        // same id, and they left ~25–75 m from you, where spawns come in.)
         let flag_info = read_varint(packet, pos);
         if flag_info.length <= 0 {
             return;
@@ -539,6 +543,9 @@ impl StreamProcessor {
         // spawn) a summon's spawn mask can read as flag 7.
         if flag_info.value == DESPAWN_FLAG && packet[offset] == 0x42 {
             self.data_storage.note_despawn(entity_id);
+        }
+        if flag_info.value == OUT_OF_SIGHT_FLAG && packet[offset] == 0x42 {
+            self.data_storage.note_out_of_sight(entity_id);
         }
     }
 

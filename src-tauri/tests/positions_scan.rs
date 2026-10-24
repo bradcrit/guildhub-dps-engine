@@ -5,9 +5,13 @@
 //! Prints:
 //! - every frame type not read for spots that holds three floats where you
 //!   could have been then (between the spots told before and after, at
-//!   running speed), by offset â€” counted only in gaps of GAP_MS and more;
-//! - how far from you entities come into sight and leave it;
-//! - how far the middle of everything in sight is from you.
+//!   running speed), by offset — counted only in gaps of GAP_MS and more;
+//! - how far from you entities come into sight and leave it, and `42 36` by flag;
+//! - how far guesses of your spot were off, at each spot told after a gap —
+//!   the engine's own (`DataStorage::self_estimate`) among them.
+//! A2_SCAN_TIMELINE=1: each second, your spot as told and as guessed.
+//! A2_SCAN_DUMP="29 37,…": those frames against your path. A2_SCAN_DEBUG=1:
+//! each engine guess with the spot before it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -48,6 +52,12 @@ struct Scan {
     last_kind: HashMap<i32, (String, i64)>,
     /// `42 36` by its flag: how far the entity was from you.
     gone: BTreeMap<u8, Vec<f32>>,
+    /// Each spot of yours told after a gap: how old the one before was, how
+    /// far the engine's guess was off, how far the spot before was off.
+    engine: Vec<(i64, f32, f32)>,
+    /// `42 36` by its flag: how many, of them dead by then, of them spawned again (`41 36`) later.
+    flags: BTreeMap<u8, (u32, u32, u32)>,
+    flag_gone: HashMap<i32, u8>,
 }
 
 fn floats(packet: &[u8], i: usize) -> Option<Position> {
@@ -60,7 +70,7 @@ fn floats(packet: &[u8], i: usize) -> Option<Position> {
 fn histogram(name: &str, values: &mut [f32]) {
     values.sort_by(f32::total_cmp);
     let at = |q: f32| values.get(((values.len() as f32 - 1.0) * q) as usize).copied().unwrap_or(f32::NAN);
-    eprintln!("{name}: {} â€” p10 {:.0} m, p25 {:.0} m, p50 {:.0} m, p75 {:.0} m, p90 {:.0} m", values.len(), at(0.1), at(0.25), at(0.5), at(0.75), at(0.9));
+    eprintln!("{name}: {} — p10 {:.0} m, p25 {:.0} m, p50 {:.0} m, p75 {:.0} m, p90 {:.0} m", values.len(), at(0.1), at(0.25), at(0.5), at(0.75), at(0.9));
     let mut buckets = BTreeMap::new();
     for v in values.iter() {
         *buckets.entry(((*v / 10.0) as u32 * 10).min(200)).or_insert(0u32) += 1;
@@ -100,6 +110,27 @@ fn scan_for_your_spot() {
                     scan.fixes.push((now, pos));
                 }
                 Some(Spotted::Entity(id, pos)) if Some(id as i64) == me_id => {
+                    // The engine's own guess, just before this spot is told (the tap runs first).
+                    if let Some((before, Some(age), _)) = storage.self_estimate(60_000) {
+                        if age >= GAP_MS && std::env::var_os("A2_SCAN_DEBUG").is_some() {
+                            let p0 = storage.self_position().unwrap().0;
+                            let reach = 500.0 + age as f32 * SPEED;
+                            let near: Vec<_> = scan.sight.values().filter(|(p, _)| p0.metres_to(p) * 100.0 <= reach + 8_000.0).collect();
+                            eprintln!(
+                                "age {age} guess {:.0}/{:.0} off {:.0} m; spot before {:.0}/{:.0}; test near {} of {}",
+                                before.x / 100.0,
+                                before.y / 100.0,
+                                before.metres_to(&pos),
+                                p0.x / 100.0,
+                                p0.y / 100.0,
+                                near.len(),
+                                scan.sight.len()
+                            );
+                        }
+                        if age >= GAP_MS {
+                            scan.engine.push((age, before.metres_to(&pos), storage.self_position().map_or(f32::NAN, |(p, _)| p.metres_to(&pos))));
+                        }
+                    }
                     scan.fixes.push((now, pos));
                     let sight = scan.sight.values().copied().collect();
                     scan.at_fixes.push((now, pos, sight));
@@ -117,8 +148,16 @@ fn scan_for_your_spot() {
             if entity.length > 0 && scan.sight.contains_key(&entity.value) {
                 scan.last_kind.insert(entity.value, (kind.clone(), now));
             }
+            if op == [0x41, 0x36] && entity.length > 0 && scan.flag_gone.contains_key(&entity.value) {
+                let flag = scan.flag_gone[&entity.value];
+                scan.flags.entry(flag).or_default().2 += 1;
+            }
             if op == [0x42, 0x36] && entity.length > 0 {
                 let flag = packet.get(at + 2 + entity.length as usize + 1).copied().unwrap_or(0xFF);
+                let e = scan.flags.entry(flag).or_default();
+                e.0 += 1;
+                e.1 += storage.is_entity_dead(entity.value) as u32;
+                scan.flag_gone.insert(entity.value, flag);
                 if let (Some((pos, _)), Some(me)) = (scan.sight.remove(&entity.value), fresh) {
                     scan.gone.entry(flag).or_default().push(me.metres_to(&pos));
                 }
@@ -158,6 +197,19 @@ fn scan_for_your_spot() {
             continue;
         }
         last_second = p.captured_at_ms / 1000;
+        // A2_SCAN_TIMELINE: each second, your spot as told and as guessed.
+        if std::env::var_os("A2_SCAN_TIMELINE").is_some() {
+            let clock = chrono::DateTime::from_timestamp_millis(p.captured_at_ms).unwrap().with_timezone(&chrono::Local);
+            let told = storage.self_position();
+            let guess = storage.self_estimate(60_000);
+            eprintln!(
+                "{} told {} guess {} {}",
+                clock.format("%H:%M:%S"),
+                told.map_or("-".into(), |(p, age)| format!("({:>7.0}, {:>7.0}, z {:>6.0}) {:>6} ms", p.x / 100.0, p.y / 100.0, p.z / 100.0, age)),
+                guess.map_or("-".into(), |(p, _, g)| format!("({:>7.0}, {:>7.0}){}", p.x / 100.0, p.y / 100.0, if g { " guessed" } else { "" })),
+                told.zip(guess).map_or(String::new(), |((t, _), (g, ..))| format!("{:.0} m off the told", t.metres_to(&g))),
+            );
+        }
         match storage.self_position() {
             Some((me, age)) if age <= FRESH_MS => {
                 fresh_s += 1;
@@ -327,6 +379,10 @@ fn scan_for_your_spot() {
     for (name, values) in errors.iter_mut() {
         histogram(name, values);
     }
+    let (mut guessed, mut told): (Vec<f32>, Vec<f32>) = scan.engine.iter().map(|(_, g, t)| (*g, *t)).unzip();
+    histogram("engine: its guess (self_estimate)", &mut guessed);
+    histogram("engine: the spot before", &mut told);
+    eprintln!("42 36 by flag (flag: how many / dead by then / spawned again later): {:?}", scan.flags);
     for (flag, values) in scan.gone.iter_mut() {
         histogram(&format!("42 36 flag {flag}"), values);
     }
