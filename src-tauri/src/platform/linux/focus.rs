@@ -120,6 +120,21 @@ function follow(w) {
     else if (widget(w)) {
         fresh.push(w);
         if (fresh.length > 32) fresh.shift();
+    } else {
+        // Another of the meter's windows the meter showed on its own (back
+        // with the game after hiding, a plugin showing itself): KWin takes it
+        // for a new window and activates it, so it took the focus from the
+        // game (2.0.76, now that hidden windows are unmapped). It hands the
+        // focus back, as an icon does; one the player opened keeps it.
+        callDBus(SERVICE, PATH, IFACE, "Quiet", String(w.caption), function (answer) {
+            if (String(answer) !== "true") return;
+            var now = workspace.activeWindow || workspace.activeClient;
+            if (now === w && lastOther && !lastOther.deleted) activate(lastOther);
+            else {
+                fresh.push(w);
+                if (fresh.length > 32) fresh.shift();
+            }
+        });
     }
     var done = w.interactiveMoveResizeFinished || w.clientFinishUserMovedResized;
     if (done) done.connect(function () { remember(w); });
@@ -202,6 +217,21 @@ static ACTIVE: AtomicU8 = AtomicU8::new(0);
 /// this does not recognise must not leave the meter hidden for good.
 static SEEN_GAME: AtomicBool = AtomicBool::new(false);
 
+/// The meter's windows it is showing on its own, by title, and since when:
+/// they hand the focus back as they appear (`Focus::quiet`).
+static QUIET: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    std::sync::LazyLock::new(Default::default);
+/// How long a quiet show waits for its window to appear.
+const QUIET_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The meter is showing the window titled `title` on its own, not because the
+/// player asked: it is not to take the focus (`Focus::quiet`).
+pub fn note_quiet_show(title: &str) {
+    if PLACING.load(Ordering::Relaxed) {
+        QUIET.lock().unwrap_or_else(|p| p.into_inner()).insert(title.to_string(), std::time::Instant::now());
+    }
+}
+
 /// The connection that serves `Focus`; dropped, the service would go away.
 static CONNECTION: OnceLock<zbus::blocking::Connection> = OnceLock::new();
 
@@ -278,6 +308,14 @@ impl Focus {
         {
             (places.save)(&caption, (x, y, w, h));
         }
+    }
+
+    /// Whether the window titled `caption`, just appeared, was shown by the
+    /// meter on its own (`note_quiet_show`), so it gives the focus back.
+    fn quiet(&self, caption: String) -> bool {
+        let mut quiet = QUIET.lock().unwrap_or_else(|p| p.into_inner());
+        quiet.retain(|_, at| at.elapsed() < QUIET_FOR);
+        quiet.remove(&caption).is_some()
     }
 
     /// Where one of the meter's windows belongs, `"x,y,width,height"`, or ""

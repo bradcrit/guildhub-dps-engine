@@ -87,11 +87,42 @@ pub fn is_closed(label: &str) -> bool {
     closed().lock().unwrap_or_else(|p| p.into_inner()).contains(label)
 }
 
-/// The part of each widget that takes the mouse, as its page reported it
-/// (`a2.widget.area`): CSS px and the page's scale. Unlocked, clicks
-/// elsewhere in its window go through (Linux, by an input region), so icons
-/// set close together don't catch each other's drags.
-type Area = (f64, f64, f64, f64, f64);
+/// The parts of each widget that take the mouse, as its page reported them
+/// (`a2.widget.area`, `a2.widget.areas`): rectangles in CSS px, and the
+/// page's scale. Unlocked, clicks elsewhere in its window go through (by an
+/// input region on Linux, a window region on Windows), so icons set close
+/// together don't catch each other's drags, and the room a widget keeps for
+/// more icons doesn't catch the game's clicks.
+type Area = (Vec<(f64, f64, f64, f64)>, f64);
+
+/// Most rectangles one widget may report.
+const MAX_AREA_RECTS: usize = 64;
+
+/// One rectangle of a widget's area, as its page sends it.
+#[derive(serde::Deserialize)]
+pub struct AreaRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// A widget's reported area, checked: every rectangle within the window's
+/// possible size, at most `MAX_AREA_RECTS`, and a sane scale.
+fn checked_area(rects: &[AreaRect], scale: f64) -> Result<Area, String> {
+    let ok = |v: f64| v.is_finite() && (0.0..=4000.0).contains(&v);
+    if rects.len() > MAX_AREA_RECTS || !(scale.is_finite() && scale > 0.0 && scale <= 8.0) {
+        return Err("not an area".into());
+    }
+    let mut out = Vec::with_capacity(rects.len());
+    for r in rects {
+        if !(ok(r.x) && ok(r.y) && ok(r.width) && ok(r.height)) {
+            return Err("not an area".into());
+        }
+        out.push((r.x, r.y, r.width, r.height));
+    }
+    Ok((out, scale))
+}
 fn areas() -> &'static Mutex<HashMap<String, Area>> {
     static AREAS: std::sync::OnceLock<Mutex<HashMap<String, Area>>> = std::sync::OnceLock::new();
     AREAS.get_or_init(Mutex::default)
@@ -105,11 +136,11 @@ fn areas() -> &'static Mutex<HashMap<String, Area>> {
 fn apply_lock(window: &tauri::WebviewWindow, locked: bool) {
     // A screenshot tool in front: clicks go through, whatever the lock.
     let locked = locked || crate::app::screenshot_tool_in_front();
-    let area = areas().lock().unwrap_or_else(|p| p.into_inner()).get(window.label()).copied();
-    let applied = match (locked, area) {
-        (true, _) => crate::platform::window::click_through_except(window, true, None),
-        (false, Some(area)) => crate::platform::window::click_through_except(window, true, Some(area)),
-        (false, None) => crate::platform::window::click_through_except(window, false, None),
+    let area = areas().lock().unwrap_or_else(|p| p.into_inner()).get(window.label()).cloned();
+    let applied = match (locked, &area) {
+        (true, _) => crate::platform::window::widget_click_through(window, true, None),
+        (false, Some((rects, scale))) => crate::platform::window::widget_click_through(window, true, Some((rects, *scale))),
+        (false, None) => crate::platform::window::widget_click_through(window, false, None),
     };
     if !applied && !cfg!(target_os = "linux") {
         let _ = window.set_ignore_cursor_events(locked);
@@ -309,16 +340,30 @@ pub fn place_beside_others(app: &tauri::AppHandle, label: &str, place_of: impl F
         .or_else(|| beside_left(app, &id))
 }
 
-/// The part of the calling widget that takes the mouse while unlocked (CSS
-/// px from its top left, and the page's scale), from `a2.widget.area`.
+/// The parts of the calling widget that take the mouse while unlocked (CSS
+/// px from its top left, and the page's scale): `rects`, from
+/// `a2.widget.areas` (meter 2.0.77 on), or one rectangle as `x`, `y`,
+/// `width`, `height`, from `a2.widget.area`.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn plugin_widget_area(app: tauri::AppHandle, window: tauri::WebviewWindow, x: f64, y: f64, width: f64, height: f64, scale: f64) -> Result<(), String> {
+pub fn plugin_widget_area(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    rects: Option<Vec<AreaRect>>,
+    x: Option<f64>,
+    y: Option<f64>,
+    width: Option<f64>,
+    height: Option<f64>,
+    scale: f64,
+) -> Result<(), String> {
     let (id, _) = widget_of(&window)?;
-    let ok = |v: f64| v.is_finite() && (0.0..=4000.0).contains(&v);
-    if !(ok(x) && ok(y) && ok(width) && ok(height) && scale.is_finite() && scale > 0.0 && scale <= 8.0) {
-        return Err("not an area".into());
-    }
-    areas().lock().unwrap_or_else(|p| p.into_inner()).insert(window.label().to_string(), (x, y, width, height, scale));
+    let rects = match (rects, x, y, width, height) {
+        (Some(rects), ..) => rects,
+        (None, Some(x), Some(y), Some(width), Some(height)) => vec![AreaRect { x, y, width, height }],
+        _ => return Err("not an area".into()),
+    };
+    let area = checked_area(&rects, scale)?;
+    areas().lock().unwrap_or_else(|p| p.into_inner()).insert(window.label().to_string(), area);
     apply_lock(&window, is_locked(&app, &id));
     Ok(())
 }
@@ -504,6 +549,26 @@ pub fn note_moved(app: &tauri::AppHandle, label: &str, at: tauri::PhysicalPositi
 
 #[cfg(test)]
 mod tests {
+    use super::{checked_area, AreaRect, MAX_AREA_RECTS};
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> AreaRect {
+        AreaRect { x, y, width, height }
+    }
+
+    #[test]
+    fn a_widget_area_is_its_rectangles_each_checked() {
+        let (rects, scale) = checked_area(&[rect(0.0, 0.0, 40.0, 40.0), rect(48.0, 0.0, 40.0, 40.0)], 1.5).unwrap();
+        assert_eq!(rects, vec![(0.0, 0.0, 40.0, 40.0), (48.0, 0.0, 40.0, 40.0)]);
+        assert_eq!(scale, 1.5);
+        assert!(checked_area(&[], 1.0).unwrap().0.is_empty(), "nothing drawn: no rectangle");
+        assert!(checked_area(&[rect(0.0, 0.0, f64::NAN, 4.0)], 1.0).is_err());
+        assert!(checked_area(&[rect(-1.0, 0.0, 4.0, 4.0)], 1.0).is_err());
+        assert!(checked_area(&[rect(0.0, 0.0, 5000.0, 4.0)], 1.0).is_err());
+        assert!(checked_area(&[rect(0.0, 0.0, 4.0, 4.0)], 0.0).is_err());
+        let many: Vec<_> = (0..=MAX_AREA_RECTS).map(|i| rect(i as f64, 0.0, 1.0, 1.0)).collect();
+        assert!(checked_area(&many, 1.0).is_err());
+    }
+
     use super::*;
 
     #[test]

@@ -63,7 +63,9 @@
 //   a2.widget.area({ x, y, width, height })    the part of the page that takes the mouse (CSS px);
 //                                              elsewhere clicks go through to what is under the
 //                                              window, so widgets set close together don't catch
-//                                              each other's drags (Linux; meter 2.0.70 on)
+//                                              each other's drags (Linux, meter 2.0.70 on; Windows 2.0.77)
+//   a2.widget.areas([{ x, y, width, height }, ...])  the same as several parts (up to 64), so the
+//                                              gaps between them let clicks through too (meter 2.0.77 on)
 //   a2.widget.post(data)                       to the plugin's page ("widget-message")
 //   a2.on("widget", (data) => ...)             what the plugin sent it
 //   a2.on("locked", (locked) => ...)           whether the widgets are locked, at start and on change
@@ -188,6 +190,7 @@
       name: new URLSearchParams(location.search).get("name") || "",
       drag: () => call("widget.drag", []),
       area: (r) => call("widget.area", [r || {}]),
+      areas: (rs) => call("widget.areas", [Array.isArray(rs) ? rs : []]),
       post: (data) => call("widget.post", [data]),
     }),
     ready: () => call("ready", []),

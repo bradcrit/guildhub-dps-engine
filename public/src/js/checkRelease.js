@@ -97,18 +97,25 @@
   let pending = null;
 
   // At start nothing pops up: an update this install can take shows the
-  // green button in the meter's title (`onAvailable`), which asks.
-  const start = (onAvailable) =>
-    setTimeout(async () => {
+  // green button in the meter's title (`onAvailable`), which asks. Then
+  // again every 6 hours, for a meter left running for days.
+  const RECHECK_MS = 6 * 60 * 60 * 1000;
+  const start = (onAvailable) => {
+    const run = async () => {
       try {
-        if (once) return;
-        once = true;
         const found = await check({ ask: false });
         if (found.state === "offer") onAvailable?.(found.latest);
       } catch (e) {
         console.error("[A2Tools] Update check error:", e);
       }
+    };
+    setTimeout(() => {
+      if (once) return;
+      once = true;
+      run();
+      setInterval(run, RECHECK_MS);
     }, START_DELAY);
+  };
 
   // The button: the update window for the update found at start. True when
   // it is installing.

@@ -105,3 +105,14 @@ pub fn give_front_back(_window: &tauri::WebviewWindow, _before: Option<isize>) {
 pub fn tray_supported() -> bool {
     false
 }
+
+/// Whether the click-through lock works by an input region: not here.
+pub fn click_through_by_region() -> bool {
+    false
+}
+
+/// A plugin widget's click-through by parts: not here (the window's own
+/// cursor setting does it whole).
+pub fn widget_click_through(_window: &tauri::WebviewWindow, _ignore: bool, _keep: Option<(&[(f64, f64, f64, f64)], f64)>) -> bool {
+    false
+}

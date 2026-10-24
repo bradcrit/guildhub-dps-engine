@@ -1062,26 +1062,45 @@ pub fn find_updates_at_start(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(UPDATE_ALERT_DELAY).await;
-        let Ok(host) = host(&app) else { return };
-        let Some(state) = app.try_state::<AppState>() else { return };
-        let catalog = match catalog::fetch(&state.http).await {
-            Ok(catalog) => catalog,
-            Err(e) => {
-                tracing::info!("Plugins: update check at start failed: {e}");
-                return;
-            }
-        };
-        let declined: HashMap<String, String> =
-            state.settings.get(DECLINED_UPDATES_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let updates = updates_to_offer(newer_entries(catalog, &host), &declined);
-        if updates.is_empty() {
+        // At start, then every 6 hours for a meter left running for days.
+        // Each check replaces what the title offers: updates installed from
+        // Settings meanwhile drop out of it.
+        loop {
+            find_updates(&app).await;
+            tokio::time::sleep(UPDATE_RECHECK).await;
+        }
+    });
+}
+
+/// How often the plugin updates are looked for again after the first time.
+#[cfg(feature = "online")]
+const UPDATE_RECHECK: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Look for plugin updates once, and have the meter's title offer them.
+#[cfg(feature = "online")]
+async fn find_updates(app: &tauri::AppHandle) {
+    let Ok(host) = host(app) else { return };
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let catalog = match catalog::fetch(&state.http).await {
+        Ok(catalog) => catalog,
+        Err(e) => {
+            tracing::info!("Plugins: update check failed: {e}");
             return;
         }
+    };
+    let declined: HashMap<String, String> =
+        state.settings.get(DECLINED_UPDATES_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let updates = updates_to_offer(newer_entries(catalog, &host), &declined);
+    if !updates.is_empty() {
         let names = updates.iter().map(|(u, _)| format!("{} {} → {}", u.id, u.from, u.to)).collect::<Vec<_>>().join(", ");
         tracing::info!("Plugins: updates available: {names}");
-        *pending_updates().lock().unwrap_or_else(|p| p.into_inner()) = updates;
-        tell_pending(&app);
-    });
+    }
+    let had = !pending_updates().lock().unwrap_or_else(|p| p.into_inner()).is_empty();
+    if updates.is_empty() && !had {
+        return;
+    }
+    *pending_updates().lock().unwrap_or_else(|p| p.into_inner()) = updates;
+    tell_pending(app);
 }
 
 /// The updates found at start and not yet offered.
@@ -1285,6 +1304,13 @@ pub fn plugin_remove_folder(app: tauri::AppHandle, path: String) -> Result<Plugi
 
 /// Remember a plugin window's state for the next start (`None`: closed).
 fn remember_window(app: &tauri::AppHandle, id: &str, state: Option<&str>) {
+    // The plugin hears it ("visible"): its page stays loaded while hidden,
+    // and the browser's own visibility doesn't change for a hidden window or
+    // dock tab. Event Timers' anchor frame stayed up with the window hidden
+    // on its Settings tab (2026-10-24).
+    if let Some(shown) = state.and_then(|s| match s { "shown" => Some(true), "hidden" => Some(false), _ => None }) {
+        emit_plugin(app, id, serde_json::json!({ "plugin": id, "event": "visible", "data": shown }));
+    }
     let Some(settings) = app.try_state::<AppState>() else { return };
     let mut windows: serde_json::Map<String, Value> =
         settings.settings.get(WINDOWS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -1602,7 +1628,9 @@ pub fn plugin_window(app: tauri::AppHandle, window: tauri::WebviewWindow, plugin
             return Ok(());
         }
         remember_window(&app, &id, Some(if visible { "shown" } else { "hidden" }));
-        dock::sync(&app, None);
+        // Shown: on its own tab (a widget double-clicked opened the dock on
+        // whichever tab was open before).
+        dock::sync(&app, visible.then_some(id.as_str()));
         return Ok(());
     }
     // Hidden in place where the window manager would place it anew on
@@ -1709,6 +1737,7 @@ pub fn plugin_hello(app: tauri::AppHandle, window: tauri::WebviewWindow, plugin:
         "character": character,
         "language": language,
         "theme": plugin_theme(&app),
+        "visible": window_shown(&app, &id),
         "reviewed": reviewed,
         "game": crate::platform::window_detector::find_aion2_window(),
         "ping": app.try_state::<AppState>().and_then(|s| s.ping_tracker.current_ping_ms()),
@@ -1729,6 +1758,13 @@ pub fn plugin_debug_frame(app: tauri::AppHandle, hex: String) -> Result<(), Stri
         .map_err(|e| e.to_string())?;
     host(&app)?.on_frame(&app, &bytes);
     Ok(())
+}
+
+/// Whether plugin `id`'s window (or dock tab) is shown, as it was left.
+fn window_shown(app: &tauri::AppHandle, id: &str) -> bool {
+    let windows: serde_json::Map<String, Value> =
+        app.try_state::<AppState>().and_then(|s| s.settings.get(WINDOWS_KEY)).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    windows.get(id).and_then(Value::as_str) != Some("hidden")
 }
 
 /// Where the Settings colours plugin windows take are kept.

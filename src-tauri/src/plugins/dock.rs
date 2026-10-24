@@ -125,13 +125,12 @@ pub fn sync(app: &tauri::AppHandle, focus: Option<&str>) {
         // Built off the calling thread: on Windows, building a window from a
         // synchronous command deadlocks.
         let app = app.clone();
-        let focus = focus.map(str::to_string);
+        // The tab to open: the page asks for it when it starts (`dock_hello`),
+        // as an event sent now would arrive before the page listens.
+        *first_focus().lock().unwrap_or_else(|p| p.into_inner()) = focus.map(str::to_string);
         tauri::async_runtime::spawn(async move {
             if let Err(e) = build(&app, visible) {
                 tracing::info!("Plugins: the dock could not open: {e}");
-            }
-            if let Some(id) = focus {
-                let _ = app.emit_to(LABEL, "dock-focus", id);
             }
         });
         return;
@@ -192,7 +191,16 @@ pub fn dock_hello(app: tauri::AppHandle) -> Value {
         app.try_state::<AppState>().and_then(|s| s.settings.get("dpsMeter.language")).unwrap_or_else(|| "en".into()),
     );
     hello["theme"] = super::plugin_theme(&app);
+    if let Some(id) = first_focus().lock().unwrap_or_else(|p| p.into_inner()).take() {
+        hello["focus"] = Value::String(id);
+    }
     hello
+}
+
+/// The tab a dock being built is to open on (`sync`, read by `dock_hello`).
+fn first_focus() -> &'static std::sync::Mutex<Option<String>> {
+    static FOCUS: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+    FOCUS.get_or_init(Default::default)
 }
 
 /// Fold the dock to its tab strip, `height` CSS px tall, or unfold it to the

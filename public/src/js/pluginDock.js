@@ -308,6 +308,8 @@
     setLabel(document.querySelector(".pluginSettings"), t("pluginSettings", "Plugin settings"));
     setLabel(document.querySelector(".pluginClose"), t("close", "Hide the dock (the plugins keep running)"));
     applyLayout(hello);
+    // Built to show one plugin (a widget double-clicked): on its tab.
+    if (typeof hello.focus === "string" && docked.has(hello.focus)) activate(hello.focus);
     try { window.lucide?.createIcons(); } catch {}
     if (prefs.folded) setFolded(true);
   }).catch((e) => {

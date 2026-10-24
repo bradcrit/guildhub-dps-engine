@@ -190,6 +190,8 @@
       const out = [["language", hello.language || "en"], ["theme", hello.theme], ["compact", compact]];
       if (hello.character && allowed("events:character")) out.push(["character", hello.character]);
       if (typeof hello.game === "boolean") out.push(["game", { running: hello.game }]);
+      // Its window (or dock tab) shown or hidden (meter 2.0.77 on).
+      if (typeof hello.visible === "boolean") out.push(["visible", hello.visible]);
       // The ping to the game server (meter 2.0.73 on); null until it is known.
       if ("ping" in hello) out.push(["ping", { ms: typeof hello.ping === "number" ? hello.ping : null }]);
       return out;

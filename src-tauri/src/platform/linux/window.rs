@@ -124,6 +124,12 @@ fn on_x11() -> bool {
 /// native Wayland window cannot read it, so there the lock is not offered.
 /// The root coordinates are the space tao's `inner_position()` uses on X11,
 /// so the lock button's hit test lines up.
+/// Whether the click-through lock works by an input region, needing no
+/// pointer: here it does (`click_through_except`), on native Wayland too.
+pub fn click_through_by_region() -> bool {
+    true
+}
+
 pub fn cursor_position() -> Option<(i32, i32)> {
     query_pointer().map(|(x, y, _)| (x, y))
 }
@@ -166,7 +172,24 @@ fn query_pointer() -> Option<(i32, i32, u32)> {
 /// invisible but still there, and took every click over it once a screenshot
 /// tool left the front (`screenshot_tool` gives every window the mouse back).
 pub fn click_through_except(window: &tauri::WebviewWindow, ignore: bool, keep: Option<(f64, f64, f64, f64, f64)>) -> bool {
+    input_region(window, ignore, keep.map(|(x, y, w, h, scale)| (vec![(x, y, w, h)], scale)))
+}
+
+/// A plugin widget's click-through: as `click_through_except`, with any
+/// number of rectangles taking the mouse (the parts it draws), so the gaps
+/// between them and the room it keeps for more let clicks through.
+pub fn widget_click_through(window: &tauri::WebviewWindow, ignore: bool, keep: Option<(&[(f64, f64, f64, f64)], f64)>) -> bool {
+    input_region(window, ignore, keep.map(|(rects, scale)| (rects.to_vec(), scale)))
+}
+
+/// Rectangles in CSS px, and the page's scale.
+type Keep = (Vec<(f64, f64, f64, f64)>, f64);
+
+/// The window's input region: everywhere (`ignore` false), the union of
+/// `keep`'s rectangles, or a single pixel (nothing to keep).
+fn input_region(window: &tauri::WebviewWindow, ignore: bool, keep: Option<Keep>) -> bool {
     use gtk::{cairo, prelude::*};
+    click_through_asked().lock().unwrap_or_else(|p| p.into_inner()).insert(window.label().to_string(), (ignore, keep.clone()));
     let (ignore, keep) = if is_hidden_in_place(window) { (true, None) } else { (ignore, keep) };
     let window = window.clone();
     super::dialog::on_gtk_thread(move || {
@@ -176,14 +199,21 @@ pub fn click_through_except(window: &tauri::WebviewWindow, ignore: bool, keep: O
             return Some(());
         }
         let surface = gtk_window.window()?;
-        // CSS pixels to GDK's: the page's scale over GDK's own.
-        let rect = keep.and_then(|(x, y, w, h, page_scale)| {
+        let region = cairo::Region::create();
+        if let Some((rects, page_scale)) = keep {
+            // CSS pixels to GDK's: the page's scale over GDK's own.
             let k = page_scale / f64::from(gtk_window.scale_factor().max(1));
-            let (left, top) = ((x * k).floor() as i32, (y * k).floor() as i32);
-            let (right, bottom) = (((x + w) * k).ceil() as i32, ((y + h) * k).ceil() as i32);
-            (right > left && bottom > top).then(|| cairo::RectangleInt::new(left, top, right - left, bottom - top))
-        });
-        let region = cairo::Region::create_rectangle(&rect.unwrap_or_else(|| cairo::RectangleInt::new(0, 0, 1, 1)));
+            for (x, y, w, h) in rects {
+                let (left, top) = ((x * k).floor() as i32, (y * k).floor() as i32);
+                let (right, bottom) = (((x + w) * k).ceil() as i32, ((y + h) * k).ceil() as i32);
+                if right > left && bottom > top {
+                    let _ = region.union_rectangle(&cairo::RectangleInt::new(left, top, right - left, bottom - top));
+                }
+            }
+        }
+        if region.is_empty() {
+            let _ = region.union_rectangle(&cairo::RectangleInt::new(0, 0, 1, 1));
+        }
         surface.input_shape_combine_region(&region, 0, 0);
         Some(())
     })
@@ -200,8 +230,19 @@ pub fn start_drag(window: &tauri::WebviewWindow) {
 /// (KWin did, under XWayland, for each plugin alert), so GTK is told first
 /// not to take focus on map (`_NET_WM_USER_TIME` 0 on X11). Clicking the
 /// window still focuses it.
+///
+/// On KDE a window the meter hid is unmapped (`hide_in_place`), and shown
+/// again it is a new surface to KWin: it would take the focus (on Wayland
+/// GTK's hint does nothing), so the KWin script hands it back
+/// (`focus::note_quiet_show`). And the input region its click-through set
+/// went with the old surface, so a locked overlay or icon took the mouse
+/// again until something set it anew (Hirai, 2026-10-24): it is set again
+/// once the window is back.
 pub fn show_on_top_without_focus(window: &tauri::WebviewWindow) {
     use gtk::prelude::*;
+    if let Ok(title) = window.title() {
+        super::focus::note_quiet_show(&title);
+    }
     let target = window.clone();
     super::dialog::on_gtk_thread(move || {
         if let Ok(gtk_window) = target.gtk_window() {
@@ -210,6 +251,34 @@ pub fn show_on_top_without_focus(window: &tauri::WebviewWindow) {
     });
     let _ = window.show();
     let _ = window.set_always_on_top(true);
+    reapply_click_through(window);
+}
+
+/// The click-through each window last asked for (`click_through_except`):
+/// what `reapply_click_through` sets again.
+fn click_through_asked() -> &'static std::sync::Mutex<std::collections::HashMap<String, (bool, Option<Keep>)>> {
+    static ASKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (bool, Option<Keep>)>>> =
+        std::sync::OnceLock::new();
+    ASKED.get_or_init(Default::default)
+}
+
+/// Set a window's last click-through again once it is mapped: shortly after
+/// it is shown, and once more a little later in case the compositor took
+/// its time.
+fn reapply_click_through(window: &tauri::WebviewWindow) {
+    let Some((ignore, keep)) = click_through_asked().lock().unwrap_or_else(|p| p.into_inner()).get(window.label()).cloned() else {
+        return;
+    };
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        for wait in [80, 400] {
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            if !window.is_visible().unwrap_or(false) {
+                return;
+            }
+            input_region(&window, ignore, keep.clone());
+        }
+    });
 }
 
 /// Hide a window `show_on_top_without_focus` shows (see the Windows one).

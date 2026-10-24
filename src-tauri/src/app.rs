@@ -184,15 +184,15 @@ fn meter_shown(app: tauri::AppHandle) -> bool {
 /// (Linux), else as usual. The page re-measures, as its content may have
 /// changed meanwhile.
 fn show_meter_again(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
-    if platform::window::reveal_in_place(window) {
-        // Revealing takes the mouse back; the lock decides that.
-        if let Some(state) = app.try_state::<AppState>() {
-            let lock = state.overlay_lock.clone();
-            *lock.applied.lock() = None;
-            sync_click_through(app, &lock, false);
-        }
-    } else {
+    if !platform::window::reveal_in_place(window) {
         platform::window::show_on_top_without_focus(window);
+    }
+    // Shown again, the window takes the mouse (revealed, or a new surface
+    // where it was unmapped, KDE): the lock decides that anew.
+    if let Some(state) = app.try_state::<AppState>() {
+        let lock = state.overlay_lock.clone();
+        *lock.applied.lock() = None;
+        sync_click_through(app, &lock, false);
     }
     let _ = window.emit("force-resize", ());
 }
@@ -986,7 +986,7 @@ pub(crate) fn toggle_overlay_lock(app: &tauri::AppHandle) {
     let locked = app
         .try_state::<AppState>()
         .is_some_and(|s| s.overlay_lock.locked.load(std::sync::atomic::Ordering::SeqCst));
-    if platform::window::cursor_position().is_none() && !locked {
+    if !lock_offered() && !locked {
         return; // the lock is not offered here
     }
     apply_overlay_lock(app, !locked);
@@ -1318,7 +1318,15 @@ fn suspend_capture(state: tauri::State<'_, AppState>, suspended: bool) {
 /// position outside the window; see `OverlayLock`).
 #[tauri::command]
 fn overlay_lock_supported() -> bool {
-    platform::window::cursor_position().is_some()
+    lock_offered()
+}
+
+/// Whether the click-through lock is offered: where the lock button keeps
+/// the mouse by an input region (Linux, native Wayland too: it was offered
+/// only where the pointer could be read, X11, and so not on KDE), or by a
+/// pointer watch.
+fn lock_offered() -> bool {
+    platform::window::click_through_by_region() || platform::window::cursor_position().is_some()
 }
 
 /// Where the mouse pointer is from the calling window's top-left, in screen

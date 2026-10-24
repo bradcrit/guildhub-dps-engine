@@ -1133,9 +1133,13 @@ class DpsApp {
   // over the meter, or the window stops taking the mouse under it. The
   // tooltip then stayed up until the row was hovered and left again. While
   // it shows, ask where the pointer really is and close it once it is off
-  // the row. Where the pointer can't be read (native Wayland) nothing changes.
+  // the row. Where the pointer can't be read (native Wayland, so KDE: Hirai
+  // still saw it stuck after the fix, 2026-10-24) the tooltip closes when
+  // the pointer leaves the window, and after 4 s with no pointer movement
+  // over the meter (the game holding the pointer sends the meter nothing).
   watchHoverPointer() {
     if (this.hoverPointerWatch || !window.javaBridge?.pointerInWindow) return;
+    this.watchHoverIdle();
     this.hoverPointerWatch = setInterval(async () => {
       const rowId = this.hoveredDetailsRowId;
       const at = await window.javaBridge.pointerInWindow();
@@ -1143,6 +1147,7 @@ class DpsApp {
       if (!at) {
         clearInterval(this.hoverPointerWatch);
         this.hoverPointerWatch = 0;
+        this.hoverIdleOnly = true;
         return;
       }
       // Hovering moved on while asking: the next check sees the new row.
@@ -1152,6 +1157,27 @@ class DpsApp {
       this.hoveredDetailsRowId = null;
       this.hideHoverTooltip();
     }, 300);
+  }
+
+  // The fallback where the pointer can't be read (see watchHoverPointer):
+  // set up once; it acts only after the pointer check found it unreadable.
+  watchHoverIdle() {
+    if (this.hoverIdleWatch) return;
+    this.lastPointerMoveAt = Date.now();
+    const moved = () => { this.lastPointerMoveAt = Date.now(); };
+    document.addEventListener("mousemove", moved, { passive: true });
+    document.documentElement?.addEventListener?.("mouseleave", () => {
+      if (this.hoverIdleOnly) {
+        this.hoveredDetailsRowId = null;
+        this.hideHoverTooltip();
+      }
+    });
+    this.hoverIdleWatch = setInterval(() => {
+      if (!this.hoverIdleOnly || !this.hoveredDetailsRowId) return;
+      if (Date.now() - this.lastPointerMoveAt < 4000) return;
+      this.hoveredDetailsRowId = null;
+      this.hideHoverTooltip();
+    }, 500);
   }
 
   positionHoverTooltip(rowEl = null) {

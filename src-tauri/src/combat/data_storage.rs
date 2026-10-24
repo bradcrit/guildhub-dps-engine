@@ -654,6 +654,12 @@ struct Inner {
     /// The party's places, from its last roster (`note_party_size`).
     party_size: Option<usize>,
     party_placeholders_hidden: bool,
+    /// The party key of the last roster that had you in it; `None` outside a
+    /// party. See `is_other_party`.
+    own_party_key: Option<u32>,
+    /// Whether a roster since the party began has had you in it. Only then
+    /// does a whole roster without you say you left (see `set_party_roster_of`).
+    self_in_roster: bool,
     /// Damage records since `bind_roster_names_by_class` last ran. Counted in
     /// records rather than time so a replay names players where a live meter
     /// did.
@@ -875,6 +881,8 @@ impl DataStorage {
                 former_party_members: HashMap::new(),
                 party_roster_at_ms: 0,
                 party_size: None,
+                own_party_key: None,
+                self_in_roster: false,
                 damage_since_roster_bind: 0,
                 party_placeholders_hidden: false,
                 current_dungeon_id: 0,
@@ -1338,6 +1346,12 @@ impl DataStorage {
     /// if it has not.
     pub fn last_zone_reset_ms(&self) -> i64 {
         self.last_zone_reset_ms.load(Ordering::Relaxed)
+    }
+
+    /// When the party last ended (`end_party`, which resets combat too),
+    /// clock ms; `NEVER_MS` if it has not.
+    pub fn party_ended_at_ms(&self) -> i64 {
+        self.inner.read().party_ended_at_ms
     }
 
     /// Consumed by the dps calculator to drop its cached snapshot/saved-target
@@ -2354,10 +2368,43 @@ impl DataStorage {
     /// record this parser trips over costs that member a refresh rather than
     /// costing the whole party their combat power.
     pub fn set_party_roster(&self, members: Vec<(String, PartyMember)>, complete: bool) {
+        self.set_party_roster_of(None, members, complete);
+    }
+
+    /// Is this roster another party's? A whole roster without you, of a party
+    /// that is not yours: the finder sends the rosters of other parties too,
+    /// and a leader who re-forms a party sends one per party key, the same
+    /// title and leader on each. Taken as yours, one of them said you had
+    /// left, and the party's end cleared the fight in progress: 38 logs a
+    /// re-derive at 2.0.76.4 could not update (2026-10-23). A roster stopped
+    /// at a member visiting another world hid it until 0272d47 read them.
+    /// When it is your own party's key, it is you who left. Until a roster
+    /// with you in it has given your party's key, every roster is taken as
+    /// before: in a slice your name and your roster entry can be blinded
+    /// apart, and the only roster then has no "you" in it (2026-10-24).
+    pub fn is_other_party(&self, key: u32, members: &[(String, PartyMember)], complete: bool) -> bool {
+        let inner = self.inner.read();
+        let Some(local) = inner.local_character_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) else {
+            return false;
+        };
+        complete
+            && inner.own_party_key.is_some_and(|own| own != key)
+            && !members.iter().any(|(name, _)| name.trim() == local)
+    }
+
+    /// `set_party_roster` for a roster of party `key`, as `0x9702` gives it.
+    pub fn set_party_roster_of(&self, key: Option<u32>, members: Vec<(String, PartyMember)>, complete: bool) {
         if members.is_empty() {
             return;
         }
         let mut inner = self.inner.write();
+        let local = inner.local_character_name.as_deref().map(str::trim).unwrap_or_default().to_string();
+        if !local.is_empty() && members.iter().any(|(name, _)| name.trim() == local) {
+            inner.self_in_roster = true;
+            if key.is_some() {
+                inner.own_party_key = key;
+            }
+        }
         inner.party_roster_at_ms = now_ms();
         inner.party_placeholders_hidden = false;
         // The meter's rows name the party: someone joining between fights
@@ -2372,7 +2419,11 @@ impl DataStorage {
         let was_in_party = inner.party_members.len() >= 2;
         let now_alone = complete && members.len() <= 1;
         let local_name = inner.local_character_name.clone();
+        // Not when no roster has had you yet: in a slice your name and your
+        // roster entry can be blinded apart, and each whole roster then
+        // ended the party, and the fight with it (2026-10-24).
         let dropped_self = complete
+            && inner.self_in_roster
             && local_name.as_ref().is_some_and(|n| {
                 !n.trim().is_empty() && !members.iter().any(|(name, _)| name.trim() == n.trim())
             });
@@ -2439,6 +2490,8 @@ impl DataStorage {
         inner.former_party_members.extend(members);
         inner.party_generation += 1;
         inner.party_ended_at_ms = now_ms();
+        inner.own_party_key = None;
+        inner.self_in_roster = false;
         inner.roster_dungeon_id = 0;
         inner.current_dungeon_id = dungeon_of_map(0, inner.current_map_id);
         drop(inner);
@@ -3779,6 +3832,26 @@ mod tests {
         assert_eq!(s.own_server(), 0, "never taken as the player's own");
         s.note_self_server(1305);
         assert_eq!(s.fight_server_id(), 1305, "the game's own word wins");
+    }
+
+    /// Another party's roster (the finder's, or the leader's next party) is
+    /// not word that you left yours: it changes nothing. Your own party's
+    /// roster without you still ends it (2026-10-23).
+    #[test]
+    fn another_partys_roster_leaves_yours_alone() {
+        let s = DataStorage::new();
+        s.set_local_character_name(Some("Me".into()));
+        let ours = || vec![("Lead".into(), member(1)), ("Me".into(), member(2)), ("Tank".into(), member(3))];
+        let theirs = vec![("Lead".into(), member(1)), ("Other".into(), member(2))];
+        assert!(!s.is_other_party(8, &theirs, true), "no party of yours known yet: as before");
+        assert!(!s.is_other_party(7, &ours(), true));
+        s.set_party_roster_of(Some(7), ours(), true);
+        assert!(s.is_other_party(8, &theirs, true), "a whole roster without you, of another key");
+        assert!(!s.is_other_party(8, &theirs, false), "a partial one may have stopped before you");
+        let gone = vec![("Lead".into(), member(1)), ("Tank".into(), member(3))];
+        assert!(!s.is_other_party(7, &gone, true), "your own party without you");
+        s.set_party_roster_of(Some(7), gone, true);
+        assert!(s.get_party_members().is_empty(), "you left it");
     }
 
     /// Members leaving after the boss falls (Vakron, 2026-10-17) keep their
