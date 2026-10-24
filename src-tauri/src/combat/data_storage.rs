@@ -539,6 +539,7 @@ fn note_left_sight(inner: &mut Inner, code: i32, spot: Position) {
             if kept.len() > SIGHT_KEPT {
                 kept.pop_front();
             }
+            inner.sight_radii_seq += 1;
         }
         return;
     }
@@ -678,8 +679,10 @@ struct Inner {
     /// until a mob leaves sight, and again once your spot is told.
     self_guess: Option<Position>,
     /// How far from you each NPC code leaves sight (cm), the last
-    /// SIGHT_KEPT times (`note_left_sight`).
+    /// SIGHT_KEPT times (`note_left_sight`), and a count that moves with each
+    /// (kept across sessions by the caller: `sight_radii_since`).
     sight_radii: HashMap<i32, VecDeque<f32>>,
+    sight_radii_seq: u64,
     /// The last known spot of the other entities in sight, until they die,
     /// despawn or a zone load.
     entity_positions: HashMap<i32, Position>,
@@ -882,6 +885,7 @@ impl DataStorage {
                 self_position: None,
                 self_guess: None,
                 sight_radii: HashMap::new(),
+                sight_radii_seq: 0,
                 entity_positions: HashMap::new(),
                 hidden_cubes: HashMap::new(),
                 actor_power_scalars: HashMap::new(),
@@ -2202,6 +2206,27 @@ impl DataStorage {
         let mut inner = self.inner.write();
         inner.supply_requests = boards;
         inner.supply_requests_seq += 1;
+    }
+
+    /// How far each NPC code leaves sight (cm, oldest first), when learnt
+    /// since `seq`: (the new seq, the distances) — to keep for the next
+    /// session (`set_sight_radii`).
+    pub fn sight_radii_since(&self, seq: u64) -> Option<(u64, HashMap<i32, Vec<f32>>)> {
+        let inner = self.inner.read();
+        (inner.sight_radii_seq != seq)
+            .then(|| (inner.sight_radii_seq, inner.sight_radii.iter().map(|(&code, d)| (code, d.iter().copied().collect())).collect()))
+    }
+
+    /// The distances kept from an earlier session (`sight_radii_since`).
+    pub fn set_sight_radii(&self, radii: HashMap<i32, Vec<f32>>) {
+        let mut inner = self.inner.write();
+        for (code, d) in radii {
+            let d: VecDeque<f32> = d.into_iter().filter(|d| d.is_finite() && (0.0..=SIGHT_MAX_RADIUS).contains(d)).collect();
+            let skip = d.len().saturating_sub(SIGHT_KEPT);
+            if d.len() > skip {
+                inner.sight_radii.insert(code, d.into_iter().skip(skip).collect());
+            }
+        }
     }
 
     /// The boards, when told since `seq`: (the new seq, the boards).
@@ -3541,6 +3566,22 @@ mod tests {
         assert_eq!(at(61_000), None);
         storage.note_spotted(Spotted::You(spot(100_000.0, 9_000.0)));
         assert_eq!(at(61_000), Some(((100_000, 9_000), Some(0), false)));
+
+        // Kept for the next session: it guesses from the start.
+        let (seq, radii) = storage.sight_radii_since(0).unwrap();
+        assert_eq!(radii, HashMap::from([(777, vec![4_000.0])]));
+        assert_eq!(storage.sight_radii_since(seq), None);
+        let next = DataStorage::new();
+        next.set_sight_radii(HashMap::from([(777, vec![4_000.0]), (888, vec![f32::NAN, 99_999.0])]));
+        crate::clock::set_override(Some(0));
+        next.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
+        next.append_mob(5, 777);
+        next.note_spotted(Spotted::Entity(5, spot(100_000.0, 10_000.0)));
+        crate::clock::set_override(Some(8_000));
+        next.note_out_of_sight(5);
+        assert_eq!(next.self_estimate(60_000).map(|(p, ..)| p.y.round() as i32), Some(6_000));
+        // What was loaded isn't new: nothing to write back.
+        assert_eq!(next.sight_radii_since(0), None);
         crate::clock::set_override(None);
     }
 

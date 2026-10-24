@@ -146,6 +146,12 @@ const SELF_POS_MAX_AGE_MS: i64 = 60_000;
 /// Distances (`cubes`) from your spot while it is at most this old: off a
 /// fight the game tells your spot only every few seconds.
 const CUBE_POS_MAX_AGE_MS: i64 = 5_000;
+/// How far each NPC code leaves sight, learnt for guessing your spot
+/// (`DataStorage::self_estimate`), kept for the next session in
+/// `<data-dir>/sight_radii.json` (`{"<npc code>":[cm, …]}`): a session
+/// starts knowing them. Written at most this often, when it learnt more.
+const SIGHT_RADII_FILE: &str = "sight_radii.json";
+const SIGHT_RADII_SAVE_EVERY: Duration = Duration::from_secs(60);
 /// How often field boss HP is looked at (as upstream's sender does).
 const BOSS_HP_EVERY: Duration = Duration::from_secs(3);
 /// A map read longer ago than this isn't passed on (waiting for the server).
@@ -599,6 +605,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     if let Some(text) = abnormals {
         storage.set_abnormal_stack_limits(a2tools_dps_meter_lib::capture::abnormal::stack_limits(&text));
     }
+    let sight_radii_path = args.data_dir.join(SIGHT_RADII_FILE);
+    if let Some(radii) = std::fs::read_to_string(&sight_radii_path).ok().and_then(|text| serde_json::from_str(&text).ok()) {
+        storage.set_sight_radii(radii);
+    }
     let ping = Arc::new(PingTracker::with_perf_clock(platform::clock::perf_clock()));
     let port_detector = Arc::new(CombatPortDetector::new());
     let calculator = DpsCalculator::new(storage.clone(), skills.clone(), npcs.clone(), ping.clone());
@@ -739,6 +749,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
             let mut interval = tokio::time::interval(SELF_RATE);
             let mut map_seq = 0u64;
             let mut last_hp = std::time::Instant::now();
+            let (mut sight_seq, mut sight_saved) = (0u64, std::time::Instant::now());
             // (server, map) -> when sent, and what it said.
             let mut maps_sent: HashMap<(u16, u32), (i64, String)> = HashMap::new();
             loop {
@@ -760,6 +771,16 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let cubes = engine.cubes_json();
                 if **engine.cubes.borrow() != *cubes {
                     engine.cubes.send_replace(Arc::from(cubes));
+                }
+                // How far each mob leaves sight, for the next session (SIGHT_RADII_FILE).
+                if sight_saved.elapsed() >= SIGHT_RADII_SAVE_EVERY {
+                    if let Some((seq, radii)) = engine.storage.sight_radii_since(sight_seq) {
+                        sight_saved = std::time::Instant::now();
+                        sight_seq = seq;
+                        if let Ok(text) = serde_json::to_string(&radii) {
+                            let _ = std::fs::write(&sight_radii_path, text);
+                        }
+                    }
                 }
                 let server = engine.storage.local_profile().server_id;
                 for event in engine.storage.take_boss_events() {

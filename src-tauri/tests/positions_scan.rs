@@ -85,6 +85,11 @@ fn scan_for_your_spot() {
         return;
     };
     let storage = Arc::new(DataStorage::new());
+    // A2_SCAN_RADII=<file>: the sight distances kept across runs, as the engine keeps them.
+    let radii_file = std::env::var("A2_SCAN_RADII").ok();
+    if let Some(radii) = radii_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| serde_json::from_str(&t).ok()) {
+        storage.set_sight_radii(radii);
+    }
     let scan = Arc::new(Mutex::new(Scan::default()));
     {
         let storage = storage.clone();
@@ -240,6 +245,9 @@ fn scan_for_your_spot() {
     }
     frame_tap::set(None);
     a2tools_dps_meter_lib::clock::set_override(None);
+    if let (Some(file), Some((_, radii))) = (&radii_file, storage.sight_radii_since(0)) {
+        std::fs::write(file, serde_json::to_string(&radii).unwrap()).unwrap();
+    }
 
     let mut scan = scan.lock();
     eprintln!("seconds with your spot fresh: {fresh_s}, stale: {stale_s}; spots told: {}", scan.fixes.len());
