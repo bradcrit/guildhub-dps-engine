@@ -40,6 +40,7 @@
 //! | `POST /v1/reset`       | save the open fights, then clear the meter      |
 //! | `POST /v1/config?mode=<id>&window=<ms>` | which targets the meter follows (`TargetSelectionMode` ids) and the all-targets window |
 //! | `POST /v1/character?name=<name>` | the character played, as the parent read it off the game's screen just now |
+//! | `POST /v1/followed?x=&y=&from=` | your spot (world metres) as the parent follows it on the minimap since the one told at `from` (`cubes`' `spot.told`) — the spot of `npcs` and the distances for FOLLOWED_FRESH_MS (data_storage.rs) |
 //!
 //! Events: `dps` (the view) and `self` (as `/v1/self`) on every change, each
 //! sent once on connecting (`self` also carries the game's `ping` in ms);
@@ -92,7 +93,8 @@
 //! metres, to the nearest 10 (null: unknown) — the pet tracker tells from it
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
 //! since, by the mobs that left sight (`DataStorage::self_estimate`) — tens
-//! of metres off.
+//! of metres off. `posFollowed`: `pos` is where the parent followed you
+//! to on the minimap since (`/v1/followed`) — a few metres off.
 //! `cubes` (`{"cubes":[{"metres","above","east","north","at"}],"spot"}`) on
 //! every change and once on connecting: the Hidden Cubes in range
 //! (`capture::objects`), closest first, from when the game sends one until it
@@ -295,7 +297,9 @@ impl Engine {
         // Your spot on the ground in metres, to the nearest 10 (else the event is new at every step).
         let pos = me.map(|(p, ..)| serde_json::json!({ "x": (p.x / 1000.0).round() as i64 * 10, "y": (p.y / 1000.0).round() as i64 * 10 }));
         let guessed = me.is_some_and(|(_, _, guessed)| guessed);
-        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed }).to_string()
+        let followed = me.is_some() && self.storage.self_followed();
+        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed, "posFollowed": followed })
+            .to_string()
     }
 
     /// The Hidden Cubes in range (see the top of this file).
@@ -1121,12 +1125,20 @@ async fn handle(mut stream: TcpStream, engine: Arc<Engine>) {
             engine.apply_screen_name();
             json(&mut stream, "{\"ok\":true}").await;
         }
+        // Your spot as the parent follows it on the minimap, from the spot told at `from` (`cubes`).
+        ("POST", "/v1/followed") => {
+            let num = |k: &str| req.param(k).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
+            if let (Some(x), Some(y), Some(from)) = (num("x"), num("y"), num("from")) {
+                engine.storage.set_followed((x * 100.0) as f32, (y * 100.0) as f32, from as i64);
+            }
+            json(&mut stream, "{\"ok\":true}").await;
+        }
         ("POST", "/v1/reset") => {
             let e = engine.clone();
             let _ = tokio::task::spawn_blocking(move || e.reset()).await;
             json(&mut stream, "{\"ok\":true}").await;
         }
-        (_, "/v1/status" | "/v1/dps" | "/v1/self" | "/v1/events" | "/v1/fights" | "/v1/reset" | "/v1/config" | "/v1/character") => {
+        (_, "/v1/status" | "/v1/dps" | "/v1/self" | "/v1/events" | "/v1/fights" | "/v1/reset" | "/v1/config" | "/v1/character" | "/v1/followed") => {
             respond(&mut stream, 405, "text/plain", b"method not allowed").await;
         }
         _ => respond(&mut stream, 404, "text/plain", b"not found").await,
