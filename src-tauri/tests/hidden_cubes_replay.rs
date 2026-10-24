@@ -46,7 +46,7 @@ fn the_cube_is_in_range_until_opened() {
     assert!(seconds.iter().filter(|(s, _)| s.as_str() < "00:54:02").all(|(_, cubes)| cubes.is_empty()));
     assert_eq!(at("00:54:04").len(), 1);
     // Next to it on the platform: a few metres, the same height.
-    let spot = at("00:54:08")[0].unwrap();
+    let spot = at("00:54:08")[0].1.unwrap();
     assert!(spot.metres < 10.0 && spot.above.abs() < 2.0, "{spot:?}");
     assert!((spot.east.hypot(spot.north) - spot.metres).abs() < 0.01, "{spot:?}");
     // Opened: gone.

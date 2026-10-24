@@ -1107,25 +1107,34 @@ impl DataStorage {
         }
     }
 
-    /// The Hidden Cubes in range, closest first: where each is from you —
-    /// None while your spot is unknown or more than `self_max_age_ms` old.
-    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<Option<CubeSpot>> {
+    /// The Hidden Cubes in range, closest to your last known spot first: the
+    /// cube's own spot, and where it is from you — None while your spot is
+    /// unknown or more than `self_max_age_ms` old.
+    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<(Position, Option<CubeSpot>)> {
         let inner = self.inner.read();
+        let last = inner.self_position.map(|(pos, _)| pos);
         let me = inner.self_position.filter(|(_, at)| now_ms() - at <= self_max_age_ms).map(|(pos, _)| pos);
         let mut cubes: Vec<_> = inner
             .hidden_cubes
             .values()
             .map(|pos| {
-                me.map(|me| CubeSpot {
+                let spot = me.map(|me| CubeSpot {
                     metres: me.metres_to(pos),
                     above: (pos.z - me.z) / 100.0,
                     east: (pos.x - me.x) / 100.0,
                     north: (me.y - pos.y) / 100.0,
-                })
+                });
+                (*pos, spot)
             })
             .collect();
-        cubes.sort_by(|a, b| a.map_or(f32::MAX, |a| a.metres).total_cmp(&b.map_or(f32::MAX, |b| b.metres)));
+        let from_last = |pos: &Position| last.map_or(0.0, |me| me.metres_to(pos));
+        cubes.sort_by(|a, b| from_last(&a.0).total_cmp(&from_last(&b.0)));
         cubes
+    }
+
+    /// Your last known spot and when it was told (unix ms) — for `cubes`' `spot`.
+    pub fn self_position_at(&self) -> Option<(Position, i64)> {
+        self.inner.read().self_position
     }
 
     /// Your last known spot and how long ago it was told (ms).

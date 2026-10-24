@@ -93,13 +93,17 @@
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
 //! since, by the mobs that left sight (`DataStorage::self_estimate`) — tens
 //! of metres off.
-//! `cubes` (`{"cubes":[{"metres","above","east","north"}]}`) on every change
-//! and once on connecting: the Hidden Cubes in range (`capture::objects`),
-//! closest first, from when the game sends one until it goes out of range, is
-//! opened or a zone load. `metres` is how far it is on the ground, `above` how
-//! far above you (below: negative), both whole metres; `east` / `north` where
-//! it lies from you (west / south: negative, metres to 0.1 — up on the map is
-//! north). All while your spot is at most CUBE_POS_MAX_AGE_MS old, else null.
+//! `cubes` (`{"cubes":[{"metres","above","east","north","at"}],"spot"}`) on
+//! every change and once on connecting: the Hidden Cubes in range
+//! (`capture::objects`), closest first, from when the game sends one until it
+//! goes out of range, is opened or a zone load. `metres` is how far it is on
+//! the ground, `above` how far above you (below: negative), both whole
+//! metres; `east` / `north` where it lies from you (west / south: negative,
+//! metres to 0.1 — up on the map is north). All while your spot is at most
+//! CUBE_POS_MAX_AGE_MS old, else null. `at` is the cube's own spot and
+//! `spot` your last told one with `told` (unix ms, null: none yet), both
+//! `{"x","y","z"}` in world metres — the parent follows you on from there
+//! (its minimap reading), so this event comes with every new spot of yours too.
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -300,17 +304,26 @@ impl Engine {
             .storage
             .hidden_cubes(CUBE_POS_MAX_AGE_MS)
             .into_iter()
-            .map(|spot| match spot {
-                Some(s) => serde_json::json!({
-                    "metres": s.metres.round() as i32,
-                    "above": s.above.round() as i32,
-                    "east": (s.east * 10.0).round() / 10.0,
-                    "north": (s.north * 10.0).round() / 10.0,
-                }),
-                None => serde_json::json!({ "metres": null, "above": null, "east": null, "north": null }),
+            .map(|(at, spot)| {
+                let mut cube = match spot {
+                    Some(s) => serde_json::json!({
+                        "metres": s.metres.round() as i32,
+                        "above": s.above.round() as i32,
+                        "east": (s.east * 10.0).round() / 10.0,
+                        "north": (s.north * 10.0).round() / 10.0,
+                    }),
+                    None => serde_json::json!({ "metres": null, "above": null, "east": null, "north": null }),
+                };
+                cube["at"] = world_metres(&at);
+                cube
             })
             .collect();
-        serde_json::json!({ "cubes": cubes }).to_string()
+        let spot = self.storage.self_position_at().map(|(pos, at)| {
+            let mut spot = world_metres(&pos);
+            spot["told"] = at.into();
+            spot
+        });
+        serde_json::json!({ "cubes": cubes, "spot": spot }).to_string()
     }
 
     /// The pet records ready to be passed on, oldest first, as (event, JSON):
@@ -554,6 +567,12 @@ fn class_key(class: JobClass) -> &'static str {
         JobClass::Chanter => "chanter",
         JobClass::Fighter => "brawler",
     }
+}
+
+/// A spot in the world as `{"x","y","z"}`, metres to 0.01 (`cubes`).
+fn world_metres(pos: &a2tools_dps_meter_lib::capture::positions::Position) -> serde_json::Value {
+    let m = |v: f32| (v as f64).round() / 100.0;
+    serde_json::json!({ "x": m(pos.x), "y": m(pos.y), "z": m(pos.z) })
 }
 
 fn load_resources(dir: &std::path::Path, language: &str) -> (SkillLookup, NpcLookup, HashSet<i32>, Option<String>) {
