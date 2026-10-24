@@ -468,6 +468,19 @@ const MAX_BOSS_EVENTS: usize = 64;
 /// A field boss counts as being fought while its HP changed, or it took
 /// damage, this recently.
 const IN_COMBAT_MS: i64 = 10_000;
+/// Your spot past its telling (`self_estimate`): moved toward the middle of
+/// what's in sight, all the way once it is this old… The game tells your spot
+/// only with a fight, a buff or a teleport; off those, the middle of what's in
+/// sight was half as far from you as your last spot (positions_scan, two
+/// captures of 2026-10-24: 26 gaps, median 28 m against 64 m, p90 62 m
+/// against 128 m). Nothing sharper came of the packets: no record carries your
+/// spot in between, and what leaves sight isn't told.
+const SELF_GUESS_FULL_MS: i64 = 5_000;
+/// …from this many spots in sight at least…
+const SELF_GUESS_MIN_SPOTS: usize = 3;
+/// …but never farther from your spot than a mount gets since (cm/ms; 304 m
+/// in ~12 s seen).
+const SELF_GUESS_SPEED: f32 = 2.5;
 /// The passive HP regen everyone gets ("Restore HP"), not a heal anyone cast.
 const PASSIVE_REGEN_SKILL: i32 = 1_900_001;
 /// While it is fought and its HP holds, the same HP goes again this often:
@@ -495,6 +508,32 @@ fn push_boss_event(inner: &mut Inner, event: BossEvent) {
     inner.boss_events.push_back(event);
     while inner.boss_events.len() > MAX_BOSS_EVENTS {
         inner.boss_events.pop_front();
+    }
+}
+
+/// See `DataStorage::self_estimate`.
+fn self_estimate(inner: &Inner, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
+    let told = inner.self_position.map(|(pos, at)| (pos, now_ms() - at)).filter(|(_, age)| *age <= self_max_age_ms);
+    let spots = &inner.entity_positions;
+    let middle = (spots.len() >= SELF_GUESS_MIN_SPOTS).then(|| {
+        let n = spots.len() as f32;
+        let (x, y) = spots.values().fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
+        Position { x: x / n, y: y / n, z: told.map_or(spots.values().map(|p| p.z).sum::<f32>() / n, |(me, _)| me.z) }
+    });
+    match (told, middle) {
+        (Some((me, age)), Some(middle)) => {
+            let toward = (age as f32 / SELF_GUESS_FULL_MS as f32).min(1.0);
+            let mut guess = Position { x: me.x + (middle.x - me.x) * toward, y: me.y + (middle.y - me.y) * toward, z: me.z };
+            let (away, reach) = (me.metres_to(&guess) * 100.0, 500.0 + age as f32 * SELF_GUESS_SPEED);
+            if away > reach {
+                guess.x = me.x + (guess.x - me.x) * reach / away;
+                guess.y = me.y + (guess.y - me.y) * reach / away;
+            }
+            Some((guess, Some(age), toward > 0.0))
+        }
+        (Some((me, age)), None) => Some((me, Some(age), false)),
+        (None, Some(middle)) => Some((middle, None, true)),
+        (None, None) => None,
     }
 }
 
@@ -953,11 +992,11 @@ impl DataStorage {
     }
 
     /// The living mobs in sight by NPC code: how many of each, and how far
-    /// the closest is from you (metres) — while your spot is at most
-    /// `self_max_age_ms` old and its spot known.
+    /// the closest is from you (metres) — from your spot as best known
+    /// (`self_estimate`), while there is one, and its spot known.
     pub fn mobs_in_sight(&self, self_max_age_ms: i64) -> std::collections::BTreeMap<i32, (u32, Option<f32>)> {
         let inner = self.inner.read();
-        let me = inner.self_position.filter(|(_, at)| now_ms() - at <= self_max_age_ms).map(|(pos, _)| pos);
+        let me = self_estimate(&inner, self_max_age_ms).map(|(pos, ..)| pos);
         let mut mobs = std::collections::BTreeMap::new();
         for (entity, &code) in &inner.mobs_in_sight {
             let (count, nearest) = mobs.entry(code).or_insert((0, None::<f32>));
@@ -1017,6 +1056,13 @@ impl DataStorage {
     /// Your last known spot and how long ago it was told (ms).
     pub fn self_position(&self) -> Option<(Position, i64)> {
         self.inner.read().self_position.map(|(pos, at)| (pos, now_ms() - at))
+    }
+
+    /// Your spot as best known (see SELF_GUESS_FULL_MS): how long ago your
+    /// spot was told (None: never, or more than `self_max_age_ms` ago), and
+    /// whether this is a guess from what's in sight.
+    pub fn self_estimate(&self, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
+        self_estimate(&self.inner.read(), self_max_age_ms)
     }
 
     /// The NPC code of the mob you are fighting: the one in sight you hit
@@ -3414,6 +3460,32 @@ fn is_mob(inner: &Inner, id: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn your_spot_moves_toward_the_middle_of_whats_in_sight_as_it_gets_old() {
+        let storage = DataStorage::new();
+        let spot = |x: f32, y: f32| Position { x, y, z: 15_000.0 };
+        crate::clock::set_override(Some(0));
+        storage.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
+        for (id, x, y) in [(1, 110_000.0, 1_000.0), (2, 110_000.0, -1_000.0), (3, 112_000.0, 0.0)] {
+            storage.note_spotted(Spotted::Entity(id, spot(x, y)));
+        }
+        let x_at = |at: i64| {
+            crate::clock::set_override(Some(at));
+            storage.self_estimate(60_000).map(|(p, age, guessed)| (p.x.round() as i32, age, guessed))
+        };
+        assert_eq!(x_at(0), Some((100_000, Some(0), false)));
+        assert_eq!(x_at(2_500), Some((105_333, Some(2_500), true)));
+        assert_eq!(x_at(5_000), Some((110_667, Some(5_000), true)));
+        // Too old to tell from: the middle alone.
+        assert_eq!(x_at(61_000), Some((110_667, None, true)));
+        // Never farther than a mount gets since: 5 m + 2.5 m per second.
+        storage.note_spotted(Spotted::Entity(4, spot(1_000_000.0, 0.0)));
+        crate::clock::set_override(Some(1_000));
+        storage.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
+        assert_eq!(x_at(6_000), Some((100_000 + 500 + 12_500, Some(5_000), true)));
+        crate::clock::set_override(None);
+    }
 
     #[test]
     fn your_own_and_a_known_players_hp_log_deaths_and_a_strangers_does_not() {

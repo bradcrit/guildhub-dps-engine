@@ -85,11 +85,14 @@
 //! they die, despawn or a zone load — what the pet tracker farms nearby.
 //! `target` is the NPC code of the mob you fight (the one in sight you hit
 //! directly last, within TARGET_HIT_MS), else null. Each npc has `metres`, how
-//! far the closest of them is from you, while your spot is known and at most
-//! SELF_POS_MAX_AGE_MS old (`capture::positions`), else null; `posAge` (ms)
-//! is how old your spot is (null: none yet), `pos` (`{"x","y"}`) that spot
-//! on the ground in metres, to the nearest 10 (null: none yet) — the pet
-//! tracker tells from it that you left an area.
+//! far the closest of them is from you, while your spot is known
+//! (`capture::positions`, `DataStorage::self_estimate`), else null; `posAge`
+//! (ms) is how old the spot the game told is (null: none, or more than
+//! SELF_POS_MAX_AGE_MS ago), `pos` (`{"x","y"}`) your spot on the ground in
+//! metres, to the nearest 10 (null: unknown) — the pet tracker tells from it
+//! that you left an area. `posGuessed`: `pos` is moved off the told spot
+//! toward the middle of what's in sight (it got old), or only that middle
+//! (`posAge` null) — tens of metres off.
 //! `cubes` (`{"cubes":[{"metres","above"}]}`) on every change and once on
 //! connecting: the Hidden Cubes in range (`capture::objects`), closest first,
 //! from when the game sends one until it goes out of range, is opened or a
@@ -263,12 +266,13 @@ impl Engine {
             .map(|(npc, (count, metres))| serde_json::json!({ "npc": npc, "count": count, "metres": metres.map(|m| m.round() as u32) }))
             .collect();
         let target = self.storage.my_target(TARGET_HIT_MS);
+        let me = self.storage.self_estimate(SELF_POS_MAX_AGE_MS);
         // In whole seconds, so the event isn't new every second for nothing.
-        let me = self.storage.self_position();
-        let pos_age = me.map(|(_, age)| age / 1000 * 1000);
+        let pos_age = me.and_then(|(_, age, _)| age).map(|age| age / 1000 * 1000);
         // Your spot on the ground in metres, to the nearest 10 (else the event is new at every step).
-        let pos = me.map(|(p, _)| serde_json::json!({ "x": (p.x / 1000.0).round() as i64 * 10, "y": (p.y / 1000.0).round() as i64 * 10 }));
-        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos }).to_string()
+        let pos = me.map(|(p, ..)| serde_json::json!({ "x": (p.x / 1000.0).round() as i64 * 10, "y": (p.y / 1000.0).round() as i64 * 10 }));
+        let guessed = me.is_some_and(|(_, _, guessed)| guessed);
+        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed }).to_string()
     }
 
     /// The Hidden Cubes in range (see the top of this file).
