@@ -468,21 +468,26 @@ const MAX_BOSS_EVENTS: usize = 64;
 /// A field boss counts as being fought while its HP changed, or it took
 /// damage, this recently.
 const IN_COMBAT_MS: i64 = 10_000;
-/// Your spot past its telling (`self_estimate`): moved toward the middle of
-/// what's in sight, all the way once it is this old… The game tells your spot
-/// only with a fight, a buff or a teleport; off those, the middle of what's in
-/// sight near you is closer to you than your last spot (positions_scan).
-/// Nothing sharper came of the packets: no record carries your spot in
-/// between, and what leaves sight isn't told — the middle of everything
-/// "in sight" drifted hundreds of metres back along a flight.
-const SELF_GUESS_FULL_MS: i64 = 5_000;
-/// …from this many spots in sight at least, those this far (cm) at most
-/// from where you can be by now (most spawns come into sight within ~75 m)…
-const SELF_GUESS_MIN_SPOTS: usize = 3;
-const SELF_GUESS_SIGHT: f32 = 8_000.0;
-/// …but never farther from your spot than a mount gets since (cm/ms; 304 m
-/// in ~12 s seen).
-const SELF_GUESS_SPEED: f32 = 2.5;
+/// Your spot past its telling (`self_estimate`). The game tells your spot
+/// only with a fight, a buff or a teleport, and no record carries it in
+/// between — but a mob leaves sight (`42 36` flag 1) at the same distance
+/// from you each time, by its NPC code (~25–45 m, ~70 m, ~110–125 m; within
+/// 6 m for 3 in 4). So when one leaves, you are that far from its spot: your
+/// guess goes onto that circle, the nearest point to where it was. Measured
+/// against the next spot told (positions_scan, four captures of 2026-10-24):
+/// median 53 m against 61 m, p90 162 m against 227 m — never worse on one.
+/// (The middle of what's in sight was: one-sided, and jumping as far things
+/// came and went.)
+///
+/// A code's distance is learnt while your spot is at most this old (ms)…
+const SIGHT_LEARN_MAX_AGE_MS: i64 = 1_000;
+/// …and this far (cm) at most: farther, its spot was old.
+const SIGHT_MAX_RADIUS: f32 = 15_000.0;
+/// The last this many distances per code; the median counts.
+const SIGHT_KEPT: usize = 15;
+/// A mob leaving sight farther than its distance plus this (cm) from your
+/// guess has an old spot, and tells nothing.
+const SIGHT_STALE: f32 = 30_000.0;
 /// The passive HP regen everyone gets ("Restore HP"), not a heal anyone cast.
 const PASSIVE_REGEN_SKILL: i32 = 1_900_001;
 /// While it is fought and its HP holds, the same HP goes again this often:
@@ -516,23 +521,38 @@ fn push_boss_event(inner: &mut Inner, event: BossEvent) {
 /// See `DataStorage::self_estimate`.
 fn self_estimate(inner: &Inner, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
     let (me, age) = inner.self_position.map(|(pos, at)| (pos, now_ms() - at)).filter(|(_, age)| *age <= self_max_age_ms)?;
-    let reach = 500.0 + age as f32 * SELF_GUESS_SPEED;
-    // Only what you can have in sight from where you can be by now: what
-    // left sight is never told, and stays behind when you travel.
-    let near: Vec<&Position> = inner.entity_positions.values().filter(|p| me.metres_to(p) * 100.0 <= reach + SELF_GUESS_SIGHT).collect();
-    if near.len() < SELF_GUESS_MIN_SPOTS {
-        return Some((me, Some(age), false));
+    Some(match inner.self_guess {
+        Some(guess) => (guess, Some(age), true),
+        None => (me, Some(age), false),
+    })
+}
+
+/// A mob of `code` at `spot` left sight (see SIGHT_LEARN_MAX_AGE_MS): learn
+/// its distance while your spot is fresh, else move your guess onto it.
+fn note_left_sight(inner: &mut Inner, code: i32, spot: Position) {
+    let Some((me, at)) = inner.self_position else { return };
+    if now_ms() - at <= SIGHT_LEARN_MAX_AGE_MS {
+        let d = me.metres_to(&spot) * 100.0;
+        if d <= SIGHT_MAX_RADIUS {
+            let kept = inner.sight_radii.entry(code).or_default();
+            kept.push_back(d);
+            if kept.len() > SIGHT_KEPT {
+                kept.pop_front();
+            }
+        }
+        return;
     }
-    let n = near.len() as f32;
-    let (x, y) = near.iter().fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
-    let toward = (age as f32 / SELF_GUESS_FULL_MS as f32).min(1.0);
-    let mut guess = Position { x: me.x + (x / n - me.x) * toward, y: me.y + (y / n - me.y) * toward, z: me.z };
-    let away = me.metres_to(&guess) * 100.0;
-    if away > reach {
-        guess.x = me.x + (guess.x - me.x) * reach / away;
-        guess.y = me.y + (guess.y - me.y) * reach / away;
+    let Some(kept) = inner.sight_radii.get(&code) else { return };
+    let mut sorted: Vec<f32> = kept.iter().copied().collect();
+    sorted.sort_by(f32::total_cmp);
+    let radius = sorted[sorted.len() / 2];
+    let from = inner.self_guess.unwrap_or(me);
+    let away = from.metres_to(&spot) * 100.0;
+    if away > radius + SIGHT_STALE || away < 1.0 {
+        return;
     }
-    Some((guess, Some(age), toward > 0.0))
+    let f = radius / away;
+    inner.self_guess = Some(Position { x: spot.x + (from.x - spot.x) * f, y: spot.y + (from.y - spot.y) * f, z: me.z });
 }
 
 pub struct DataStorage {
@@ -654,6 +674,12 @@ struct Inner {
     my_last_hit: Option<(i32, i64)>,
     /// Your last known spot and when it was told (`capture::positions`).
     self_position: Option<(Position, i64)>,
+    /// Your spot as guessed since it was told (`note_left_sight`); None
+    /// until a mob leaves sight, and again once your spot is told.
+    self_guess: Option<Position>,
+    /// How far from you each NPC code leaves sight (cm), the last
+    /// SIGHT_KEPT times (`note_left_sight`).
+    sight_radii: HashMap<i32, VecDeque<f32>>,
     /// The last known spot of the other entities in sight, until they die,
     /// despawn or a zone load.
     entity_positions: HashMap<i32, Position>,
@@ -854,6 +880,8 @@ impl DataStorage {
                 mobs_in_sight: HashMap::new(),
                 my_last_hit: None,
                 self_position: None,
+                self_guess: None,
+                sight_radii: HashMap::new(),
                 entity_positions: HashMap::new(),
                 hidden_cubes: HashMap::new(),
                 actor_power_scalars: HashMap::new(),
@@ -1012,8 +1040,14 @@ impl DataStorage {
         let mut inner = self.inner.write();
         let me = inner.local_player_id;
         match spotted {
-            Spotted::You(pos) => inner.self_position = Some((pos, now_ms())),
-            Spotted::Entity(id, pos) if me == Some(id as i64) => inner.self_position = Some((pos, now_ms())),
+            Spotted::You(pos) => {
+                inner.self_position = Some((pos, now_ms()));
+                inner.self_guess = None;
+            }
+            Spotted::Entity(id, pos) if me == Some(id as i64) => {
+                inner.self_position = Some((pos, now_ms()));
+                inner.self_guess = None;
+            }
             Spotted::Entity(id, pos) => {
                 if !inner.dead_entity_ids.contains(&id) {
                     inner.entity_positions.insert(id, pos);
@@ -1056,9 +1090,9 @@ impl DataStorage {
         self.inner.read().self_position.map(|(pos, at)| (pos, now_ms() - at))
     }
 
-    /// Your spot as best known (see SELF_GUESS_FULL_MS): how long ago your
-    /// spot was told (None: never, or more than `self_max_age_ms` ago), and
-    /// whether this is a guess from what's in sight.
+    /// Your spot as best known (see SIGHT_LEARN_MAX_AGE_MS): how long ago
+    /// your spot was told (None: never, or more than `self_max_age_ms` ago),
+    /// and whether this is a guess from mobs leaving sight.
     pub fn self_estimate(&self, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
         self_estimate(&self.inner.read(), self_max_age_ms)
     }
@@ -2192,13 +2226,16 @@ impl DataStorage {
         }
     }
 
-    /// `id` left sight (`42 36` flag 1): no longer among the mobs in sight,
-    /// its spot no longer counts (`self_estimate`). It comes back under the
-    /// same id.
+    /// `id` left sight (`42 36` flag 1): no longer among the mobs in sight.
+    /// It comes back under the same id. Where it was tells where you are
+    /// (`note_left_sight`).
     pub fn note_out_of_sight(&self, id: i32) {
         let mut inner = self.inner.write();
         inner.mobs_in_sight.remove(&id);
-        inner.entity_positions.remove(&id);
+        let spot = inner.entity_positions.remove(&id);
+        if let (Some(spot), Some(&code)) = (spot, inner.mob_storage.get(&id)) {
+            note_left_sight(&mut inner, code, spot);
+        }
     }
 
     pub fn is_entity_dead(&self, entity_id: i32) -> bool {
@@ -2427,6 +2464,7 @@ impl DataStorage {
         let from = inner.current_map_id.replace(map_id);
         inner.mobs_in_sight.clear();
         inner.entity_positions.clear();
+        inner.self_guess = None;
         inner.hidden_cubes.clear();
         inner.zone_generation += 1;
         if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
@@ -3469,35 +3507,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn your_spot_moves_toward_the_middle_of_whats_in_sight_as_it_gets_old() {
+    fn a_mob_leaving_sight_tells_how_far_you_are_from_it() {
         let storage = DataStorage::new();
         let spot = |x: f32, y: f32| Position { x, y, z: 15_000.0 };
-        crate::clock::set_override(Some(0));
-        storage.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
-        for (id, x, y) in [(1, 110_000.0, 1_000.0), (2, 110_000.0, -1_000.0), (3, 112_000.0, 0.0)] {
+        let mob = |id: i32, code: i32, x: f32, y: f32| {
+            storage.append_mob(id, code);
             storage.note_spotted(Spotted::Entity(id, spot(x, y)));
-        }
-        let x_at = |at: i64| {
-            crate::clock::set_override(Some(at));
-            storage.self_estimate(60_000).map(|(p, age, guessed)| (p.x.round() as i32, age, guessed))
         };
-        assert_eq!(x_at(0), Some((100_000, Some(0), false)));
-        assert_eq!(x_at(2_500), Some((105_333, Some(2_500), true)));
-        assert_eq!(x_at(5_000), Some((110_667, Some(5_000), true)));
-        // Too old to tell from: nothing.
-        assert_eq!(x_at(61_000), None);
-        // What's out of sight from where you can be is left out: left behind.
-        storage.note_spotted(Spotted::Entity(4, spot(1_000_000.0, 0.0)));
-        assert_eq!(x_at(5_000), Some((110_667, Some(5_000), true)));
-        // Never farther than a mount gets since: 5 m + 2.5 m per second.
-        crate::clock::set_override(Some(10_000));
-        storage.note_spotted(Spotted::You(spot(95_000.0, 0.0)));
-        assert_eq!(x_at(15_000), Some((95_000 + 500 + 12_500, Some(5_000), true)));
-        // Out of sight (`42 36` flag 1): no longer counted.
-        storage.note_out_of_sight(3);
+        let at = |ms: i64| {
+            crate::clock::set_override(Some(ms));
+            storage.self_estimate(60_000).map(|(p, age, guessed)| ((p.x.round() as i32, p.y.round() as i32), age, guessed))
+        };
         crate::clock::set_override(Some(0));
         storage.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
-        assert_eq!(x_at(5_000), Some((100_000, Some(5_000), false)));
+        // Your spot fresh: code 777 leaves sight 40 m from you.
+        mob(1, 777, 104_000.0, 0.0);
+        at(500);
+        storage.note_out_of_sight(1);
+        assert_eq!(at(500), Some(((100_000, 0), Some(500), false)));
+        // Your spot 8 s old: another 777 leaves sight, you're 40 m from it.
+        mob(2, 777, 100_000.0, 10_000.0);
+        at(8_000);
+        storage.note_out_of_sight(2);
+        assert_eq!(at(8_000), Some(((100_000, 6_000), Some(8_000), true)));
+        assert!(!storage.mobs_in_sight(60_000).contains_key(&777));
+        // A code not learnt yet, or a spot far off (old): nothing.
+        mob(3, 888, 100_000.0, 20_000.0);
+        mob(4, 777, 900_000.0, 0.0);
+        storage.note_out_of_sight(3);
+        storage.note_out_of_sight(4);
+        assert_eq!(at(8_000), Some(((100_000, 6_000), Some(8_000), true)));
+        // Too old to tell from: nothing; your spot told again: no guess.
+        assert_eq!(at(61_000), None);
+        storage.note_spotted(Spotted::You(spot(100_000.0, 9_000.0)));
+        assert_eq!(at(61_000), Some(((100_000, 9_000), Some(0), false)));
         crate::clock::set_override(None);
     }
 

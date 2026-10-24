@@ -91,8 +91,8 @@
 //! SELF_POS_MAX_AGE_MS ago), `pos` (`{"x","y"}`) your spot on the ground in
 //! metres, to the nearest 10 (null: unknown) — the pet tracker tells from it
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
-//! toward the middle of what's in sight near it (it got old) — tens of
-//! metres off.
+//! since, by the mobs that left sight (`DataStorage::self_estimate`) — tens
+//! of metres off.
 //! `cubes` (`{"cubes":[{"metres","above"}]}`) on every change and once on
 //! connecting: the Hidden Cubes in range (`capture::objects`), closest first,
 //! from when the game sends one until it goes out of range, is opened or a

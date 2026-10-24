@@ -108,6 +108,9 @@ fn scan_for_your_spot() {
                 Some(Spotted::You(pos)) => {
                     scan.sight.clear();
                     scan.fixes.push((now, pos));
+                    if std::env::var_os("A2_SCAN_SIGHT").is_some() {
+                        eprintln!("FIX {now} {:.1} {:.1}", pos.x / 100.0, pos.y / 100.0);
+                    }
                 }
                 Some(Spotted::Entity(id, pos)) if Some(id as i64) == me_id => {
                     // The engine's own guess, just before this spot is told (the tap runs first).
@@ -132,10 +135,17 @@ fn scan_for_your_spot() {
                         }
                     }
                     scan.fixes.push((now, pos));
+                    if std::env::var_os("A2_SCAN_SIGHT").is_some() {
+                        eprintln!("FIX {now} {:.1} {:.1}", pos.x / 100.0, pos.y / 100.0);
+                    }
                     let sight = scan.sight.values().copied().collect();
                     scan.at_fixes.push((now, pos, sight));
                 }
                 Some(Spotted::Entity(id, pos)) => {
+                    if op == [0x41, 0x36] && std::env::var_os("A2_SCAN_SIGHT").is_some() {
+                        let told = storage.self_position();
+                        eprintln!("SIGHT {now} in {id} {:.0} {:.0} me {}", pos.x / 100.0, pos.y / 100.0, told.map_or("-".into(), |(p, age)| format!("{:.0} {:.0} {age}", p.x / 100.0, p.y / 100.0)));
+                    }
                     scan.sight.insert(id, (pos, now));
                     let new = !scan.seen.contains_key(&id);
                     scan.seen.insert(id, (now, pos));
@@ -158,6 +168,10 @@ fn scan_for_your_spot() {
                 e.0 += 1;
                 e.1 += storage.is_entity_dead(entity.value) as u32;
                 scan.flag_gone.insert(entity.value, flag);
+                if let (true, Some((pos, _))) = (std::env::var_os("A2_SCAN_SIGHT").is_some(), scan.sight.get(&entity.value)) {
+                    let told = storage.self_position();
+                    eprintln!("SIGHT {now} out{flag} {} {:.1} {:.1} me {} code {}", entity.value, pos.x / 100.0, pos.y / 100.0, told.map_or("-".into(), |(p, age)| format!("{:.0} {:.0} {age}", p.x / 100.0, p.y / 100.0)), storage.mob_code(entity.value).unwrap_or(-1));
+                }
                 if let (Some((pos, _)), Some(me)) = (scan.sight.remove(&entity.value), fresh) {
                     scan.gone.entry(flag).or_default().push(me.metres_to(&pos));
                 }
