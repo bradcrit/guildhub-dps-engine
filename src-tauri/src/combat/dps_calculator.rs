@@ -1723,6 +1723,7 @@ impl DpsCalculator {
                     is_dot,
                     hit_timestamps: Vec::new(),
                     specs: skill_data.spec_flags.to_vec(),
+                    effective: 0,
                 });
 
                 entry.time += skill_data.hit_count;
@@ -1828,6 +1829,7 @@ impl DpsCalculator {
                     is_dot: is_hot,
                     hit_timestamps: Vec::new(),
                     specs: Vec::new(),
+                    effective: 0,
                 });
                 // Only the heals inside this fight's window count: healing is
                 // kept for the whole session, so the totals used to include
@@ -1836,12 +1838,15 @@ impl DpsCalculator {
                 // hit as damage's are, feed HEAL's HPS chart and cast lanes.
                 let (from, to) = (target_data.first_damage_time, target_data.last_damage_time);
                 let mut healed: i64 = 0;
-                for &(t, amount) in hd.ticks.iter().filter(|(t, _)| *t >= from && *t <= to) {
+                let mut effective: i64 = 0;
+                for (i, &(t, amount)) in hd.ticks.iter().enumerate().filter(|(_, (t, _))| *t >= from && *t <= to) {
                     healed += amount;
+                    effective += hd.effective.get(i).copied().unwrap_or(amount);
                     entry.time += 1;
                     entry.hit_timestamps.push(t - from);
                 }
                 entry.dmg = entry.dmg.saturating_add(healed.min(i32::MAX as i64) as i32);
+                entry.effective = entry.effective.saturating_add(effective.min(i32::MAX as i64) as i32);
             }
         }
 

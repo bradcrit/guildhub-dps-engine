@@ -622,6 +622,7 @@ impl StreamProcessor {
             // produced bogus multi-million single-tick "heals" in offline scans).
             self.data_storage.append_heal(
                 actor_info.value,
+                target_info.value,
                 skill_code,
                 amount_info.value as i64,
                 effect_type == 0x0B,
@@ -693,7 +694,7 @@ impl StreamProcessor {
         self.data_storage.append_mob_hp(actor_id, hp_max_info.value);
         // A party member's HP reaching 0 is how their death shows (Details'
         // DPS chart marks it).
-        self.data_storage.note_hp(actor_id, hp_info.value);
+        self.data_storage.note_party_hp(actor_id, hp_info.value, hp_max_info.value);
 
         true
     }
@@ -1962,6 +1963,7 @@ impl StreamProcessor {
                 // it as healing makes the HEAL view capture instant self-heals, not just
                 // HoTs. (The cast-marker variant breaks out earlier on its and_result.)
                 self.data_storage.append_heal(
+                    actor_value,
                     actor_value,
                     resolved_skill_code,
                     final_damage as i64,

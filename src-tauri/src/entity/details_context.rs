@@ -172,6 +172,10 @@ pub struct DetailSkillEntry {
     pub hit_timestamps: Vec<i64>,
     #[serde(default)]
     pub specs: Vec<bool>,
+    /// A heal row's effective healing — `dmg` without the overheal. 0 on
+    /// damage rows and in fights saved before it was kept.
+    #[serde(default)]
+    pub effective: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

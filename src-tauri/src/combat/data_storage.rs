@@ -152,6 +152,9 @@ pub struct HealSkillData {
     /// details count only the ticks inside its window (its totals, its HPS
     /// chart and its heal cast lanes).
     pub ticks: Vec<(i64, i64)>,
+    /// Each tick's effective healing, beside `ticks`: what the target was
+    /// missing of their max HP (`effective_heal`) — the rest is overheal.
+    pub effective: Vec<i64>,
 }
 
 /// A hit the game reports with no damage, by its hit type (`EHitType`).
@@ -789,6 +792,9 @@ struct Inner {
     /// death. The game sends no `42 36` death for a player (Ultimate Berk,
     /// 2026-10-11: 184 monster deaths, not one of the four that died).
     last_hp: HashMap<i32, i32>,
+    /// Each party member's max HP as `1b 92` sends it (`effective_heal`) —
+    /// not `mob_hp_data`, which for a player is only the highest HP seen.
+    party_max_hp: HashMap<i32, i32>,
     /// Linked summons that left the world (`42 36` flag 7). Their damage over
     /// time ticks on, but the game's Damage Analyzer counts no tick after the
     /// spirit is gone, so the meter does not either. Kept through a reset, like
@@ -967,6 +973,7 @@ impl DataStorage {
                 boss_events: VecDeque::new(),
                 a2tools_users: HashSet::new(),
                 last_hp: HashMap::new(),
+                party_max_hp: HashMap::new(),
                 despawned_summon_ids: HashSet::new(),
                 boss_entity_ids: HashSet::new(),
                 training_dummy_ids: HashSet::new(),
@@ -2068,6 +2075,7 @@ impl DataStorage {
                 }
                 // Also record per-skill so ally heals show in the HEAL view (the
                 // self-heal path does this via append_heal; mirror it for ally heals).
+                let effective = effective_heal(&mut inner, target_id, heal_amount as i64);
                 let e = inner
                     .heal_storage
                     .entry(actor_id)
@@ -2077,6 +2085,7 @@ impl DataStorage {
                 e.total_heal += heal_amount as i64;
                 e.tick_count += 1;
                 e.ticks.push((pdp.timestamp(), heal_amount as i64));
+                e.effective.push(effective);
             }
             return;
         }
@@ -2275,7 +2284,20 @@ impl DataStorage {
     /// A party member's HP (`1b 92`). Dropping to 0 from above logs a death;
     /// coming back up (revived) arms the next one.
     pub fn note_hp(&self, entity_id: i32, hp: i32) {
+        self.note_hp_of(entity_id, hp, None);
+    }
+
+    /// `note_hp` with the max HP `1b 92` sent along — what a heal on them
+    /// can heal at most (`effective_heal`).
+    pub fn note_party_hp(&self, entity_id: i32, hp: i32, max_hp: i32) {
+        self.note_hp_of(entity_id, hp, Some(max_hp));
+    }
+
+    fn note_hp_of(&self, entity_id: i32, hp: i32, max_hp: Option<i32>) {
         let mut inner = self.inner.write();
+        if let Some(max) = max_hp.filter(|&m| m > 0) {
+            inner.party_max_hp.insert(entity_id, max);
+        }
         let before = inner.last_hp.insert(entity_id, hp);
         if hp == 0 && before.is_some_and(|b| b > 0) {
             inner.death_log.push_back((entity_id, now_ms(), None));
@@ -2978,13 +3000,15 @@ impl DataStorage {
         self.inner.read().mob_current_hp.get(&id).copied()
     }
 
-    /// Record a heal tick done by `actor_id` with `skill_code` (is_hot marks a HoT).
-    /// Keyed by the healer so "healing done" can be shown per player. Self-heals count.
-    pub fn append_heal(&self, actor_id: i32, skill_code: i32, amount: i64, is_hot: bool, timestamp: i64) {
+    /// Record a heal tick done by `actor_id` on `target_id` with `skill_code`
+    /// (is_hot marks a HoT). Keyed by the healer so "healing done" can be shown
+    /// per player. Self-heals count.
+    pub fn append_heal(&self, actor_id: i32, target_id: i32, skill_code: i32, amount: i64, is_hot: bool, timestamp: i64) {
         if amount <= 0 || !self.is_plausible_entity_id(actor_id) {
             return;
         }
         let mut inner = self.inner.write();
+        let effective = effective_heal(&mut inner, target_id, amount);
         let e = inner
             .heal_storage
             .entry(actor_id)
@@ -2994,6 +3018,7 @@ impl DataStorage {
         e.total_heal += amount;
         e.tick_count += 1;
         e.ticks.push((timestamp, amount));
+        e.effective.push(effective);
         drop(inner);
         self.damage_generation.fetch_add(1, Ordering::Relaxed);
     }
@@ -3413,6 +3438,7 @@ fn forget_entity(inner: &mut Inner, id: i32) {
             e.total_heal += h.total_heal;
             e.tick_count += h.tick_count;
             e.ticks.extend(h.ticks);
+            e.effective.extend(h.effective);
         }
     }
     let held: Vec<(i32, i32)> = inner.held_dot_ticks.keys().filter(|k| k.1 == id).copied().collect();
@@ -3683,6 +3709,29 @@ fn fight_of(inner: &mut Inner, actor: i32, mob: Option<i32>) -> Option<&mut Acto
             .map(|(_, std::cmp::Reverse(tid))| tid)
     })?;
     inner.target_combat.get_mut(&tid)?.actors.get_mut(&actor)
+}
+
+/// What a heal of `amount` on `target` really healed: up to what they were
+/// missing of their max HP — the rest is overheal. Their HP and max HP come
+/// from the party's `1b 92` (the HP also from the combat packets' HP
+/// records); the game sends the HP after a heal behind the heal itself (the
+/// 2026-10-25 captures: 9863 HP, a heal of 59, then 9922), so the HP known
+/// here is the one before it, and it's moved up by the heal for the next tick
+/// of the same burst. A target whose max HP isn't known (not in the party)
+/// counts fully; a dead one not at all.
+fn effective_heal(inner: &mut Inner, target: i32, amount: i64) -> i64 {
+    let (Some(&hp), Some(&max)) = (inner.last_hp.get(&target), inner.party_max_hp.get(&target)) else {
+        return amount;
+    };
+    if max <= 0 || hp > max {
+        return amount;
+    }
+    if hp == 0 {
+        return 0;
+    }
+    let healed = amount.min(i64::from(max - hp));
+    inner.last_hp.insert(target, hp + healed as i32);
+    healed
 }
 
 fn is_friendly_action(inner: &Inner, actor_id: i32, target_id: i32) -> bool {
@@ -4390,11 +4439,30 @@ mod tests {
         s.append_summon(14409, 500);
         s.append_nickname_authoritative(14274, "Templar");
         for (actor, skill) in [(22809, 18_730_003), (500, 16_770_000), (14274, 18_730_003), (14409, 2_011_101)] {
-            s.append_heal(actor, skill, 100, true, 0);
+            s.append_heal(actor, actor, skill, 100, true, 0);
         }
         let mut healers: Vec<i32> = s.get_heal_snapshot().into_keys().collect();
         healers.sort();
         assert_eq!(healers, vec![500, 14274, 14409], "the boss is not one");
+    }
+
+    /// A heal counts as effective up to what its target was missing of the
+    /// max HP `1b 92` sent; the HP after it comes behind the heal, so a burst
+    /// fills the gap once. A target whose max HP isn't known counts fully.
+    #[test]
+    fn effective_healing_stops_at_full_hp() {
+        let s = DataStorage::new();
+        s.note_party_hp(2001, 900, 1000);
+        s.append_heal(14274, 2001, 18_730_003, 300, false, 1);
+        s.append_heal(14274, 2001, 18_730_003, 50, false, 2);
+        s.note_party_hp(2001, 500, 1000);
+        s.append_heal(14274, 2001, 18_730_003, 200, false, 3);
+        s.append_heal(14274, 2002, 18_730_003, 70, false, 4);
+        s.note_party_hp(2001, 0, 1000);
+        s.append_heal(14274, 2001, 18_730_003, 90, false, 5);
+        let heal = &s.get_heal_snapshot()[&14274][&(18_730_003, false)];
+        assert_eq!(heal.effective, vec![100, 0, 200, 70, 0]);
+        assert_eq!(heal.total_heal, 710);
     }
 
     #[test]
