@@ -494,6 +494,9 @@ const MOB_METRES_MAX: f32 = 500.0;
 /// A map load drops your spot unless it was told this shortly before (ms): a
 /// teleport's spot may come just ahead of the load that names the new map.
 const SPOT_BEFORE_LOAD_MS: i64 = 3_000;
+/// Objects used up further from you than this (m) aren't logged: someone
+/// else gathering. Opening one, you stand right at it.
+const USED_OBJECT_LOG_METRES: f32 = 15.0;
 /// The last this many distances per code; the median counts.
 const SIGHT_KEPT: usize = 15;
 /// A mob leaving sight farther than its distance plus this (cm) from your
@@ -710,6 +713,10 @@ struct Inner {
     /// The Hidden Cubes in range: entity -> spot, until they go out of range,
     /// are opened or a zone load (`capture::objects`).
     hidden_cubes: HashMap<i32, Position>,
+    /// Every object in range: entity -> (code, spot), and the codes logged on
+    /// this map — to find an object's code from a log (`note_object`).
+    objects_in_range: HashMap<i32, (u32, Position)>,
+    object_codes_logged: HashSet<u32>,
     /// Power-scalar values observed per actor in its damage records. A summon
     /// inherits its owner's, so this links the two when no spawn packet (and
     /// therefore no `parent_key`) ever arrives — the case for a Cleric's Divine
@@ -912,6 +919,8 @@ impl DataStorage {
                 sight_radii_seq: 0,
                 entity_positions: HashMap::new(),
                 hidden_cubes: HashMap::new(),
+                objects_in_range: HashMap::new(),
+                object_codes_logged: HashSet::new(),
                 actor_power_scalars: HashMap::new(),
                 hostile_target_ids: HashSet::new(),
                 dead_entity_ids: HashSet::new(),
@@ -1089,20 +1098,33 @@ impl DataStorage {
     /// An object record (`capture::objects`): only Hidden Cubes are kept.
     pub fn note_object(&self, record: ObjectRecord) {
         let mut inner = self.inner.write();
+        // How far (how far the game sends one) only while your spot is fresh enough to tell.
+        let me = inner.self_position.filter(|(_, at)| now_ms() - at <= 2_000).map(|(pos, _)| pos);
+        let away = |pos: &Position| me.map_or("your spot unknown".to_string(), |me| format!("{:.0} m away", me.metres_to(pos)));
         match record {
-            ObjectRecord::InRange(id, code, pos) if is_hidden_cube(code) => {
-                // Every cube, so a log tells whether the game sent it — how far
-                // (how far the game sends one) only while your spot is fresh enough to tell.
-                match inner.self_position.filter(|(_, at)| now_ms() - at <= 2_000) {
-                    Some((me, _)) => tracing::info!("Hidden Cube {id} in range, {:.0} m away", me.metres_to(&pos)),
-                    None => tracing::info!("Hidden Cube {id} in range (your spot unknown)"),
+            ObjectRecord::InRange(id, code, pos) => {
+                if is_hidden_cube(code) {
+                    // Every cube, so a log tells whether the game sent it.
+                    tracing::info!("Hidden Cube {id} in range ({})", away(&pos));
+                    inner.hidden_cubes.insert(id, pos);
+                } else if inner.object_codes_logged.insert(code) {
+                    // Each other code once a map: an object not known yet
+                    // (the Elyos cube) shows up by where it stands.
+                    tracing::info!("Object {code} in range ({}, map {:?})", away(&pos), inner.current_map_id);
                 }
-                inner.hidden_cubes.insert(id, pos);
+                inner.objects_in_range.insert(id, (code, pos));
             }
-            ObjectRecord::InRange(..) => {}
-            ObjectRecord::Gone(id) => {
+            ObjectRecord::Gone(id, used) => {
+                let object = inner.objects_in_range.remove(&id);
                 if inner.hidden_cubes.remove(&id).is_some() {
-                    tracing::info!("Hidden Cube {id} gone (out of range or opened)");
+                    tracing::info!("Hidden Cube {id} gone ({})", if used { "opened" } else { "out of range" });
+                } else if let Some((code, pos)) = object.filter(|_| used) {
+                    // Opened or gathered, by you or anyone close by: one you
+                    // opened is the line right before its reward list.
+                    let near = me.is_none_or(|me| me.metres_to(&pos) <= USED_OBJECT_LOG_METRES);
+                    if near {
+                        tracing::info!("Object {code} used up ({}, map {:?})", away(&pos), inner.current_map_id);
+                    }
                 }
             }
         }
@@ -2578,6 +2600,8 @@ impl DataStorage {
         // load (a login or teleport next to it) would be lost here.
         tracing::info!("Map load: {from:?} -> {map_id}, {} Hidden Cube(s) dropped", inner.hidden_cubes.len());
         inner.hidden_cubes.clear();
+        inner.objects_in_range.clear();
+        inner.object_codes_logged.clear();
         // Another map: its spots aren't the old one's — distances from your
         // spot there came out kilometres (the pet tracker's "14686 m").
         if from != Some(map_id) && inner.self_position.is_some_and(|(_, at)| now_ms() - at > SPOT_BEFORE_LOAD_MS) {

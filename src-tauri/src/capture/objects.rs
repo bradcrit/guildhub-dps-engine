@@ -17,6 +17,10 @@
 //! the same object (1300865/1200865, 1300824/1200824, 1300825/1200825 in a
 //! log of 2026-10-25) — so the Elyos cube is taken to be 1201199, not seen
 //! yet: an Asmodian in Verteron got none.
+//!
+//! To find a code from a log, every other object's code is logged once a map
+//! when it comes into range, and again when one close to you is used up —
+//! right before the reward list of one you opened (`DataStorage::note_object`).
 
 use super::positions::{position_at, Position};
 use super::stream_processor::read_varint;
@@ -36,8 +40,9 @@ pub fn is_hidden_cube(code: u32) -> bool {
 pub enum ObjectRecord {
     /// An object in range: its entity, code and spot.
     InRange(i32, u32, Position),
-    /// It is gone (out of range or used up).
-    Gone(i32),
+    /// It is gone: its entity, and whether it was used up (`04 03`: opened,
+    /// gathered) rather than out of range.
+    Gone(i32, bool),
 }
 
 /// The object record one game packet (a whole frame) is, if any.
@@ -59,7 +64,9 @@ pub fn parse(packet: &[u8]) -> Option<ObjectRecord> {
             let code = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
             position_at(packet, after + 6).map(|pos| ObjectRecord::InRange(entity.value, code, pos))
         }
-        [0x35, 0x36] if packet.get(after + 2) == Some(&0x00) => Some(ObjectRecord::Gone(entity.value)),
+        [0x35, 0x36] if packet.get(after + 2) == Some(&0x00) => {
+            Some(ObjectRecord::Gone(entity.value, packet.get(after..after + 2) == Some(&[0x04, 0x03][..])))
+        }
         _ => None,
     }
 }
@@ -107,8 +114,8 @@ mod tests {
     #[test]
     fn objects_go() {
         // Out of range, and used up.
-        assert_eq!(parse(&hex("0C3536FC8102010100")), Some(ObjectRecord::Gone(33020)));
-        assert_eq!(parse(&hex("0C3536D8B803040300")), Some(ObjectRecord::Gone(56408)));
+        assert_eq!(parse(&hex("0C3536FC8102010100")), Some(ObjectRecord::Gone(33020, false)));
+        assert_eq!(parse(&hex("0C3536D8B803040300")), Some(ObjectRecord::Gone(56408, true)));
         assert_eq!(parse(&hex("0B4236D0F0010001")), None);
     }
 }

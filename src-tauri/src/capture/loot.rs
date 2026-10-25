@@ -74,6 +74,9 @@ pub struct LootReader {
     /// Items the last cube listed: their next stack change is the cube's,
     /// already counted — remembered, not counted again.
     from_cube: HashSet<u32>,
+    /// Items whose stack was seen going down (or first seen already there),
+    /// logged once each — a key used on a cube shows up so.
+    used_logged: HashSet<u32>,
 }
 
 impl LootReader {
@@ -88,6 +91,7 @@ impl LootReader {
         let body = &frame[at + 2..];
         if kind == CUBE {
             let items = cube_items(body)?;
+            tracing::info!("Reward list opened: {items:?}");
             self.from_cube = items.iter().map(|&(item, _)| item).collect();
             return Some(Loot { source: LootSource::Cube, items });
         }
@@ -111,6 +115,9 @@ impl LootReader {
         self.remember(stack, item, count);
         if self.from_cube.remove(&item) {
             return 0;
+        }
+        if !new && before.is_none_or(|n| count < n) && self.used_logged.insert(item) {
+            tracing::info!("Item {item}: stack {before:?} -> {count}");
         }
         match before {
             Some(n) => count.saturating_sub(n),
