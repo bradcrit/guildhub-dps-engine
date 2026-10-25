@@ -24,7 +24,13 @@
 //! game's, the same for every character. Only the ones in `CURRENCIES` are
 //! looked for, by their id.
 //!
-//! Both are your own character's only — the game sends nobody else's.
+//! **Duty missions** (`1C 8D`, the Journal's list, at login and after each
+//! reward taken): `<list u32> <done today u32> <count u8> <missions …>`. List 1
+//! is Duty → Mission, its "done today" the Journal's "Per Server Daily
+//! Completion" (0/5 → 1/5 → 2/5 as rewards were taken, 2026-10-25). Other
+//! lists (0) come when the Journal opens; only list 1 is read.
+//!
+//! All of these are your own character's only — the game sends nobody else's.
 
 /// The currencies looked for: the game's item id, and the name the engine
 /// gives it.
@@ -55,7 +61,12 @@ pub enum ListUpdate {
     /// Currencies as (item id, amount); `whole`: the inventory at login, a
     /// currency not in it is at 0.
     Items { items: Vec<(u32, u64)>, whole: bool },
+    /// Duty missions whose reward was taken today.
+    Duties { done: u32 },
 }
+
+/// The Journal's list of Duty → Mission (`1C 8D`'s first number).
+const DUTY_MISSIONS: u32 = 1;
 
 pub fn parse(packet: &[u8]) -> Option<ListUpdate> {
     let length = super::stream_processor::read_varint(packet, 0);
@@ -71,6 +82,12 @@ pub fn parse(packet: &[u8]) -> Option<ListUpdate> {
         [0x1B, 0x56] => {
             let items = currencies_in(body);
             (!items.is_empty()).then_some(ListUpdate::Items { items, whole: false })
+        }
+        [0x1C, 0x8D] => {
+            let list = u32::from_le_bytes(body.get(0..4)?.try_into().ok()?);
+            let done = u32::from_le_bytes(body.get(4..8)?.try_into().ok()?);
+            // Generous: only to turn away a list that isn't the one.
+            (list == DUTY_MISSIONS && done <= 100).then_some(ListUpdate::Duties { done })
         }
         _ => None,
     }
@@ -200,6 +217,20 @@ mod tests {
     fn a_currency_is_found_by_its_item_id() {
         let p = packet("1B 56", "02 01 00 BA 8E 13 00 00 8A 01 00 23 33 70 37 85 1A 01 00 00 00 00 00 01 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0F 00 00 00 B2 D6 16 00 00 09 01 00 6A 26 B4 1F 01 00 00 00 00 00 00 00");
         assert_eq!(parse(&p), Some(ListUpdate::Items { items: vec![(930_100_003, 72_325)], whole: false }));
+    }
+
+    /// After the second Duty reward of the day, 2026-10-25 13:32:32 (cut after the first mission).
+    #[test]
+    fn the_duty_list_says_how_many_are_done() {
+        let p = packet("1C 8D", "01 00 00 00 02 00 00 00 11 0B 01 00 00 3A 20 23 00 29 01 00 00");
+        assert_eq!(parse(&p), Some(ListUpdate::Duties { done: 2 }));
+    }
+
+    /// The Journal's other list, as it opened at 2026-10-25 13:23:49.
+    #[test]
+    fn another_journal_list_is_nothing() {
+        let p = packet("1C 8D", "00 00 00 00 00 00 00 00 0F 00 01 00 00 C7 20 23 00");
+        assert_eq!(parse(&p), None);
     }
 
     #[test]

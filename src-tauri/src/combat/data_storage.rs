@@ -130,6 +130,8 @@ pub struct GameLists {
     pub items: std::collections::BTreeMap<u32, u64>,
     /// The whole inventory was seen (a login): a currency not in `items` is at 0.
     pub items_whole: bool,
+    /// Duty missions done today (the Journal's daily completions).
+    pub duties: Option<u32>,
     pub owner: Option<String>,
     awaits_self_record: bool,
 }
@@ -1835,6 +1837,8 @@ impl DataStorage {
             ListUpdate::Counts { entries, whole } => {
                 if whole {
                     lists.counts.clear();
+                    // Another character's: its own list follows the login's counts.
+                    lists.duties = None;
                 }
                 for e in entries {
                     lists.counts.insert(e.id, e);
@@ -1852,6 +1856,13 @@ impl DataStorage {
                     }
                 }
                 whole
+            }
+            ListUpdate::Duties { done } => {
+                if lists.duties != Some(done) {
+                    tracing::info!("Duty missions done today: {done}");
+                }
+                lists.duties = Some(done);
+                false
             }
         };
         if whole {

@@ -386,9 +386,10 @@ impl Engine {
         let name = profile.name.filter(|_| self.storage.local_identity_from_self_record());
         // Entry counts by the game's id as [first, second, ms] (see
         // `capture::game_lists`), currencies by name (`itemsWhole`: since a
-        // login, so one missing is at 0) — whose, as the Odyle energy.
+        // login, so one missing is at 0), Duty missions done today — whose, as
+        // the Odyle energy.
         let lists = self.storage.game_lists();
-        let lists = (!lists.counts.is_empty() || !lists.items.is_empty()).then(|| {
+        let lists = (!lists.counts.is_empty() || !lists.items.is_empty() || lists.duties.is_some()).then(|| {
             let counts: serde_json::Map<String, serde_json::Value> = lists
                 .counts
                 .values()
@@ -398,7 +399,7 @@ impl Engine {
                 .iter()
                 .filter_map(|(id, key)| lists.items.get(id).map(|amount| (key.to_string(), (*amount).into())))
                 .collect();
-            serde_json::json!({ "owner": lists.owner, "counts": counts, "items": items, "itemsWhole": lists.items_whole })
+            serde_json::json!({ "owner": lists.owner, "counts": counts, "items": items, "itemsWhole": lists.items_whole, "duties": lists.duties })
         });
         serde_json::json!({
             "name": name,
