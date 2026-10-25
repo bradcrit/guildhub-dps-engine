@@ -9,7 +9,7 @@ use crate::capture::game_lists::{EntryCount, ListUpdate};
 use crate::combat::nearby_players::{DeathRecap, KillRecord, NearbyPlayer, NearbyPlayers};
 use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow};
 
-use crate::capture::objects::{ObjectRecord, HIDDEN_CUBE};
+use crate::capture::objects::{is_hidden_cube, ObjectRecord};
 use crate::capture::positions::{Position, Spotted};
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
@@ -1088,7 +1088,7 @@ impl DataStorage {
     pub fn note_object(&self, record: ObjectRecord) {
         let mut inner = self.inner.write();
         match record {
-            ObjectRecord::InRange(id, code, pos) if code == HIDDEN_CUBE => {
+            ObjectRecord::InRange(id, code, pos) if is_hidden_cube(code) => {
                 // Every cube, so a log tells whether the game sent it — how far
                 // (how far the game sends one) only while your spot is fresh enough to tell.
                 match inner.self_position.filter(|(_, at)| now_ms() - at <= 2_000) {

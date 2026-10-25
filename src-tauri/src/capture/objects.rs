@@ -7,15 +7,30 @@
 //!   `04 03` used up (opened, gathered — by you or anyone).
 //!
 //! Read off two captures (2026-10-24, 00:28 and 00:36): the objects came and
-//! went with the run, and the two Hidden Cubes opened (code HIDDEN_CUBE, in
-//! two zones) went with `04 03` right after the game's open animation. The
-//! game sends an object some 100 m or more away — further than its sound.
+//! went with the run, and the two Hidden Cubes opened (code
+//! HIDDEN_CUBE_ASMODIAN, in two zones) went with `04 03` right after the
+//! game's open animation. The game sends an object some 100 m or more away —
+//! further than its sound.
+//!
+//! Cubes belong to a faction's own lands. The object codes go by side: in
+//! Altgard (map 1110) 13…, in Verteron (map 1010) 12… with the same rest for
+//! the same object (1300865/1200865, 1300824/1200824, 1300825/1200825 in a
+//! log of 2026-10-25) — so the Elyos cube is taken to be 1201199, not seen
+//! yet: an Asmodian in Verteron got none.
 
 use super::positions::{position_at, Position};
 use super::stream_processor::read_varint;
 
-/// The object code of a Hidden Cube.
-pub const HIDDEN_CUBE: u32 = 1_301_199;
+/// The object code of a Hidden Cube in the Asmodian lands (Altgard).
+pub const HIDDEN_CUBE_ASMODIAN: u32 = 1_301_199;
+/// The object code of a Hidden Cube in the Elyos lands (Verteron) — by the
+/// codes' pattern (see the top of this file), unconfirmed.
+pub const HIDDEN_CUBE_ELYOS: u32 = 1_201_199;
+
+/// Whether an object code is a Hidden Cube's.
+pub fn is_hidden_cube(code: u32) -> bool {
+    code == HIDDEN_CUBE_ASMODIAN || code == HIDDEN_CUBE_ELYOS
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ObjectRecord {
@@ -68,12 +83,18 @@ mod tests {
     fn hidden_cubes_come_into_range() {
         assert_eq!(
             in_range("3D3436D8B8030400CFDA1300CE58214878481248001E9B4600000000003084430101016891E06AA10100000000000000000000369FA8F0070000"),
-            (56408, HIDDEN_CUBE, (165219, 149794, 19855))
+            (56408, HIDDEN_CUBE_ASMODIAN, (165219, 149794, 19855))
         );
         assert_eq!(
             in_range("3D3436A8B1020400CFDA130080F4EFC7004090C500FC0646000000000050A0430101012B80F16AA10100000000000000000000077F0B69070000"),
-            (39080, HIDDEN_CUBE, (-122857, -4616, 8639))
+            (39080, HIDDEN_CUBE_ASMODIAN, (-122857, -4616, 8639))
         );
+    }
+
+    #[test]
+    fn both_sides_cubes() {
+        assert!(is_hidden_cube(HIDDEN_CUBE_ASMODIAN) && is_hidden_cube(HIDDEN_CUBE_ELYOS));
+        assert!(!is_hidden_cube(1_300_865) && !is_hidden_cube(1_200_865));
     }
 
     #[test]
