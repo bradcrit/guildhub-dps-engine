@@ -122,7 +122,8 @@
 //! change, and once on connecting) for the resource bars
 //! (`capture::resources`): each `{"current","max"}` of your character, null
 //! until its maximum is known (the login sends it; a meter started
-//! mid-session hears it at the next login).
+//! mid-session hears it at the next login — HP in a party at once, from its
+//! `1b 92`).
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,

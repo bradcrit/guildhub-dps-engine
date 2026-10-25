@@ -2370,8 +2370,19 @@ impl DataStorage {
 
     /// `note_hp` with the max HP `1b 92` sent along — what a heal on them
     /// can heal at most (`effective_heal`).
+    /// It goes to the resource bars too, as a `00 8d` HP record would: in a
+    /// party your HP bar has its maximum from here without a login, and
+    /// whichever record came last — this or `00 8d` — holds, a maximum
+    /// changed by an item or a skill included.
     pub fn note_party_hp(&self, entity_id: i32, hp: i32, max_hp: i32) {
         self.note_hp_of(entity_id, hp, Some(max_hp));
+        if hp >= 0 && max_hp > 0 {
+            self.note_resources(resources::Update {
+                entity: entity_id,
+                small: Vec::new(),
+                wide: vec![(resources::HP, hp as u64), (resources::HP + resources::MAX_OFFSET, max_hp as u64)],
+            });
+        }
     }
 
     fn note_hp_of(&self, entity_id: i32, hp: i32, max_hp: Option<i32>) {
@@ -3875,6 +3886,26 @@ fn is_mob(inner: &Inner, id: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Your HP bar without a login: `1b 92` (in a party) gives HP and max
+    /// HP; a later `00 8d` maximum (an item, a skill) holds over it, and the
+    /// next `1b 92` over that.
+    #[test]
+    fn the_party_hp_record_feeds_your_hp_bar() {
+        use crate::capture::resources::{Gauge, Update, HP};
+        let storage = DataStorage::new();
+        storage.set_local_player_id(Some(14159));
+        assert_eq!(storage.self_resources().wide(HP), None);
+        storage.note_party_hp(14159, 20_000, 24_941);
+        assert_eq!(storage.self_resources().wide(HP), Some(Gauge { current: 20_000, max: 24_941 }));
+        storage.note_resources(Update { entity: 14159, small: Vec::new(), wide: vec![(0x07, 26_000)] });
+        assert_eq!(storage.self_resources().wide(HP), Some(Gauge { current: 20_000, max: 26_000 }));
+        storage.note_party_hp(14159, 25_500, 25_800);
+        assert_eq!(storage.self_resources().wide(HP), Some(Gauge { current: 25_500, max: 25_800 }));
+        // Another party member's goes to theirs, not yours.
+        storage.note_party_hp(2001, 100, 1000);
+        assert_eq!(storage.self_resources().wide(HP).unwrap().max, 25_800);
+    }
 
     #[test]
     fn another_map_drops_your_spot_from_the_old_one() {
