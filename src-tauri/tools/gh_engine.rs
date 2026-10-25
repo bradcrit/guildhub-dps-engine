@@ -40,7 +40,6 @@
 //! | `POST /v1/reset`       | save the open fights, then clear the meter      |
 //! | `POST /v1/config?mode=<id>&window=<ms>` | which targets the meter follows (`TargetSelectionMode` ids) and the all-targets window |
 //! | `POST /v1/character?name=<name>` | the character played, as the parent read it off the game's screen just now |
-//! | `POST /v1/followed?x=&y=&from=` | your spot (world metres) as the parent follows it on the minimap since the one told at `from` (`cubes`' `spot.told`) — the spot of `npcs` and the distances for FOLLOWED_FRESH_MS (data_storage.rs) |
 //!
 //! Events: `dps` (the view) and `self` (as `/v1/self`) on every change, each
 //! sent once on connecting (`self` also carries the game's `ping` in ms);
@@ -93,19 +92,13 @@
 //! metres, to the nearest 10 (null: unknown) — the pet tracker tells from it
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
 //! since, by the mobs that left sight (`DataStorage::self_estimate`) — tens
-//! of metres off. `posFollowed`: `pos` is where the parent followed you
-//! to on the minimap since (`/v1/followed`) — a few metres off.
-//! `cubes` (`{"cubes":[{"metres","above","east","north","at"}],"spot"}`) on
-//! every change and once on connecting: the Hidden Cubes in range
-//! (`capture::objects`), closest first, from when the game sends one until it
-//! goes out of range, is opened or a zone load. `metres` is how far it is on
-//! the ground, `above` how far above you (below: negative), both whole
-//! metres; `east` / `north` where it lies from you (west / south: negative,
-//! metres to 0.1 — up on the map is north). All while your spot is at most
-//! CUBE_POS_MAX_AGE_MS old, else null. `at` is the cube's own spot and
-//! `spot` your last told one with `told` (unix ms, null: none yet), both
-//! `{"x","y","z"}` in world metres — the parent follows you on from there
-//! (its minimap reading), so this event comes with every new spot of yours too.
+//! of metres off.
+//! `cubes` (`{"cubes":[{"metres","above"}]}`) on every change and once on
+//! connecting: the Hidden Cubes in range (`capture::objects`), closest first,
+//! from when the game sends one until it goes out of range, is opened or a
+//! zone load. `metres` is how far it is on the ground, `above` how far above
+//! you (below: negative), both whole metres, while your spot is at most
+//! CUBE_POS_MAX_AGE_MS old, else null.
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -297,9 +290,7 @@ impl Engine {
         // Your spot on the ground in metres, to the nearest 10 (else the event is new at every step).
         let pos = me.map(|(p, ..)| serde_json::json!({ "x": (p.x / 1000.0).round() as i64 * 10, "y": (p.y / 1000.0).round() as i64 * 10 }));
         let guessed = me.is_some_and(|(_, _, guessed)| guessed);
-        let followed = me.is_some() && self.storage.self_followed();
-        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed, "posFollowed": followed })
-            .to_string()
+        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed }).to_string()
     }
 
     /// The Hidden Cubes in range (see the top of this file).
@@ -308,26 +299,12 @@ impl Engine {
             .storage
             .hidden_cubes(CUBE_POS_MAX_AGE_MS)
             .into_iter()
-            .map(|(at, spot)| {
-                let mut cube = match spot {
-                    Some(s) => serde_json::json!({
-                        "metres": s.metres.round() as i32,
-                        "above": s.above.round() as i32,
-                        "east": (s.east * 10.0).round() / 10.0,
-                        "north": (s.north * 10.0).round() / 10.0,
-                    }),
-                    None => serde_json::json!({ "metres": null, "above": null, "east": null, "north": null }),
-                };
-                cube["at"] = world_metres(&at);
-                cube
+            .map(|spot| {
+                let (metres, above) = spot.map_or((None, None), |(m, a)| (Some(m.round() as i32), Some(a.round() as i32)));
+                serde_json::json!({ "metres": metres, "above": above })
             })
             .collect();
-        let spot = self.storage.self_position_at().map(|(pos, at)| {
-            let mut spot = world_metres(&pos);
-            spot["told"] = at.into();
-            spot
-        });
-        serde_json::json!({ "cubes": cubes, "spot": spot }).to_string()
+        serde_json::json!({ "cubes": cubes }).to_string()
     }
 
     /// The pet records ready to be passed on, oldest first, as (event, JSON):
@@ -571,12 +548,6 @@ fn class_key(class: JobClass) -> &'static str {
         JobClass::Chanter => "chanter",
         JobClass::Fighter => "brawler",
     }
-}
-
-/// A spot in the world as `{"x","y","z"}`, metres to 0.01 (`cubes`).
-fn world_metres(pos: &a2tools_dps_meter_lib::capture::positions::Position) -> serde_json::Value {
-    let m = |v: f32| (v as f64).round() / 100.0;
-    serde_json::json!({ "x": m(pos.x), "y": m(pos.y), "z": m(pos.z) })
 }
 
 fn load_resources(dir: &std::path::Path, language: &str) -> (SkillLookup, NpcLookup, HashSet<i32>, Option<String>) {
@@ -1125,20 +1096,12 @@ async fn handle(mut stream: TcpStream, engine: Arc<Engine>) {
             engine.apply_screen_name();
             json(&mut stream, "{\"ok\":true}").await;
         }
-        // Your spot as the parent follows it on the minimap, from the spot told at `from` (`cubes`).
-        ("POST", "/v1/followed") => {
-            let num = |k: &str| req.param(k).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite());
-            if let (Some(x), Some(y), Some(from)) = (num("x"), num("y"), num("from")) {
-                engine.storage.set_followed((x * 100.0) as f32, (y * 100.0) as f32, from as i64);
-            }
-            json(&mut stream, "{\"ok\":true}").await;
-        }
         ("POST", "/v1/reset") => {
             let e = engine.clone();
             let _ = tokio::task::spawn_blocking(move || e.reset()).await;
             json(&mut stream, "{\"ok\":true}").await;
         }
-        (_, "/v1/status" | "/v1/dps" | "/v1/self" | "/v1/events" | "/v1/fights" | "/v1/reset" | "/v1/config" | "/v1/character" | "/v1/followed") => {
+        (_, "/v1/status" | "/v1/dps" | "/v1/self" | "/v1/events" | "/v1/fights" | "/v1/reset" | "/v1/config" | "/v1/character") => {
             respond(&mut stream, 405, "text/plain", b"method not allowed").await;
         }
         _ => respond(&mut stream, 404, "text/plain", b"not found").await,

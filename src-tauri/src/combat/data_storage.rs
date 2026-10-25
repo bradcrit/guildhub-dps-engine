@@ -507,27 +507,6 @@ const BOSS_HP_KEEP_ALIVE_MS: i64 = 60_000;
 /// out of range, or left alone until it recovered).
 const RESET_RISE: u8 = 5;
 
-/// Your spot as the parent followed it (`set_followed`): from the spot told at `from`, sent at `at`.
-#[derive(Debug, Clone, Copy)]
-struct Followed {
-    spot: Position,
-    from: i64,
-    at: i64,
-}
-
-/// Where a Hidden Cube is from you (`hidden_cubes`), in metres.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CubeSpot {
-    /// How far on the ground.
-    pub metres: f32,
-    /// How far above you (below: negative).
-    pub above: f32,
-    /// How far east (west: negative) — the world's +x, right on the map.
-    pub east: f32,
-    /// How far north (south: negative) — the world's -y, up on the map.
-    pub north: f32,
-}
-
 /// A field boss's HP for the sender (`take_boss_hp`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BossHp {
@@ -548,21 +527,8 @@ fn push_boss_event(inner: &mut Inner, event: BossEvent) {
     }
 }
 
-/// Your spot as the parent followed it (`set_followed`) counts while this young.
-const FOLLOWED_FRESH_MS: i64 = 2_000;
-
-/// Your spot as the parent followed it from the last told one, while fresh (`set_followed`).
-fn followed(inner: &Inner) -> Option<Position> {
-    let (_, told) = inner.self_position?;
-    inner.followed.filter(|f| f.from == told && now_ms() - f.at <= FOLLOWED_FRESH_MS).map(|f| f.spot)
-}
-
 /// See `DataStorage::self_estimate`.
 fn self_estimate(inner: &Inner, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
-    // Followed on the parent's minimap: better than any guess here, for as long as it follows.
-    if let (Some(spot), Some((_, told))) = (followed(inner), inner.self_position) {
-        return Some((spot, Some(now_ms() - told), false));
-    }
     let (me, age) = inner.self_position.map(|(pos, at)| (pos, now_ms() - at)).filter(|(_, age)| *age <= self_max_age_ms)?;
     Some(match inner.self_guess {
         Some(guess) => (guess, Some(age), true),
@@ -731,8 +697,6 @@ struct Inner {
     /// Your spot as guessed since it was told (`note_left_sight`); None
     /// until a mob leaves sight, and again once your spot is told.
     self_guess: Option<Position>,
-    /// Your spot as the parent followed it on the minimap (`set_followed`).
-    followed: Option<Followed>,
     /// How far from you each NPC code leaves sight (cm), the last
     /// SIGHT_KEPT times (`note_left_sight`), and a count that moves with each
     /// (kept across sessions by the caller: `sight_radii_since`).
@@ -942,7 +906,6 @@ impl DataStorage {
                 my_last_hit: None,
                 self_position: None,
                 self_guess: None,
-                followed: None,
                 sight_radii: HashMap::new(),
                 sight_radii_seq: 0,
                 entity_positions: HashMap::new(),
@@ -1139,48 +1102,15 @@ impl DataStorage {
         }
     }
 
-    /// The Hidden Cubes in range, closest to your last known spot first: the
-    /// cube's own spot, and where it is from you — None while your spot is
-    /// unknown or more than `self_max_age_ms` old.
-    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<(Position, Option<CubeSpot>)> {
+    /// The Hidden Cubes in range, closest first: how far each is on the
+    /// ground and how far above you (metres, below: negative) — None while
+    /// your spot is unknown or more than `self_max_age_ms` old.
+    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<Option<(f32, f32)>> {
         let inner = self.inner.read();
-        let last = inner.self_position.map(|(pos, _)| pos);
         let me = inner.self_position.filter(|(_, at)| now_ms() - at <= self_max_age_ms).map(|(pos, _)| pos);
-        let mut cubes: Vec<_> = inner
-            .hidden_cubes
-            .values()
-            .map(|pos| {
-                let spot = me.map(|me| CubeSpot {
-                    metres: me.metres_to(pos),
-                    above: (pos.z - me.z) / 100.0,
-                    east: (pos.x - me.x) / 100.0,
-                    north: (me.y - pos.y) / 100.0,
-                });
-                (*pos, spot)
-            })
-            .collect();
-        let from_last = |pos: &Position| last.map_or(0.0, |me| me.metres_to(pos));
-        cubes.sort_by(|a, b| from_last(&a.0).total_cmp(&from_last(&b.0)));
+        let mut cubes: Vec<_> = inner.hidden_cubes.values().map(|pos| me.map(|me| (me.metres_to(pos), (pos.z - me.z) / 100.0))).collect();
+        cubes.sort_by(|a, b| a.map(|a| a.0).unwrap_or(f32::MAX).total_cmp(&b.map(|b| b.0).unwrap_or(f32::MAX)));
         cubes
-    }
-
-    /// Your spot as the parent followed it on the minimap since the one told at
-    /// `from` (unix ms, `cubes`' `spot.told`): `self_estimate` takes it over
-    /// for FOLLOWED_FRESH_MS — until a newer spot is told, which it isn't from.
-    pub fn set_followed(&self, x: f32, y: f32, from: i64) {
-        let mut inner = self.inner.write();
-        let Some((told, at)) = inner.self_position.filter(|(_, at)| *at == from) else { return };
-        inner.followed = Some(Followed { spot: Position { x, y, z: told.z }, from: at, at: now_ms() });
-    }
-
-    /// Whether your spot is followed by the parent right now (`set_followed`).
-    pub fn self_followed(&self) -> bool {
-        followed(&self.inner.read()).is_some()
-    }
-
-    /// Your last known spot and when it was told (unix ms) — for `cubes`' `spot`.
-    pub fn self_position_at(&self) -> Option<(Position, i64)> {
-        self.inner.read().self_position
     }
 
     /// Your last known spot and how long ago it was told (ms).
@@ -2634,7 +2564,6 @@ impl DataStorage {
         // spot there came out kilometres (the pet tracker's "14686 m").
         if from != Some(map_id) && inner.self_position.is_some_and(|(_, at)| now_ms() - at > SPOT_BEFORE_LOAD_MS) {
             inner.self_position = None;
-            inner.followed = None;
         }
         inner.zone_generation += 1;
         if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
@@ -3687,34 +3616,6 @@ fn is_mob(inner: &Inner, id: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_parent_follows_your_spot_on_from_the_last_told_one() {
-        let storage = DataStorage::new();
-        let spot = |x: f32, y: f32| Position { x, y, z: 15_000.0 };
-        let at = |ms: i64| {
-            crate::clock::set_override(Some(ms));
-            storage.self_estimate(60_000).map(|(p, age, guessed)| ((p.x.round() as i32, p.y.round() as i32), age, guessed))
-        };
-        crate::clock::set_override(Some(1_000));
-        storage.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
-        // Followed from another spot than the last told one: not taken.
-        at(5_000);
-        storage.set_followed(100_500.0, 0.0, 999);
-        assert_eq!(at(5_000), Some(((100_000, 0), Some(4_000), false)));
-        // From the last told one: taken, while fresh — past the 60 s a told spot counts.
-        at(70_000);
-        storage.set_followed(130_000.0, 2_000.0, 1_000);
-        assert!(storage.self_followed());
-        assert_eq!(at(71_000), Some(((130_000, 2_000), Some(70_000), false)));
-        assert_eq!(at(73_000), None);
-        assert!(!storage.self_followed());
-        // A new spot told: the followed one, from the old, is done.
-        storage.set_followed(131_000.0, 2_000.0, 1_000);
-        storage.note_spotted(Spotted::You(spot(131_500.0, 2_500.0)));
-        assert_eq!(at(73_500), Some(((131_500, 2_500), Some(500), false)));
-        crate::clock::set_override(None);
-    }
 
     #[test]
     fn another_map_drops_your_spot_from_the_old_one() {
