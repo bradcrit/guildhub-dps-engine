@@ -21,10 +21,10 @@
 //! only the u64 list, their HP (what `scan_for_entity_hp` reads); your own
 //! character sends the u32 list as it changes, every 100 ms while sprinting or
 //! flying: stamina and flight time fall then and come back on their own,
-//! flight time also by an item (+200,000 at once). Stamina, flight time and
-//! their maxima were seen in the captures; MP is the u32 stat that pairs with
-//! max stat 08 (2305, then 4099 after the login's second record), not yet seen
-//! changing in one.
+//! flight time also by an item (+200,000 at once). HP and MP as they change
+//! in a fight (captures of 2026-10-25 22:00). A maximum raised by an item
+//! comes as one record with both maxima, solo too (22:35:48: max HP 25,019 →
+//! 26,846, max MP 4,106 → 4,209), the HP climbing to it after.
 
 const OPCODE: [u8; 2] = [0x00, 0x8D];
 
@@ -192,6 +192,19 @@ mod tests {
         let update = parse(&framed("00 8d ef c9 01 02 01 00 df 12 00 00 00 00 00 00")).unwrap();
         assert_eq!(update.entity, 25839);
         assert_eq!(update.wide, vec![(HP, 0x12df)]);
+    }
+
+    /// An item raising max HP and MP (2026-10-25 22:35:48, entity 5692):
+    /// both maxima in one record, then HP climbing towards the new one.
+    #[test]
+    fn an_item_raises_the_maxima() {
+        let mut r = Resources::default();
+        r.note(&parse(&framed("00 8d bc 2c 03 01 08 0a 10 00 00 01 07 bb 61 00 00 00 00 00 00")).unwrap());
+        assert_eq!(r.wide(HP), Some(Gauge { current: 25_019, max: 25_019 }));
+        r.note(&parse(&framed("00 8d bc 2c 03 01 08 71 10 00 00 01 07 de 68 00 00 00 00 00 00")).unwrap());
+        r.note(&parse(&framed("00 8d bc 2c 03 01 01 71 10 00 00 01 00 f7 61 00 00 00 00 00 00")).unwrap());
+        assert_eq!(r.wide(HP), Some(Gauge { current: 25_079, max: 26_846 }));
+        assert_eq!(r.small(MP), Some(Gauge { current: 4209, max: 4209 }));
     }
 
     #[test]
