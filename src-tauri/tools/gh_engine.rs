@@ -53,18 +53,19 @@
 //! the field bosses in the open world whose HP changed, and the ones still
 //! fought once a minute — `hp` whole percent left, `reset` when it came back
 //! up. `server` is the game's server id (null for a kill before the game
-//! named it). `pvp` (`{"players":[{"id","name","class","itemLevel","seenAt",
+//! named it). `pvp` (`{"players":[{"id","name","class","itemLevel","rank","seenAt",
 //! "attackedAt","dealt","taken"}],"abyss","death"}`) on every change and once on
 //! connecting: the players of the other faction in sight, attacking you first
 //! (latest attack first), then the one seen last first — `seenAt`/`attackedAt`
 //! unix ms, `attackedAt` null for one who hasn't hit you, `class` and
-//! `itemLevel` null while not known, `dealt`/`taken` the damage you dealt them
+//! `itemLevel` null while not known, `rank` the Abyss rank (19 Trainee, 18
+//! Ninth-Class … 10 First-Class Soldier; null: not known), `dealt`/`taken` the damage you dealt them
 //! and they dealt you since they came into sight; `abyss` while the map you
 //! are on is the Abyss; `death` the recap of your last death by players' hands
-//! (`{"at","killer","skill","abyss","attackers":[{"name","class","damage","hits","skill"}]}`,
+//! (`{"at","killer","skill","abyss","attackers":[{"name","class","rank","damage","hits","skill"}]}`,
 //! most damage first, `skill` a name, "" when the game's isn't known) or null;
 //! `kills` your last 50 kills and assists of enemy players, oldest first
-//! (`{"at","name","class","itemLevel","killingBlow","damage","hits","skill",
+//! (`{"at","name","class","itemLevel","rank","killingBlow","damage","hits","skill",
 //! "total","helpers","abyss"}`: the last hit yours, your damage, hits and top
 //! skill, everyone's damage and how many others hit them, in the 15 s before).
 //! `self` also has your `itemLevel` while a party roster states it, and `map`:
@@ -93,12 +94,16 @@
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
 //! since, by the mobs that left sight (`DataStorage::self_estimate`) — tens
 //! of metres off.
-//! `cubes` (`{"cubes":[{"metres","above"}]}`) on every change and once on
-//! connecting: the Hidden Cubes in range (`capture::objects`), closest first,
-//! from when the game sends one until it goes out of range, is opened or a
-//! zone load. `metres` is how far it is on the ground, `above` how far above
-//! you (below: negative), both whole metres, while your spot is at most
-//! CUBE_POS_MAX_AGE_MS old, else null.
+//! `cubes` (`{"cubes":[{"metres","above","age","opening"}],"opened"}`) on
+//! every change and once on connecting: the Hidden Cubes in range
+//! (`capture::objects`), closest first, from when the game sends one until it
+//! goes out of range, is opened or a zone load. `metres` is how far it is on
+//! the ground, `above` how far above you (below: negative), both whole
+//! metres, while your spot is at most CUBE_POS_MAX_AGE_MS old, else null;
+//! `age` how long it has been there in seconds — 0 under a minute, then whole
+//! minutes — null where the game didn't say; `opening` "you" or "other" once
+//! someone started to open it, else null. `opened`: the cubes you opened (a
+//! key used) since the engine started.
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -299,12 +304,15 @@ impl Engine {
             .storage
             .hidden_cubes(CUBE_POS_MAX_AGE_MS)
             .into_iter()
-            .map(|spot| {
-                let (metres, above) = spot.map_or((None, None), |(m, a)| (Some(m.round() as i32), Some(a.round() as i32)));
-                serde_json::json!({ "metres": metres, "above": above })
+            .map(|cube| {
+                let (metres, above) = cube.spot.map_or((None, None), |(m, a)| (Some(m.round() as i32), Some(a.round() as i32)));
+                // Whole minutes past the first: the JSON changes only that often.
+                let age = cube.age_ms.map(|ms| if ms < 60_000 { 0 } else { ms / 60_000 * 60 });
+                let opening = cube.opening_by_you.map(|you| if you { "you" } else { "other" });
+                serde_json::json!({ "metres": metres, "above": above, "age": age, "opening": opening })
             })
             .collect();
-        serde_json::json!({ "cubes": cubes }).to_string()
+        serde_json::json!({ "cubes": cubes, "opened": self.storage.cubes_opened() }).to_string()
     }
 
     /// The pet records ready to be passed on, oldest first, as (event, JSON):
@@ -472,6 +480,7 @@ impl Engine {
                     "name": p.name,
                     "class": p.class.map(class_key),
                     "itemLevel": p.item_level,
+                    "rank": p.rank,
                     "seenAt": p.last_seen_ms,
                     "attackedAt": p.attacked_me_ms,
                     "dealt": p.dealt,
@@ -487,6 +496,7 @@ impl Engine {
                     serde_json::json!({
                         "name": a.name,
                         "class": a.class.map(class_key),
+                        "rank": a.rank,
                         "damage": a.damage,
                         "hits": a.hits,
                         "skill": self.skills.lookup_skill_name(a.top_skill),
@@ -511,6 +521,7 @@ impl Engine {
                     "name": k.name,
                     "class": k.class.map(class_key),
                     "itemLevel": k.item_level,
+                    "rank": k.rank,
                     "killingBlow": k.killing_blow,
                     "damage": k.damage,
                     "hits": k.hits,

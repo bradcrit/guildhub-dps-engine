@@ -9,7 +9,7 @@ use crate::capture::game_lists::{EntryCount, ListUpdate};
 use crate::combat::nearby_players::{DeathRecap, KillRecord, NearbyPlayer, NearbyPlayers};
 use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow};
 
-use crate::capture::objects::{is_hidden_cube, ObjectRecord};
+use crate::capture::objects::{is_hidden_cube, ObjectRecord, HIDDEN_CUBE_KEY};
 use crate::capture::positions::{Position, Spotted};
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
@@ -512,6 +512,27 @@ const BOSS_HP_KEEP_ALIVE_MS: i64 = 60_000;
 /// out of range, or left alone until it recovered).
 const RESET_RISE: u8 = 5;
 
+/// A Hidden Cube in range, as `DataStorage::hidden_cubes` tells it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HiddenCube {
+    /// How far it is on the ground and how far above you (metres, below:
+    /// negative) — None while your spot is unknown or too old.
+    pub spot: Option<(f32, f32)>,
+    /// How long it has been there (ms) — None where the game didn't say.
+    pub age_ms: Option<i64>,
+    /// Someone is opening it: Some(true) you, Some(false) someone else.
+    pub opening_by_you: Option<bool>,
+}
+
+/// A Hidden Cube kept while in range.
+#[derive(Debug, Clone, Copy)]
+struct CubeInRange {
+    pos: Position,
+    created_ms: Option<i64>,
+    /// Who started to open it, and whether that is you.
+    opening: Option<(i32, bool)>,
+}
+
 /// A field boss's HP for the sender (`take_boss_hp`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BossHp {
@@ -712,7 +733,9 @@ struct Inner {
     entity_positions: HashMap<i32, Position>,
     /// The Hidden Cubes in range: entity -> spot, until they go out of range,
     /// are opened or a zone load (`capture::objects`).
-    hidden_cubes: HashMap<i32, Position>,
+    hidden_cubes: HashMap<i32, CubeInRange>,
+    /// The Hidden Cubes you opened (a key used) since the engine started.
+    cubes_opened: u32,
     /// Every object in range: entity -> (code, spot), and the codes logged on
     /// this map — to find an object's code from a log (`note_object`).
     objects_in_range: HashMap<i32, (u32, Position)>,
@@ -919,6 +942,7 @@ impl DataStorage {
                 sight_radii_seq: 0,
                 entity_positions: HashMap::new(),
                 hidden_cubes: HashMap::new(),
+                cubes_opened: 0,
                 objects_in_range: HashMap::new(),
                 object_codes_logged: HashSet::new(),
                 actor_power_scalars: HashMap::new(),
@@ -975,8 +999,10 @@ impl DataStorage {
     }
 
     /// A player spawned in sight, with what their spawn says of them.
-    pub fn note_nearby_spawn(&self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8) {
-        self.nearby.lock().spawn(id, name, class, item_level, faction, now_ms());
+    pub fn note_nearby_spawn(&self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8, rank: Option<u8>) {
+        let mut nearby = self.nearby.lock();
+        nearby.spawn(id, name, class, item_level, faction, now_ms());
+        nearby.set_rank(id, rank);
     }
 
     /// An entity moved or used a skill; only players in sight are kept.
@@ -1102,17 +1128,36 @@ impl DataStorage {
         let me = inner.self_position.filter(|(_, at)| now_ms() - at <= 2_000).map(|(pos, _)| pos);
         let away = |pos: &Position| me.map_or("your spot unknown".to_string(), |me| format!("{:.0} m away", me.metres_to(pos)));
         match record {
-            ObjectRecord::InRange(id, code, pos) => {
+            ObjectRecord::InRange(id, code, pos, created_ms) => {
                 if is_hidden_cube(code) {
                     // Every cube, so a log tells whether the game sent it.
-                    tracing::info!("Hidden Cube {id} in range ({})", away(&pos));
-                    inner.hidden_cubes.insert(id, pos);
+                    let age = created_ms.map_or(String::new(), |at| format!(", there for {} s", (now_ms() - at).max(0) / 1000));
+                    tracing::info!("Hidden Cube {id} in range ({}{age})", away(&pos));
+                    inner.hidden_cubes.insert(id, CubeInRange { pos, created_ms, opening: None });
                 } else if inner.object_codes_logged.insert(code) {
                     // Each other code once a map: an object not known yet
                     // (the Elyos cube) shows up by where it stands.
                     tracing::info!("Object {code} in range ({}, map {:?})", away(&pos), inner.current_map_id);
                 }
                 inner.objects_in_range.insert(id, (code, pos));
+            }
+            ObjectRecord::Opening(id, actor) => {
+                let by_you = inner.local_player_id == Some(actor as i64);
+                if let Some(cube) = inner.hidden_cubes.get_mut(&id) {
+                    cube.opening = Some((actor, by_you));
+                    tracing::info!("Hidden Cube {id} being opened by {}", if by_you { "you".to_string() } else { format!("entity {actor}") });
+                }
+            }
+            ObjectRecord::Opened(id, actor, item) => {
+                let by_you = inner.local_player_id == Some(actor as i64);
+                // The key says a cube even where its code isn't known (yet).
+                if item == HIDDEN_CUBE_KEY && by_you {
+                    inner.cubes_opened += 1;
+                    let code = inner.objects_in_range.get(&id).map(|&(code, _)| code);
+                    tracing::info!("Hidden Cube {id} opened by you, a key used (code {code:?}, {} this session)", inner.cubes_opened);
+                } else if item == HIDDEN_CUBE_KEY {
+                    tracing::info!("Hidden Cube {id} opened by entity {actor}");
+                }
             }
             ObjectRecord::Gone(id, used) => {
                 let object = inner.objects_in_range.remove(&id);
@@ -1130,15 +1175,29 @@ impl DataStorage {
         }
     }
 
-    /// The Hidden Cubes in range, closest first: how far each is on the
-    /// ground and how far above you (metres, below: negative) — None while
-    /// your spot is unknown or more than `self_max_age_ms` old.
-    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<Option<(f32, f32)>> {
+    /// The Hidden Cubes in range, closest first; the spot's distances only
+    /// while your spot is at most `self_max_age_ms` old.
+    pub fn hidden_cubes(&self, self_max_age_ms: i64) -> Vec<HiddenCube> {
         let inner = self.inner.read();
-        let me = inner.self_position.filter(|(_, at)| now_ms() - at <= self_max_age_ms).map(|(pos, _)| pos);
-        let mut cubes: Vec<_> = inner.hidden_cubes.values().map(|pos| me.map(|me| (me.metres_to(pos), (pos.z - me.z) / 100.0))).collect();
-        cubes.sort_by(|a, b| a.map(|a| a.0).unwrap_or(f32::MAX).total_cmp(&b.map(|b| b.0).unwrap_or(f32::MAX)));
+        let now = now_ms();
+        let me = inner.self_position.filter(|(_, at)| now - at <= self_max_age_ms).map(|(pos, _)| pos);
+        let mut cubes: Vec<_> = inner
+            .hidden_cubes
+            .values()
+            .map(|cube| HiddenCube {
+                spot: me.map(|me| (me.metres_to(&cube.pos), (cube.pos.z - me.z) / 100.0)),
+                age_ms: cube.created_ms.map(|at| (now - at).max(0)),
+                opening_by_you: cube.opening.map(|(_, you)| you),
+            })
+            .collect();
+        let far = |c: &HiddenCube| c.spot.map_or(f32::MAX, |s| s.0);
+        cubes.sort_by(|a, b| far(a).total_cmp(&far(b)));
         cubes
+    }
+
+    /// The Hidden Cubes you opened (a key used) since the engine started.
+    pub fn cubes_opened(&self) -> u32 {
+        self.inner.read().cubes_opened
     }
 
     /// Your last known spot and how long ago it was told (ms).

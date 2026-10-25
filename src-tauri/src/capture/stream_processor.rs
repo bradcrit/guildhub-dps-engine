@@ -1046,7 +1046,7 @@ impl StreamProcessor {
         self.data_storage
             .append_nickname_authoritative(actor_id, &sanitized);
         if let Some(profile) = spawn_profile(data, field.end) {
-            self.data_storage.note_nearby_spawn(actor_id, &sanitized, profile.class, profile.item_level, profile.faction);
+            self.data_storage.note_nearby_spawn(actor_id, &sanitized, profile.class, profile.item_level, profile.faction, profile.rank);
         }
     }
 
@@ -3187,6 +3187,8 @@ struct SpawnProfile {
     class: Option<JobClass>,
     faction: u8,
     item_level: Option<u32>,
+    /// The Abyss rank (`pvp_rank`).
+    rank: Option<u8>,
 }
 
 /// The player's class, faction and item level in their spawn, from `after`,
@@ -3216,7 +3218,26 @@ fn spawn_profile(data: &[u8], after: usize) -> Option<SpawnProfile> {
             ((1..=99).contains(&level) && u32_at(level_at + 4) == 0 && (1..=9999).contains(&item_level)).then_some(item_level)
         })
     });
-    Some(SpawnProfile { class: JobClass::from_roster_class(class), faction, item_level })
+    Some(SpawnProfile { class: JobClass::from_roster_class(class), faction, item_level, rank: pvp_rank(data) })
+}
+
+/// A player's Abyss rank, at the end of their spawn: 19 Trainee, 18 Ninth-
+/// Class Soldier … 10 First-Class Soldier (the ranks above not seen yet).
+///
+/// `<tag> f4 cb 1f <u32> <rank u32> <u32> 00 … [01]`, the tag 21, 24 or 26
+/// (one player's changed between two of his spawns), 21 or 22 bytes before
+/// the record's end. As dr89mh/aion2-cube-radar found it (docs/FINDINGS.md O7
+/// to O9: 19, 17, 16, 15, 14 against the game's own display); of 274 spawns
+/// of 2026-10-25 in Verteron, every one of 247 so ended had a rank 10–19.
+fn pvp_rank(data: &[u8]) -> Option<u8> {
+    [21, 22].into_iter().find_map(|back| {
+        let at = data.len().checked_sub(back)?;
+        let end = &data[at..];
+        let rest = &end[16..];
+        let zeros = rest[..rest.len() - 1].iter().all(|&b| b == 0) && rest[rest.len() - 1] <= 1;
+        let rank = u32::from_le_bytes(end[8..12].try_into().unwrap());
+        (matches!(end[0], 0x21 | 0x24 | 0x26) && end[1..4] == [0xF4, 0xCB, 0x1F] && zeros && (10..=19).contains(&rank)).then_some(rank as u8)
+    })
 }
 
 /// A party roster as `StreamProcessor::scan_party_roster` reads it.
@@ -3731,13 +3752,28 @@ mod tests {
     }
 
     #[test]
+    fn a_spawn_ends_with_the_abyss_rank() {
+        // Spawns' ends of 2026-10-25: a Trainee, a First-Class Soldier (22
+        // bytes before the end), the `26` tag with a closing 01.
+        let rank = |end: &str| pvp_rank(&[vec![0x11; 300], hex_bytes(end)].concat());
+        assert_eq!(rank("21 F4 CB 1F EC 03 00 00 13 00 00 00 9A 2B 00 00 00 00 00 00 00"), Some(19));
+        assert_eq!(rank("21 F4 CB 1F E9 03 00 00 0A 00 00 00 01 4C 91 02 00 00 00 00 00 00"), Some(10));
+        assert_eq!(rank("26 F4 CB 1F EA 03 00 00 0F 00 00 00 19 C5 01 00 00 00 00 00 00 01"), Some(15));
+        // Another tag, a rank out of the known ones, more after it: none.
+        assert_eq!(rank("25 F4 CB 1F EC 03 00 00 13 00 00 00 9A 2B 00 00 00 00 00 00 00"), None);
+        assert_eq!(rank("21 F4 CB 1F EC 03 00 00 00 00 00 00 9A 2B 00 00 00 00 00 00 00"), None);
+        assert_eq!(rank("21 F4 CB 1F EC 03 00 00 13 00 00 00 9A 2B 00 00 00 05 00 00 00"), None);
+        assert_eq!(pvp_rank(&[1, 2, 3]), None);
+    }
+
+    #[test]
     fn a_spawn_states_class_faction_and_item_level() {
         // raas's spawn (17:02:34, 2026-10-18) from the end of her name: her
         // class and faction, a stretch of the record, the item-level run.
         let head = hex_bytes("18 00 00 00 02 02 00 92 C0 7B 2C 48 48 5B 29 48 00 62 BA 46");
         let tail = hex_bytes("27 02 48 F4 FF FF 2D 00 00 00 00 00 00 00 CE 08 00 00 DE 02 0C 64 64 64");
         let record = [head.clone(), vec![0x11; 900], tail.clone()].concat();
-        let raas = SpawnProfile { class: Some(JobClass::Elementalist), faction: 2, item_level: Some(2254) };
+        let raas = SpawnProfile { class: Some(JobClass::Elementalist), faction: 2, item_level: Some(2254), rank: None };
         assert_eq!(spawn_profile(&record, 0), Some(raas));
         // Her spawn at 01:29 had a u32 between the item level and the marker.
         let later = hex_bytes("2D 00 00 00 00 00 00 00 C9 08 00 00 4F 00 00 00 DE 02 0C");
@@ -3758,8 +3794,8 @@ mod tests {
         let sp = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
         storage.note_self_faction(2);
         storage.set_local_identity_from_game(15567, Some("Bradcrit".into()));
-        storage.note_nearby_spawn(14199, "MILFSHAKE", None, None, 1);
-        storage.note_nearby_spawn(11788, "Kikay", None, None, 2);
+        storage.note_nearby_spawn(14199, "MILFSHAKE", None, None, 1, None);
+        storage.note_nearby_spawn(11788, "Kikay", None, None, 2, None);
         let framed = |body: &[u8]| [vec![(body.len() + 1) as u8], body.to_vec()].concat();
         // MILFSHAKE's skill on Bradcrit (17:05:28.926): seen, but no attack —
         // a skill aimed at you is as often a buff or a heal.
@@ -3781,8 +3817,8 @@ mod tests {
     fn no_enemies_in_a_dungeon_and_never_your_party() {
         let storage = Arc::new(DataStorage::new());
         storage.note_self_faction(2);
-        storage.note_nearby_spawn(3001, "Chantress", Some(JobClass::Chanter), None, 1);
-        storage.note_nearby_spawn(3002, "Stranger", None, None, 1);
+        storage.note_nearby_spawn(3001, "Chantress", Some(JobClass::Chanter), None, 1, None);
+        storage.note_nearby_spawn(3002, "Stranger", None, None, 1, None);
         storage.note_party_scope(3001);
         let names: Vec<_> = storage.nearby_enemies().into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Stranger"], "a party member is no enemy");

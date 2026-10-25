@@ -6,6 +6,9 @@
 //! client sends it, encrypted — so your spot comes only from records that
 //! happen to carry it:
 //!
+//! - `21 36 <load count u32> <map u32> <u32> <u32 0> <pos>`: a map load (a
+//!   zone load, a teleport), with where it puts you — ~3.5 s ahead of the
+//!   `23 36` that says the same (2026-10-25; dr89mh/aion2-cube-radar P7).
 //! - `23 36 00 <5 × 00> <pos>`: you were put somewhere (a zone load, a
 //!   teleport). Entity 0 is you.
 //! - `2A 38 <entity> 01 <flags u8> <instance varint> <effect u32> <duration
@@ -57,6 +60,9 @@ pub fn parse(packet: &[u8]) -> Option<Spotted> {
     }
     let at = length.length as usize;
     let op = packet.get(at..at + 2)?;
+    if op == [0x21, 0x36] {
+        return (packet.get(at + 14..at + 18)? == [0, 0, 0, 0]).then(|| position_at(packet, at + 18)).flatten().map(Spotted::You);
+    }
     let entity = read_varint(packet, at + 2);
     if entity.length <= 0 {
         return None;
@@ -134,6 +140,17 @@ mod tests {
             Some(Spotted::Entity(id, pos)) => (id, rounded(pos)),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_map_load_puts_you_where_its_zone_load_does() {
+        // 2026-10-25, Verteron: the `23 36` 3.8 s later said the same spot.
+        let load = parse(&hex("3421360D000000F20300002DF7420000000000A0CE8BC778648DC700E40D460000A0400200000000000000000000000000"));
+        let put = parse(&hex("1E2336000000000000A0CE8BC778648DC700E40D4604000000AB7B"));
+        assert!(matches!(load, Some(Spotted::You(_))));
+        assert_eq!(load, put);
+        // Not the zero where the spot's lead is: no spot.
+        assert_eq!(parse(&hex("3421360D000000F20300002DF7420001000000A0CE8BC778648DC700E40D46")), None);
     }
 
     #[test]

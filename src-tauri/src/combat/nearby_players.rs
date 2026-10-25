@@ -58,6 +58,8 @@ pub struct NearbyPlayer {
     pub item_level: Option<u32>,
     /// The spawn's faction byte; yours is in your self record.
     pub faction: u8,
+    /// The Abyss rank: 19 Trainee, 18 Ninth-Class … 10 First-Class Soldier.
+    pub rank: Option<u8>,
     pub last_seen_ms: i64,
     /// The last time they hit you.
     pub attacked_me_ms: Option<i64>,
@@ -147,6 +149,7 @@ pub struct DeathRecap {
 pub struct RecapAttacker {
     pub name: String,
     pub class: Option<JobClass>,
+    pub rank: Option<u8>,
     pub damage: u64,
     pub hits: u32,
     /// The skill that did the most of their damage.
@@ -160,6 +163,7 @@ pub struct KillRecord {
     pub name: String,
     pub class: Option<JobClass>,
     pub item_level: Option<u32>,
+    pub rank: Option<u8>,
     /// The last hit was yours: a kill; else an assist.
     pub killing_blow: bool,
     /// Your damage on them, your hits and the skill that did the most of it.
@@ -267,14 +271,22 @@ impl NearbyPlayers {
         let same = self.players.get(&id).filter(|p| p.name == name);
         let attacked_me_ms = same.and_then(|p| p.attacked_me_ms);
         let item_level = item_level.or_else(|| same.and_then(|p| p.item_level));
+        let rank = same.and_then(|p| p.rank);
         let (dealt, taken) = same.map_or((0, 0), |p| (p.dealt, p.taken));
         if same.is_none() {
             self.foes.remove(&id);
         }
         self.players.insert(
             id,
-            NearbyPlayer { id, name: name.to_string(), class, item_level, faction, last_seen_ms: now_ms, attacked_me_ms, dealt, taken },
+            NearbyPlayer { id, name: name.to_string(), class, item_level, faction, rank, last_seen_ms: now_ms, attacked_me_ms, dealt, taken },
         );
+    }
+
+    /// A player's Abyss rank, as their spawn told it (kept when it didn't).
+    pub fn set_rank(&mut self, id: i32, rank: Option<u8>) {
+        if let (Some(p), Some(rank)) = (self.players.get_mut(&id), rank) {
+            p.rank = Some(rank);
+        }
     }
 
     /// A player moved or used a skill.
@@ -374,18 +386,18 @@ impl NearbyPlayers {
     fn died(&mut self, at: i64) {
         let hits = hits_before(&mut self.hits_on_me, at);
         let Some(last) = hits.last() else { return };
-        let name_of = |id: i32| self.players.get(&id).map(|p| (p.name.clone(), p.class));
-        let Some((killer, _)) = name_of(last.actor) else { return };
+        let name_of = |id: i32| self.players.get(&id).map(|p| (p.name.clone(), p.class, p.rank));
+        let Some((killer, ..)) = name_of(last.actor) else { return };
         let mut actors: Vec<i32> = hits.iter().map(|h| h.actor).collect();
         actors.sort_unstable();
         actors.dedup();
         let mut attackers: Vec<_> = actors
             .into_iter()
             .filter_map(|actor| {
-                let (name, class) = name_of(actor)?;
+                let (name, class, rank) = name_of(actor)?;
                 let theirs = || hits.iter().filter(move |h| h.actor == actor);
                 let damage = theirs().map(|h| h.damage).sum();
-                Some(RecapAttacker { name, class, damage, hits: theirs().count() as u32, top_skill: top_skill(theirs()) })
+                Some(RecapAttacker { name, class, rank, damage, hits: theirs().count() as u32, top_skill: top_skill(theirs()) })
             })
             .collect();
         attackers.sort_by(|a, b| b.damage.cmp(&a.damage).then(a.name.cmp(&b.name)));
@@ -411,6 +423,7 @@ impl NearbyPlayers {
             name: p.name.clone(),
             class: p.class,
             item_level: p.item_level,
+            rank: p.rank,
             killing_blow: hits.last().is_some_and(|h| h.actor == me),
             damage: my_hits.iter().map(|h| h.damage).sum(),
             hits: my_hits.len() as u32,
