@@ -7,16 +7,13 @@
 //!   `04 03` used up (opened, gathered — by you or anyone).
 //!
 //! Read off two captures (2026-10-24, 00:28 and 00:36): the objects came and
-//! went with the run, and the two Hidden Cubes opened (code
-//! HIDDEN_CUBE_ASMODIAN, in two zones) went with `04 03` right after the
-//! game's open animation. The game sends an object some 100 m or more away —
-//! further than its sound.
+//! went with the run, and the two Hidden Cubes opened (code 1301199, in two
+//! zones) went with `04 03` right after the game's open animation. The game
+//! sends an object some 100 m or more away — further than its sound.
 //!
-//! Cubes belong to a faction's own lands. The object codes go by side: in
-//! Altgard (map 1110) 13…, in Verteron (map 1010) 12… with the same rest for
-//! the same object (1300865/1200865, 1300824/1200824, 1300825/1200825 in a
-//! log of 2026-10-25) — so the Elyos cube is taken to be 1201199, not seen
-//! yet: an Asmodian in Verteron got none.
+//! Cubes belong to a faction's own lands, each side's with its own codes (see
+//! HIDDEN_CUBES). A guess by the codes' pattern (1201199 for Verteron) was
+//! wrong: an Elyos log of 2026-10-25 had 1200039 in Verteron instead.
 //!
 //! To find a code from a log, every other object's code is logged once a map
 //! when it comes into range, and again when one close to you is used up —
@@ -25,15 +22,16 @@
 use super::positions::{position_at, Position};
 use super::stream_processor::read_varint;
 
-/// The object code of a Hidden Cube in the Asmodian lands (Altgard).
-pub const HIDDEN_CUBE_ASMODIAN: u32 = 1_301_199;
-/// The object code of a Hidden Cube in the Elyos lands (Verteron) — by the
-/// codes' pattern (see the top of this file), unconfirmed.
-pub const HIDDEN_CUBE_ELYOS: u32 = 1_201_199;
+/// The object codes of the Hidden Cubes (the game's current "V04" ones).
+/// Elyos lands (Verteron): 1200039–1200041, `E_HiddenCube_01_V04_001`–`003` —
+/// 1200039 and 1200041 opened with a key in others' captures (2026-10-13),
+/// 1200039 in an Elyos log of ours. Asmodian lands (Altgard): 1301199 (our
+/// captures) and 1301200 (`E_D1_HiddenCube_02`, by the game data's names).
+pub const HIDDEN_CUBES: &[u32] = &[1_200_039, 1_200_040, 1_200_041, 1_301_199, 1_301_200];
 
 /// Whether an object code is a Hidden Cube's.
 pub fn is_hidden_cube(code: u32) -> bool {
-    code == HIDDEN_CUBE_ASMODIAN || code == HIDDEN_CUBE_ELYOS
+    HIDDEN_CUBES.contains(&code)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,18 +88,19 @@ mod tests {
     fn hidden_cubes_come_into_range() {
         assert_eq!(
             in_range("3D3436D8B8030400CFDA1300CE58214878481248001E9B4600000000003084430101016891E06AA10100000000000000000000369FA8F0070000"),
-            (56408, HIDDEN_CUBE_ASMODIAN, (165219, 149794, 19855))
+            (56408, 1_301_199, (165219, 149794, 19855))
         );
         assert_eq!(
             in_range("3D3436A8B1020400CFDA130080F4EFC7004090C500FC0646000000000050A0430101012B80F16AA10100000000000000000000077F0B69070000"),
-            (39080, HIDDEN_CUBE_ASMODIAN, (-122857, -4616, 8639))
+            (39080, 1_301_199, (-122857, -4616, 8639))
         );
     }
 
     #[test]
     fn both_sides_cubes() {
-        assert!(is_hidden_cube(HIDDEN_CUBE_ASMODIAN) && is_hidden_cube(HIDDEN_CUBE_ELYOS));
-        assert!(!is_hidden_cube(1_300_865) && !is_hidden_cube(1_200_865));
+        assert!(is_hidden_cube(1_301_199) && is_hidden_cube(1_200_039) && is_hidden_cube(1_200_041));
+        // Other objects of either side, and the wrong guess.
+        assert!(!is_hidden_cube(1_300_865) && !is_hidden_cube(1_200_865) && !is_hidden_cube(1_201_199));
     }
 
     #[test]
