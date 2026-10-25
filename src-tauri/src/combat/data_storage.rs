@@ -1089,15 +1089,19 @@ impl DataStorage {
         let mut inner = self.inner.write();
         match record {
             ObjectRecord::InRange(id, code, pos) if code == HIDDEN_CUBE => {
-                // How far the game sends a cube, while your spot is fresh enough to tell.
-                if let Some((me, _)) = inner.self_position.filter(|(_, at)| now_ms() - at <= 2_000) {
-                    tracing::info!("Hidden Cube in range, {:.0} m away", me.metres_to(&pos));
+                // Every cube, so a log tells whether the game sent it — how far
+                // (how far the game sends one) only while your spot is fresh enough to tell.
+                match inner.self_position.filter(|(_, at)| now_ms() - at <= 2_000) {
+                    Some((me, _)) => tracing::info!("Hidden Cube {id} in range, {:.0} m away", me.metres_to(&pos)),
+                    None => tracing::info!("Hidden Cube {id} in range (your spot unknown)"),
                 }
                 inner.hidden_cubes.insert(id, pos);
             }
             ObjectRecord::InRange(..) => {}
             ObjectRecord::Gone(id) => {
-                inner.hidden_cubes.remove(&id);
+                if inner.hidden_cubes.remove(&id).is_some() {
+                    tracing::info!("Hidden Cube {id} gone (out of range or opened)");
+                }
             }
         }
     }
@@ -2559,6 +2563,9 @@ impl DataStorage {
         inner.mobs_in_sight.clear();
         inner.entity_positions.clear();
         inner.self_guess = None;
+        // Logged with the cubes it drops: one the game sent just before the
+        // load (a login or teleport next to it) would be lost here.
+        tracing::info!("Map load: {from:?} -> {map_id}, {} Hidden Cube(s) dropped", inner.hidden_cubes.len());
         inner.hidden_cubes.clear();
         // Another map: its spots aren't the old one's — distances from your
         // spot there came out kilometres (the pet tracker's "14686 m").
