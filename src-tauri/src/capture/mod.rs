@@ -14,6 +14,7 @@ pub mod loot;
 pub mod objects;
 pub mod packet_accumulator;
 pub mod positions;
+pub mod resources;
 pub mod skill_casts;
 pub mod stream_assembler;
 pub mod stream_processor;

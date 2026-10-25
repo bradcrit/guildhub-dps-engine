@@ -11,6 +11,7 @@ use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow
 
 use crate::capture::objects::{is_hidden_cube, ObjectRecord, HIDDEN_CUBE_KEY};
 use crate::capture::positions::{Position, Spotted};
+use crate::capture::resources::{self, Resources};
 use crate::capture::skill_casts;
 use crate::combat::skill_timers::{Cooldown, NpcCast, SkillTimers};
 use crate::entity::damage_packet::ParsedDamagePacket;
@@ -18,6 +19,9 @@ use crate::entity::job_class::JobClass;
 use crate::entity::special_damage::SpecialDamage;
 use crate::entity::summon_resolver;
 
+/// Entities whose resources are kept (`note_resources`): the monsters in
+/// sight send their HP that way too.
+const RESOURCE_ENTITIES_KEPT: usize = 512;
 /// Maximum idle gap before a fight is considered ended and a new one begins.
 const IDLE_RESET_MS: i64 = 30_000;
 /// Instance changes remembered for `run_started_at` — far more than a fight
@@ -629,6 +633,9 @@ pub struct DataStorage {
     /// Your cooldowns, what the monsters cast and the bosses' time limits
     /// (see `combat::skill_timers`). Its own lock, as `abnormals`.
     skill_timers: Mutex<SkillTimers>,
+    /// Each entity's resources as `00 8d` sent them (`capture::resources`),
+    /// yours read by the resource bars. Its own lock, as `abnormals`.
+    resources: Mutex<HashMap<i32, Resources>>,
 }
 
 /// The timeline and when it was last pruned.
@@ -1013,6 +1020,7 @@ impl DataStorage {
             nearby: Mutex::new(NearbyPlayers::default()),
             stagger: Mutex::new(StaggerLog::default()),
             skill_timers: Mutex::new(SkillTimers::default()),
+            resources: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1301,6 +1309,24 @@ impl DataStorage {
     pub fn note_skill_record(&self, record: skill_casts::Record) {
         let me = self.local_player_id().and_then(|id| i32::try_from(id).ok());
         self.skill_timers.lock().note(record, now_ms(), me);
+    }
+
+    /// One `00 8d` record (`capture::resources`). Kept for any entity —
+    /// your login record can come before the game says who you are — and
+    /// cut back to yours past `RESOURCE_ENTITIES_KEPT`.
+    pub fn note_resources(&self, update: resources::Update) {
+        let me = self.local_player_id().and_then(|id| i32::try_from(id).ok());
+        let mut all = self.resources.lock();
+        if all.len() >= RESOURCE_ENTITIES_KEPT && !all.contains_key(&update.entity) {
+            all.retain(|&entity, _| Some(entity) == me);
+        }
+        all.entry(update.entity).or_default().note(&update);
+    }
+
+    /// Your resources, empty while you aren't known.
+    pub fn self_resources(&self) -> Resources {
+        let Some(me) = self.local_player_id().and_then(|id| i32::try_from(id).ok()) else { return Resources::default() };
+        self.resources.lock().get(&me).cloned().unwrap_or_default()
     }
 
     /// Your cooldowns still running, the soonest back first.

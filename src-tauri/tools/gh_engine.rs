@@ -118,6 +118,11 @@
 //! casts, null while not known — the cast lands about then) or null,
 //! `deadline` its time limit (unix ms) or null. Every time is unix ms.
 //! `icon` is a file name on NC's icon CDN (null: none known).
+//! `resources` (`{"hp","mp","stamina","flight"}`, every 100 ms at most, on a
+//! change, and once on connecting) for the resource bars
+//! (`capture::resources`): each `{"current","max"}` of your character, null
+//! until its maximum is known (the login sends it; a meter started
+//! mid-session hears it at the next login).
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -263,6 +268,8 @@ struct Engine {
     cubes: watch::Sender<Arc<str>>,
     /// The cooldown and cast bars' state as JSON (`skills_json`).
     skill_bars: watch::Sender<Arc<str>>,
+    /// Your HP, MP, stamina and flight time as JSON (`resources_json`).
+    resource_bars: watch::Sender<Arc<str>>,
     /// The entity the meter's view follows (`DpsData::target_id`), 0: none.
     target: AtomicI32,
     /// Icons and names for the bars (`load_bar_data`).
@@ -385,6 +392,18 @@ impl Engine {
             serde_json::json!({ "entity": entity, "cast": cast, "deadline": self.storage.boss_deadline(entity) })
         });
         serde_json::json!({ "cooldowns": cooldowns, "buffs": buffs, "target": target }).to_string()
+    }
+
+    /// The resource bars' state (see the top of this file).
+    fn resources_json(&self) -> String {
+        use a2tools_dps_meter_lib::capture::resources::{Gauge, FLIGHT, HP, MP, STAMINA};
+        let r = self.storage.self_resources();
+        let gauge = |g: Option<Gauge>| g.map(|g| serde_json::json!({ "current": g.current, "max": g.max }));
+        serde_json::json!({
+            "hp": gauge(r.wide(HP)), "mp": gauge(r.small(MP)),
+            "stamina": gauge(r.small(STAMINA)), "flight": gauge(r.small(FLIGHT)),
+        })
+        .to_string()
     }
 
     fn save(&self, records: Vec<FightRecord>) {
@@ -792,6 +811,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (npcs_in_sight, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (cubes, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (skill_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let (resource_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (events, _) = broadcast::channel(64);
     let engine = Arc::new(Engine {
         token,
@@ -808,6 +828,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         npcs: npcs_in_sight,
         cubes,
         skill_bars,
+        resource_bars,
         target: AtomicI32::new(0),
         bar_data,
         events,
@@ -940,6 +961,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let bars = engine.skills_json();
                 if **engine.skill_bars.borrow() != *bars {
                     engine.skill_bars.send_replace(Arc::from(bars));
+                }
+                let resources = engine.resources_json();
+                if **engine.resource_bars.borrow() != *resources {
+                    engine.resource_bars.send_replace(Arc::from(resources));
                 }
                 if saved.elapsed() >= CAST_TIMES_SAVE_EVERY {
                     saved = std::time::Instant::now();
@@ -1300,6 +1325,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     let mut npcs = engine.npcs.subscribe();
     let mut cubes = engine.cubes.subscribe();
     let mut skill_bars = engine.skill_bars.subscribe();
+    let mut resource_bars = engine.resource_bars.subscribe();
     let mut events = engine.events.subscribe();
     let mut beat = tokio::time::interval(HEARTBEAT_EVERY);
     beat.tick().await;
@@ -1309,6 +1335,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     npcs.mark_changed();
     cubes.mark_changed();
     skill_bars.mark_changed();
+    resource_bars.mark_changed();
     loop {
         let frame = tokio::select! {
             changed = dps.changed() => {
@@ -1370,6 +1397,16 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
                     continue;
                 }
                 format!("event: skills\ndata: {current}\n\n")
+            }
+            changed = resource_bars.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let current = resource_bars.borrow_and_update().clone();
+                if current.is_empty() {
+                    continue;
+                }
+                format!("event: resources\ndata: {current}\n\n")
             }
             event = events.recv() => match event {
                 Ok((name, data)) => format!("event: {name}\ndata: {data}\n\n"),
