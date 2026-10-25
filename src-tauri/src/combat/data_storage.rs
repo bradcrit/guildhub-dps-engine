@@ -11,6 +11,8 @@ use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow
 
 use crate::capture::objects::{is_hidden_cube, ObjectRecord, HIDDEN_CUBE_KEY};
 use crate::capture::positions::{Position, Spotted};
+use crate::capture::skill_casts;
+use crate::combat::skill_timers::{Cooldown, NpcCast, SkillTimers};
 use crate::entity::damage_packet::ParsedDamagePacket;
 use crate::entity::job_class::JobClass;
 use crate::entity::special_damage::SpecialDamage;
@@ -624,6 +626,9 @@ pub struct DataStorage {
     /// lock, as `abnormals`: fed by its own records, read when a fight is
     /// saved.
     stagger: Mutex<StaggerLog>,
+    /// Your cooldowns, what the monsters cast and the bosses' time limits
+    /// (see `combat::skill_timers`). Its own lock, as `abnormals`.
+    skill_timers: Mutex<SkillTimers>,
 }
 
 /// The timeline and when it was last pruned.
@@ -1007,6 +1012,7 @@ impl DataStorage {
             abnormals: Mutex::new(AbnormalLog { timeline: abnormal::Timeline::default(), pruned_ms: NEVER_MS }),
             nearby: Mutex::new(NearbyPlayers::default()),
             stagger: Mutex::new(StaggerLog::default()),
+            skill_timers: Mutex::new(SkillTimers::default()),
         }
     }
 
@@ -1276,6 +1282,51 @@ impl DataStorage {
             log.pruned_ms = ms;
         }
         log.timeline.note(ms, packet);
+    }
+
+    /// The abnormals on your character now, as the server timed them: each
+    /// still-on instance with its end on our clock (None: no timer). Empty
+    /// while you aren't known.
+    pub fn self_abnormals(&self) -> Vec<(abnormal::Instance, Option<i64>)> {
+        let Some(me) = self.local_player_id().and_then(|id| i32::try_from(id).ok()) else { return Vec::new() };
+        let log = self.abnormals.lock();
+        let lag = log.timeline.server_lag_ms();
+        log.timeline.live_on(me).into_iter().map(|i| {
+            let end = (!i.endless).then_some(i.server_end_ms).flatten().map(|e| e + lag);
+            (i, end)
+        }).collect()
+    }
+
+    /// One skill record (`capture::skill_casts`), at the current time.
+    pub fn note_skill_record(&self, record: skill_casts::Record) {
+        let me = self.local_player_id().and_then(|id| i32::try_from(id).ok());
+        self.skill_timers.lock().note(record, now_ms(), me);
+    }
+
+    /// Your cooldowns still running, the soonest back first.
+    pub fn skill_cooldowns(&self) -> Vec<Cooldown> {
+        self.skill_timers.lock().cooldowns(now_ms())
+    }
+
+    /// What `entity` (a monster) is casting now, see `SkillTimers::casting`.
+    pub fn npc_casting(&self, entity: i32) -> Option<NpcCast> {
+        self.skill_timers.lock().casting(entity, now_ms())
+    }
+
+    /// The time limit of `entity`, a boss pulled that has one (unix ms).
+    pub fn boss_deadline(&self, entity: i32) -> Option<i64> {
+        self.skill_timers.lock().deadline(entity)
+    }
+
+    /// The learned monster cast times when they changed since `seq`, with the
+    /// new seq — to keep them for the next session.
+    pub fn cast_times_since(&self, seq: u64) -> Option<(u64, HashMap<u32, Vec<u32>>)> {
+        self.skill_timers.lock().learned_since(seq)
+    }
+
+    /// Cast times kept by an earlier session (`cast_times_since`).
+    pub fn set_cast_times(&self, learned: HashMap<u32, Vec<u32>>) {
+        self.skill_timers.lock().set_learned(learned);
     }
 
     /// Every abnormal instance on any time from `start_ms` to `end_ms`.
@@ -2008,6 +2059,10 @@ impl DataStorage {
     }
 
     pub fn append_damage(&self, pdp: ParsedDamagePacket) {
+        // A monster's first hit after its cast: how long the cast took.
+        if let Ok(skill) = u32::try_from(pdp.skill_code()) {
+            self.skill_timers.lock().note_hit(pdp.actor_id(), skill, now_ms());
+        }
         self.note_nearby_damage(pdp.actor_id(), pdp.target_id(), if pdp.heal_amount() > 0 { 0 } else { pdp.damage() }, pdp.skill_code());
         let mut inner = self.inner.write();
         let skill_code = pdp.skill_code();
@@ -2690,6 +2745,7 @@ impl DataStorage {
     /// A zone load named the map it loads (`21 36`). The map, once known, is
     /// what says where the player is; see `dungeon_of_map`.
     pub fn note_map_load(&self, map_id: i32) {
+        self.skill_timers.lock().map_load();
         // New entity ids: the players in sight are spawned again.
         {
             let mut nearby = self.nearby.lock();

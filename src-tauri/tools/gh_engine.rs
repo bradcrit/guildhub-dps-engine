@@ -104,6 +104,20 @@
 //! minutes — null where the game didn't say; `opening` "you" or "other" once
 //! someone started to open it, else null. `opened`: the cubes you opened (a
 //! key used) since the engine started.
+//! `skills` (`{"cooldowns","buffs","target"}`, every 100 ms at most, on a
+//! change, and once on connecting) for the cooldown and cast bars
+//! (`capture::skill_casts`, `combat::skill_timers`): `cooldowns` your skills
+//! on cooldown, the soonest back first (`{"skill","name","icon","endsAt",
+//! "totalMs"}`, `skill` without its specialization digits); `buffs` the
+//! buffs and debuffs on you (`{"abnormal","skill","name","icon","endsAt",
+//! "totalMs","stacks","mine"}`, `endsAt`/`totalMs` null for one without a
+//! timer, `mine` cast by you), the soonest to end first; `target` what the
+//! monster you fight is up to (`{"entity","cast","deadline"}`, null while
+//! you fight none): `cast` the skill it is casting
+//! (`{"skill","name","startedAt","castMs"}`, `castMs` learned from its earlier
+//! casts, null while not known — the cast lands about then) or null,
+//! `deadline` its time limit (unix ms) or null. Every time is unix ms.
+//! `icon` is a file name on NC's icon CDN (null: none known).
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -116,7 +130,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -191,6 +205,11 @@ const PET_DECODERS: &str = r#"[
     { "name": "pet-level", "opcode": "14 90", "fields": [
         { "type": "skip:2" }, { "name": "pet", "type": "u32" }, { "name": "level", "type": "u32" } ] }
 ]"#;
+/// How often the cooldown and cast bars' state is looked at.
+const SKILLS_RATE: Duration = Duration::from_millis(100);
+/// Where the learned monster cast times are kept between sessions.
+const CAST_TIMES_FILE: &str = "cast_times.json";
+const CAST_TIMES_SAVE_EVERY: Duration = Duration::from_secs(60);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEAD: usize = 8 * 1024;
@@ -242,6 +261,12 @@ struct Engine {
     npcs: watch::Sender<Arc<str>>,
     /// The Hidden Cubes in range as JSON (`cubes_json`).
     cubes: watch::Sender<Arc<str>>,
+    /// The cooldown and cast bars' state as JSON (`skills_json`).
+    skill_bars: watch::Sender<Arc<str>>,
+    /// The entity the meter's view follows (`DpsData::target_id`), 0: none.
+    target: AtomicI32,
+    /// Icons and names for the bars (`load_bar_data`).
+    bar_data: BarData,
     /// One-off events for the stream: (name, JSON).
     events: broadcast::Sender<(&'static str, String)>,
     /// The character name the parent read off the game's screen — put on your
@@ -265,7 +290,103 @@ struct Engine {
     loot: Arc<Mutex<Vec<(i64, Loot)>>>,
 }
 
+/// What the `skills` event names skills and abnormals with: skill icons by
+/// a skill's first four digits (`skill_icons.json`), abnormal icons
+/// (`abnormals.json`) and abnormal names (`i18n/abnormals`).
+#[derive(Default)]
+struct BarData {
+    skill_icons: HashMap<String, String>,
+    abnormal_icons: HashMap<u32, String>,
+    abnormal_names: HashMap<u32, String>,
+}
+
+impl BarData {
+    fn skill_icon(&self, skill: u32) -> Option<&str> {
+        let digits = skill.to_string();
+        (digits.len() == 8).then(|| self.skill_icons.get(&digits[..4])).flatten().map(String::as_str)
+    }
+}
+
+fn load_bar_data(dir: &std::path::Path, language: &str, abnormals: Option<&str>) -> BarData {
+    let read = |path: PathBuf| std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let ids = |value: Option<serde_json::Value>| -> HashMap<u32, String> {
+        value
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .map(|o| o.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.as_str()?.to_string()))).collect())
+            .unwrap_or_default()
+    };
+    let names = dir.join("i18n").join("abnormals");
+    let abnormal_names = match ids(read(names.join(format!("{language}.json")))) {
+        found if !found.is_empty() => found,
+        _ => ids(read(names.join("en.json"))),
+    };
+    let abnormal_icons = abnormals
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|v| v.get("abnormals").and_then(|a| a.as_object()).cloned())
+        .map(|o| o.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.get("icon")?.as_str()?.to_string()))).collect())
+        .unwrap_or_default();
+    let skill_icons = read(dir.join("skill_icons.json")).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    BarData { skill_icons, abnormal_icons, abnormal_names }
+}
+
 impl Engine {
+    /// The cooldown and cast bars' state (see the top of this file).
+    fn skills_json(&self) -> String {
+        let name = |skill: u32| Some(self.skills.lookup_skill_name(skill as i32)).filter(|n| !n.is_empty());
+        let cooldowns: Vec<_> = self
+            .storage
+            .skill_cooldowns()
+            .into_iter()
+            .map(|c| serde_json::json!({ "skill": c.skill, "name": name(c.skill), "icon": self.bar_data.skill_icon(c.skill), "endsAt": c.ends_ms, "totalMs": c.total_ms }))
+            .collect();
+        let now = a2tools_dps_meter_lib::clock::now_ms();
+        let me = self.storage.local_player_id().and_then(|id| i32::try_from(id).ok());
+        // One row per abnormal: (abnormal, skill, end, start, stacks, mine) —
+        // its stacks counted, the latest one's timer.
+        let mut rows: Vec<(u32, Option<u32>, Option<i64>, i64, u32, bool)> = Vec::new();
+        for (instance, end) in self.storage.self_abnormals() {
+            if end.is_some_and(|e| e <= now) {
+                continue;
+            }
+            // Ending in weeks: as good as no timer (an account buff).
+            let end = end.filter(|&e| e - now <= 86_400_000);
+            let mine = Some(instance.caster) == me;
+            match rows.iter_mut().find(|r| r.0 == instance.abnormal) {
+                Some(row) => {
+                    row.4 += 1;
+                    row.5 |= mine;
+                    if end > row.2 {
+                        (row.2, row.3) = (end, instance.start_ms);
+                    }
+                }
+                None => rows.push((instance.abnormal, instance.skill, end, instance.start_ms, 1, mine)),
+            }
+        }
+        rows.sort_by_key(|r| (r.2.is_none(), r.2, r.0));
+        let buffs: Vec<_> = rows
+            .into_iter()
+            .map(|(abnormal, skill, end, start, stacks, mine)| {
+                let total = end.map(|e| (e - start).max(0));
+                serde_json::json!({
+                    "abnormal": abnormal, "skill": skill,
+                    "name": self.bar_data.abnormal_names.get(&abnormal).cloned().or_else(|| skill.and_then(name)),
+                    "icon": self.bar_data.abnormal_icons.get(&abnormal),
+                    "endsAt": end, "totalMs": total, "stacks": stacks, "mine": mine,
+                })
+            })
+            .collect();
+        let entity = self.target.load(Ordering::Relaxed);
+        let target = (entity > 0).then(|| {
+            let cast = self
+                .storage
+                .npc_casting(entity)
+                .map(|c| serde_json::json!({ "skill": c.skill, "name": name(c.skill), "startedAt": c.started_ms, "castMs": c.cast_ms }));
+            serde_json::json!({ "entity": entity, "cast": cast, "deadline": self.storage.boss_deadline(entity) })
+        });
+        serde_json::json!({ "cooldowns": cooldowns, "buffs": buffs, "target": target }).to_string()
+    }
+
     fn save(&self, records: Vec<FightRecord>) {
         for record in records {
             match self.history.save_fight(&record) {
@@ -648,9 +769,14 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let npcs = Arc::new(npcs);
 
     let storage = Arc::new(DataStorage::new());
-    if let Some(text) = abnormals {
+    if let Some(text) = &abnormals {
         storage.set_abnormal_stack_limits(a2tools_dps_meter_lib::capture::abnormal::stack_limits(&text));
     }
+    let cast_times_path = args.data_dir.join(CAST_TIMES_FILE);
+    if let Some(learned) = std::fs::read_to_string(&cast_times_path).ok().and_then(|text| serde_json::from_str(&text).ok()) {
+        storage.set_cast_times(learned);
+    }
+    let bar_data = load_bar_data(&args.resources, &args.language, abnormals.as_deref());
     let sight_radii_path = args.data_dir.join(SIGHT_RADII_FILE);
     if let Some(radii) = std::fs::read_to_string(&sight_radii_path).ok().and_then(|text| serde_json::from_str(&text).ok()) {
         storage.set_sight_radii(radii);
@@ -665,6 +791,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (pvp, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (npcs_in_sight, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (cubes, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let (skill_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (events, _) = broadcast::channel(64);
     let engine = Arc::new(Engine {
         token,
@@ -680,6 +807,9 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         pvp,
         npcs: npcs_in_sight,
         cubes,
+        skill_bars,
+        target: AtomicI32::new(0),
+        bar_data,
         events,
         screen_name: Mutex::new(None),
         ping: ping.clone(),
@@ -769,6 +899,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let calc = engine.clone();
                 let json = tokio::task::spawn_blocking(move || {
                     let dps = calc.calculator.lock().get_dps();
+                    calc.target.store(dps.target_id, Ordering::Relaxed);
                     // The game sends no HP after the killing blow: the view
                     // would stay on the last reading ("1.7 %"). Whether the
                     // target died is known — said alongside, as targetDead.
@@ -791,6 +922,33 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 .unwrap_or_default();
                 if !json.is_empty() && **engine.dps.borrow() != *json {
                     engine.dps.send_replace(Arc::from(json));
+                }
+            }
+        });
+    }
+
+    // The cooldown and cast bars, published when they change; the learned
+    // cast times kept for the next session (CAST_TIMES_FILE).
+    {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SKILLS_RATE);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let (mut seq, mut saved) = (0u64, std::time::Instant::now());
+            loop {
+                interval.tick().await;
+                let bars = engine.skills_json();
+                if **engine.skill_bars.borrow() != *bars {
+                    engine.skill_bars.send_replace(Arc::from(bars));
+                }
+                if saved.elapsed() >= CAST_TIMES_SAVE_EVERY {
+                    saved = std::time::Instant::now();
+                    if let Some((next, learned)) = engine.storage.cast_times_since(seq) {
+                        seq = next;
+                        if let Ok(text) = serde_json::to_string(&learned) {
+                            let _ = std::fs::write(&cast_times_path, text);
+                        }
+                    }
                 }
             }
         });
@@ -1141,6 +1299,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     let mut pvp = engine.pvp.subscribe();
     let mut npcs = engine.npcs.subscribe();
     let mut cubes = engine.cubes.subscribe();
+    let mut skill_bars = engine.skill_bars.subscribe();
     let mut events = engine.events.subscribe();
     let mut beat = tokio::time::interval(HEARTBEAT_EVERY);
     beat.tick().await;
@@ -1149,6 +1308,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     pvp.mark_changed();
     npcs.mark_changed();
     cubes.mark_changed();
+    skill_bars.mark_changed();
     loop {
         let frame = tokio::select! {
             changed = dps.changed() => {
@@ -1200,6 +1360,16 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
                     continue;
                 }
                 format!("event: cubes\ndata: {current}\n\n")
+            }
+            changed = skill_bars.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let current = skill_bars.borrow_and_update().clone();
+                if current.is_empty() {
+                    continue;
+                }
+                format!("event: skills\ndata: {current}\n\n")
             }
             event = events.recv() => match event {
                 Ok((name, data)) => format!("event: {name}\ndata: {data}\n\n"),

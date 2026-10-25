@@ -297,6 +297,10 @@ impl StreamProcessor {
         if let Some(map) = crate::capture::boss_map::parse(packet, crate::clock::now_ms()) {
             self.data_storage.note_boss_map(map);
         }
+        // Skills used, your cooldowns, who is in combat (cooldown and cast bars).
+        if let Some(record) = crate::capture::skill_casts::parse(packet) {
+            self.data_storage.note_skill_record(record);
+        }
         // Your entry counts and currencies (Homework).
         if let Some(update) = crate::capture::game_lists::parse(packet) {
             self.data_storage.note_game_list(update);

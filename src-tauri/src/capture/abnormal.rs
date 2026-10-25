@@ -671,6 +671,19 @@ impl Timeline {
         out
     }
 
+    /// The instances still on `entity`.
+    pub fn live_on(&self, entity: i32) -> Vec<Instance> {
+        let mut out: Vec<Instance> = self.live.values().filter(|i| i.entity == entity).cloned().collect();
+        out.sort_by_key(|i| (i.start_ms, i.instance));
+        out
+    }
+
+    /// Capture time minus server time at the last add (about 25-120 ms):
+    /// what turns the server's `end` into our clock.
+    pub fn server_lag_ms(&self) -> i64 {
+        self.lag_ms
+    }
+
     /// Every instance, the ones still on included (open, no end).
     pub fn all_instances(&self) -> Vec<Instance> {
         let mut out = self.instances.clone();
