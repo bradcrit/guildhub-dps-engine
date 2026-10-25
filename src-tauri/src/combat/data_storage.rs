@@ -132,6 +132,11 @@ pub struct GameLists {
     pub items_whole: bool,
     /// Duty missions done today (the Journal's daily completions).
     pub duties: Option<u32>,
+    /// Morph counts by recipe, the server's and your character's.
+    pub morphs_server: std::collections::BTreeMap<u32, u32>,
+    pub morphs_character: std::collections::BTreeMap<u32, u32>,
+    /// The Morph window's whole lists were seen: a recipe not in them is at 0.
+    pub morphs_whole: bool,
     pub owner: Option<String>,
     awaits_self_record: bool,
 }
@@ -1920,6 +1925,10 @@ impl DataStorage {
                     lists.counts.clear();
                     // Another character's: its own list follows the login's counts.
                     lists.duties = None;
+                    // Its morphs come with the Morph window (and may be another server's).
+                    lists.morphs_server.clear();
+                    lists.morphs_character.clear();
+                    lists.morphs_whole = false;
                 }
                 for e in entries {
                     lists.counts.insert(e.id, e);
@@ -1943,6 +1952,24 @@ impl DataStorage {
                     tracing::info!("Duty missions done today: {done}");
                 }
                 lists.duties = Some(done);
+                false
+            }
+            ListUpdate::Morphs { server, character, whole } => {
+                if whole {
+                    lists.morphs_server.clear();
+                    lists.morphs_character.clear();
+                    lists.morphs_whole = true;
+                }
+                for (recipe, count) in server {
+                    if lists.morphs_server.insert(recipe, count).is_some_and(|before| before != count) {
+                        tracing::info!("Morph {recipe}: {count} on the server");
+                    }
+                }
+                for (recipe, count) in character {
+                    if lists.morphs_character.insert(recipe, count).is_some_and(|before| before != count) {
+                        tracing::info!("Morph {recipe}: {count} by you");
+                    }
+                }
                 false
             }
         };

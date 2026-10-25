@@ -30,6 +30,15 @@
 //! Completion" (0/5 → 1/5 → 2/5 as rewards were taken, 2026-10-25). Other
 //! lists (0) come when the Journal opens; only list 1 is read.
 //!
+//! **Morph counts** (Odyle Substance Morph — the weekly limits per recipe):
+//! `8F 8D` when the Morph window opens, `<u32 0> <n varint> n × (<recipe u32>
+//! <count u32>)` once for the server's counts and once for your character's;
+//! `8B 8D` after each morph, `00 00 01 <recipe u32> 50 05 <recipe u32> <u32 1>
+//! <u32 1> <u32 0> <u32 0> <u32 0> <server count u32> <character count u32>`.
+//! Read 2026-10-25 17:51–17:55: Odyle Energy (Bound) 32070002 "Per Character
+//! 1/4" → 2, 32070001 "Per Server 0/16" → 1 (`87 8D`, the same before the
+//! morph with `51`, is not read).
+//!
 //! All of these are your own character's only — the game sends nobody else's.
 
 /// The currencies looked for: the game's item id, and the name the engine
@@ -63,6 +72,9 @@ pub enum ListUpdate {
     Items { items: Vec<(u32, u64)>, whole: bool },
     /// Duty missions whose reward was taken today.
     Duties { done: u32 },
+    /// Morph counts as (recipe, count), the server's and your character's;
+    /// `whole`: every recipe (the Morph window opened), one not in it is at 0.
+    Morphs { server: Vec<(u32, u32)>, character: Vec<(u32, u32)>, whole: bool },
 }
 
 /// The Journal's list of Duty → Mission (`1C 8D`'s first number).
@@ -89,8 +101,37 @@ pub fn parse(packet: &[u8]) -> Option<ListUpdate> {
             // Generous: only to turn away a list that isn't the one.
             (list == DUTY_MISSIONS && done <= 100).then_some(ListUpdate::Duties { done })
         }
+        [0x8F, 0x8D] => morph_lists(body),
+        [0x8B, 0x8D] => {
+            let u32_at = |o: usize| body.get(o..o + 4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes);
+            let recipe = u32_at(3)?;
+            if body.get(0..3)? != [0, 0, 1] || body.get(7..9)? != [0x50, 0x05] || u32_at(9)? != recipe {
+                return None;
+            }
+            let (server, character) = (u32_at(33)?, u32_at(37)?);
+            Some(ListUpdate::Morphs { server: vec![(recipe, server)], character: vec![(recipe, character)], whole: false })
+        }
         _ => None,
     }
+}
+
+/// `8F 8D`: both lists or nothing — they have to end exactly where the
+/// packet does (the short `8F 8D 00 00 01 00 00 00` after a morph doesn't).
+fn morph_lists(body: &[u8]) -> Option<ListUpdate> {
+    if body.get(0..4)? != [0, 0, 0, 0] {
+        return None;
+    }
+    let mut at = 4;
+    let mut read = || -> Option<Vec<(u32, u32)>> {
+        let n = varint(body, &mut at)? as usize;
+        let pairs = body.get(at..at + n.checked_mul(8)?)?;
+        at += n * 8;
+        Some(pairs.chunks_exact(8).map(|p| (u32::from_le_bytes(p[0..4].try_into().unwrap()), u32::from_le_bytes(p[4..8].try_into().unwrap()))).collect())
+    };
+    let server = read()?;
+    let character = read()?;
+    (at == body.len() && !(server.is_empty() && character.is_empty()))
+        .then_some(ListUpdate::Morphs { server, character, whole: true })
 }
 
 fn varint(body: &[u8], at: &mut usize) -> Option<u32> {
@@ -224,6 +265,28 @@ mod tests {
     fn the_duty_list_says_how_many_are_done() {
         let p = packet("1C 8D", "01 00 00 00 02 00 00 00 11 0B 01 00 00 3A 20 23 00 29 01 00 00");
         assert_eq!(parse(&p), Some(ListUpdate::Duties { done: 2 }));
+    }
+
+    /// The Morph window opened, 2026-10-25 17:51:26 (cut to two recipes a list).
+    #[test]
+    fn the_morph_window_has_both_lists() {
+        let p = packet("8F 8D", "00 00 00 00 02 71 59 E9 01 00 00 00 00 73 59 E9 01 07 00 00 00 02 72 59 E9 01 01 00 00 00 F1 97 E9 01 00 00 00 00");
+        assert_eq!(
+            parse(&p),
+            Some(ListUpdate::Morphs { server: vec![(32_070_001, 0), (32_070_003, 7)], character: vec![(32_070_002, 1), (32_086_001, 0)], whole: true })
+        );
+    }
+
+    #[test]
+    fn the_short_morph_reply_is_nothing() {
+        assert_eq!(parse(&packet("8F 8D", "00 00 01 00 00 00")), None);
+    }
+
+    /// The per-character Odyle recipe morphed, 2026-10-25 17:54:58: 1/4 → 2/4.
+    #[test]
+    fn a_morph_says_both_counts() {
+        let p = packet("8B 8D", "00 00 01 72 59 E9 01 50 05 72 59 E9 01 01 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 02 00 00 00");
+        assert_eq!(parse(&p), Some(ListUpdate::Morphs { server: vec![(32_070_002, 0)], character: vec![(32_070_002, 2)], whole: false }));
     }
 
     /// The Journal's other list, as it opened at 2026-10-25 13:23:49.
