@@ -138,11 +138,16 @@ pub struct GameLists {
     pub items_whole: bool,
     /// Duty missions done today (the Journal's daily completions).
     pub duties: Option<u32>,
+    /// When the game last sent them (wall clock ms) — a count from before the
+    /// daily reset is yesterday's, the game doesn't send a new one at the reset.
+    pub duties_at: i64,
     /// Morph counts by recipe, the server's and your character's.
     pub morphs_server: std::collections::BTreeMap<u32, u32>,
     pub morphs_character: std::collections::BTreeMap<u32, u32>,
     /// The Morph window's whole lists were seen: a recipe not in them is at 0.
     pub morphs_whole: bool,
+    /// When the game last sent morph counts (wall clock ms), as `duties_at`.
+    pub morphs_at: i64,
     pub owner: Option<String>,
     awaits_self_record: bool,
 }
@@ -2036,9 +2041,11 @@ impl DataStorage {
                     tracing::info!("Duty missions done today: {done}");
                 }
                 lists.duties = Some(done);
+                lists.duties_at = now_ms();
                 false
             }
             ListUpdate::Morphs { server, character, whole } => {
+                lists.morphs_at = now_ms();
                 if whole {
                     lists.morphs_server.clear();
                     lists.morphs_character.clear();

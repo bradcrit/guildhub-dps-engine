@@ -537,7 +537,8 @@ impl Engine {
         // `capture::game_lists`), currencies by name (`itemsWhole`: since a
         // login, so one missing is at 0), Duty missions done today, morph
         // counts by recipe (`morphs.whole`: the Morph window's lists, so one
-        // missing is at 0) — whose, as the Odyle energy.
+        // missing is at 0) — whose, as the Odyle energy. `dutiesAt` and
+        // `morphs.at`: when the game sent them (ms) — older than the reset is stale.
         let lists = self.storage.game_lists();
         let has_morphs = !lists.morphs_server.is_empty() || !lists.morphs_character.is_empty();
         let lists = (!lists.counts.is_empty() || !lists.items.is_empty() || lists.duties.is_some() || has_morphs).then(|| {
@@ -554,9 +555,9 @@ impl Engine {
                 m.iter().map(|(recipe, count)| (recipe.to_string(), (*count).into())).collect()
             };
             let morphs = has_morphs.then(|| {
-                serde_json::json!({ "server": by_recipe(&lists.morphs_server), "character": by_recipe(&lists.morphs_character), "whole": lists.morphs_whole })
+                serde_json::json!({ "server": by_recipe(&lists.morphs_server), "character": by_recipe(&lists.morphs_character), "whole": lists.morphs_whole, "at": lists.morphs_at })
             });
-            serde_json::json!({ "owner": lists.owner, "counts": counts, "items": items, "itemsWhole": lists.items_whole, "duties": lists.duties, "morphs": morphs })
+            serde_json::json!({ "owner": lists.owner, "counts": counts, "items": items, "itemsWhole": lists.items_whole, "duties": lists.duties, "dutiesAt": lists.duties_at, "morphs": morphs })
         });
         serde_json::json!({
             "name": name,
