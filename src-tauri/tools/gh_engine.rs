@@ -309,11 +309,21 @@ struct BarData {
 }
 
 impl BarData {
+    /// An abnormal with the game's stand-in icon (`PLACEHOLDER_ICONS`).
+    fn inner_state(&self, abnormal: u32) -> bool {
+        self.abnormal_icons.get(&abnormal).is_some_and(|icon| PLACEHOLDER_ICONS.contains(&icon.as_str()))
+    }
+
     fn skill_icon(&self, skill: u32) -> Option<&str> {
         let digits = skill.to_string();
         (digits.len() == 8).then(|| self.skill_icons.get(&digits[..4])).flatten().map(String::as_str)
     }
 }
+
+/// The game's stand-in icons of abnormals that have none of their own — its
+/// inner states (Dodge 200 on every dodge, stuns, per-tick helpers): a red
+/// and a blue potion that are no potion, kept off the buff bar.
+const PLACEHOLDER_ICONS: [&str; 2] = ["ICON_Abnormal_DotHp", "ICON_Abnormal_DotMp"];
 
 fn load_bar_data(dir: &std::path::Path, language: &str, abnormals: Option<&str>) -> BarData {
     let read = |path: PathBuf| std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
@@ -354,7 +364,7 @@ impl Engine {
         // its stacks counted, the latest one's timer.
         let mut rows: Vec<(u32, Option<u32>, Option<i64>, i64, u32, bool)> = Vec::new();
         for (instance, end) in self.storage.self_abnormals() {
-            if end.is_some_and(|e| e <= now) {
+            if end.is_some_and(|e| e <= now) || self.bar_data.inner_state(instance.abnormal) {
                 continue;
             }
             // Ending in weeks: as good as no timer (an account buff).
