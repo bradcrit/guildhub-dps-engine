@@ -110,8 +110,9 @@
 //! on cooldown, the soonest back first (`{"skill","name","icon","endsAt",
 //! "totalMs"}`, `skill` without its specialization digits); `buffs` the
 //! buffs and debuffs on you (`{"abnormal","skill","name","icon","endsAt",
-//! "totalMs","stacks","mine"}`, `endsAt`/`totalMs` null for one without a
-//! timer, `mine` cast by you), the soonest to end first; `target` what the
+//! "totalMs","stacks","mine","hostile"}`, `endsAt`/`totalMs` null for one
+//! without a timer, `mine` cast by you, `hostile` by a monster or a player of
+//! the other faction — a debuff), the soonest to end first; `target` what the
 //! monster you fight is up to (`{"entity","cast","deadline"}`, null while
 //! you fight none): `cast` the skill it is casting
 //! (`{"skill","name","startedAt","castMs"}`, `castMs` learned from its earlier
@@ -314,6 +315,12 @@ impl BarData {
         self.abnormal_icons.get(&abnormal).is_some_and(|icon| PLACEHOLDER_ICONS.contains(&icon.as_str()))
     }
 
+    /// An abnormal whose icon says it helps (`BOON_ICON_ENDS`) — never a
+    /// debuff, whoever cast it (a monster's own shield on you is none of these).
+    fn boon(&self, abnormal: u32) -> bool {
+        self.abnormal_icons.get(&abnormal).is_some_and(|icon| BOON_ICON_ENDS.iter().any(|end| icon.ends_with(end)))
+    }
+
     fn skill_icon(&self, skill: u32) -> Option<&str> {
         let digits = skill.to_string();
         (digits.len() == 8).then(|| self.skill_icons.get(&digits[..4])).flatten().map(String::as_str)
@@ -324,6 +331,9 @@ impl BarData {
 /// inner states (Dodge 200 on every dodge, stuns, per-tick helpers): a red
 /// and a blue potion that are no potion, kept off the buff bar.
 const PLACEHOLDER_ICONS: [&str; 2] = ["ICON_Abnormal_DotHp", "ICON_Abnormal_DotMp"];
+
+/// Icon name endings of abnormals that help (AttackUp, Hot, HpBarrier, …).
+const BOON_ICON_ENDS: [&str; 7] = ["Up", "Statup", "Hot", "HpBarrier", "Invincible", "Uplift", "Rebirth_Myself"];
 
 fn load_bar_data(dir: &std::path::Path, language: &str, abnormals: Option<&str>) -> BarData {
     let read = |path: PathBuf| std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
@@ -360,9 +370,9 @@ impl Engine {
             .collect();
         let now = a2tools_dps_meter_lib::clock::now_ms();
         let me = self.storage.local_player_id().and_then(|id| i32::try_from(id).ok());
-        // One row per abnormal: (abnormal, skill, end, start, stacks, mine) —
-        // its stacks counted, the latest one's timer.
-        let mut rows: Vec<(u32, Option<u32>, Option<i64>, i64, u32, bool)> = Vec::new();
+        // One row per abnormal: (abnormal, skill, end, start, stacks, mine,
+        // hostile) — its stacks counted, the latest one's timer.
+        let mut rows: Vec<(u32, Option<u32>, Option<i64>, i64, u32, bool, bool)> = Vec::new();
         for (instance, end) in self.storage.self_abnormals() {
             if end.is_some_and(|e| e <= now) || self.bar_data.inner_state(instance.abnormal) {
                 continue;
@@ -370,27 +380,29 @@ impl Engine {
             // Ending in weeks: as good as no timer (an account buff).
             let end = end.filter(|&e| e - now <= 86_400_000);
             let mine = Some(instance.caster) == me;
+            let hostile = !mine && self.storage.is_hostile_caster(instance.caster) && !self.bar_data.boon(instance.abnormal);
             match rows.iter_mut().find(|r| r.0 == instance.abnormal) {
                 Some(row) => {
                     row.4 += 1;
                     row.5 |= mine;
+                    row.6 |= hostile;
                     if end > row.2 {
                         (row.2, row.3) = (end, instance.start_ms);
                     }
                 }
-                None => rows.push((instance.abnormal, instance.skill, end, instance.start_ms, 1, mine)),
+                None => rows.push((instance.abnormal, instance.skill, end, instance.start_ms, 1, mine, hostile)),
             }
         }
         rows.sort_by_key(|r| (r.2.is_none(), r.2, r.0));
         let buffs: Vec<_> = rows
             .into_iter()
-            .map(|(abnormal, skill, end, start, stacks, mine)| {
+            .map(|(abnormal, skill, end, start, stacks, mine, hostile)| {
                 let total = end.map(|e| (e - start).max(0));
                 serde_json::json!({
                     "abnormal": abnormal, "skill": skill,
                     "name": self.bar_data.abnormal_names.get(&abnormal).cloned().or_else(|| skill.and_then(name)),
                     "icon": self.bar_data.abnormal_icons.get(&abnormal),
-                    "endsAt": end, "totalMs": total, "stacks": stacks, "mine": mine,
+                    "endsAt": end, "totalMs": total, "stacks": stacks, "mine": mine, "hostile": hostile,
                 })
             })
             .collect();

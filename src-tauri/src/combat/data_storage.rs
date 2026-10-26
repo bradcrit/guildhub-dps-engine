@@ -1310,6 +1310,27 @@ impl DataStorage {
         }).collect()
     }
 
+    /// `caster` is against you: a monster, or a player of the other faction
+    /// in sight — a summon counts as its summoner. The game data has no
+    /// buff/debuff flag, so this is how the HP bar tells a debuff.
+    pub fn is_hostile_caster(&self, caster: i32) -> bool {
+        if caster <= 0 || self.local_player_id() == Some(i64::from(caster)) {
+            return false;
+        }
+        let player = {
+            let inner = self.inner.read();
+            let resolved = summon_resolver::resolve(caster, &inner.summon_storage);
+            if inner.known_player_ids.contains(&resolved) {
+                resolved
+            } else {
+                return inner.mob_storage.contains_key(&resolved)
+                    && !inner.summon_storage.contains_key(&resolved)
+                    && !inner.confirmed_summon_ids.contains(&resolved);
+            }
+        };
+        self.nearby.lock().is_enemy(player)
+    }
+
     /// One skill record (`capture::skill_casts`), at the current time.
     pub fn note_skill_record(&self, record: skill_casts::Record) {
         let me = self.local_player_id().and_then(|id| i32::try_from(id).ok());

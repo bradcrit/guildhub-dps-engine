@@ -229,6 +229,11 @@ impl NearbyPlayers {
         self.self_faction
     }
 
+    /// A player in sight of the other faction — false while your own isn't known.
+    pub fn is_enemy(&self, id: i32) -> bool {
+        self.self_faction.is_some_and(|mine| self.players.get(&id).is_some_and(|p| p.faction != mine))
+    }
+
     /// Your faction until your self record says it — the one you had last
     /// time, or a party member's in sight. The record comes only with a zone
     /// load: a meter started in the Abyss (21:24 on 2026-10-18) had none until
@@ -510,6 +515,18 @@ mod tests {
         n.attacked_me(4, 500, 1, 100);
         let names: Vec<_> = n.enemies(1000).into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["MILFSHAKE", "HuK", "Ranger"]);
+    }
+
+    #[test]
+    fn an_enemy_is_a_player_in_sight_of_the_other_faction() {
+        let mut n = NearbyPlayers::default();
+        n.spawn(1, "Friend", None, None, 2, 0);
+        n.spawn(2, "Foe", None, None, 1, 0);
+        assert!(!n.is_enemy(2), "your faction isn't known yet");
+        n.set_self_faction(2);
+        assert!(!n.is_enemy(1));
+        assert!(n.is_enemy(2));
+        assert!(!n.is_enemy(3), "not in sight");
     }
 
     #[test]
