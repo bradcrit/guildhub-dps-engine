@@ -3139,26 +3139,29 @@ impl DataStorage {
     /// Passive HP regen ("Restore HP", 1900001) is left out: everyone gets it,
     /// and it would inflate every player's HPS. It is still stored, as
     /// Details shows it on its own.
-    pub fn get_heal_totals_in_window(&self, from_ms: i64, to_ms: i64) -> HashMap<i32, i64> {
+    /// Healing per actor in the window as (healed, effective) — the effective
+    /// part what the targets were missing of their max HP (`HealSkillData::effective`).
+    pub fn get_heal_totals_in_window(&self, from_ms: i64, to_ms: i64) -> HashMap<i32, (i64, i64)> {
         let inner = self.inner.read();
-        let mut totals: HashMap<i32, i64> = HashMap::new();
+        let mut totals: HashMap<i32, (i64, i64)> = HashMap::new();
         for (&actor_id, skills) in &inner.heal_storage {
             if is_mob(&inner, actor_id) {
                 continue;
             }
-            let mut actor_total: i64 = 0;
+            let (mut actor_total, mut actor_effective) = (0i64, 0i64);
             for (&(code, _), skill_data) in skills {
                 if code == PASSIVE_REGEN_SKILL {
                     continue;
                 }
-                for &(ts, amount) in &skill_data.ticks {
+                for (i, &(ts, amount)) in skill_data.ticks.iter().enumerate() {
                     if ts >= from_ms && ts <= to_ms {
                         actor_total += amount;
+                        actor_effective += skill_data.effective.get(i).copied().unwrap_or(amount);
                     }
                 }
             }
             if actor_total > 0 {
-                totals.insert(actor_id, actor_total);
+                totals.insert(actor_id, (actor_total, actor_effective));
             }
         }
         totals

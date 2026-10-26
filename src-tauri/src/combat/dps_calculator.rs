@@ -555,17 +555,19 @@ impl DpsCalculator {
 
         // Heal data: per-actor totals windowed to the fight
         let heal_totals = self.data_storage.get_heal_totals_in_window(fight_start, fight_end);
-        let mut resolved_heals: HashMap<i32, i64> = HashMap::new();
-        for (&actor_id, &heal) in &heal_totals {
+        let mut resolved_heals: HashMap<i32, (i64, i64)> = HashMap::new();
+        for (&actor_id, &(heal, effective)) in &heal_totals {
             let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
             if raw_uid <= 0 { continue; }
             let nickname = resolve_nickname(raw_uid, &nickname_data, &summon_data);
             let uid = *canonical.get(&nickname).unwrap_or(&raw_uid);
             let uid = *orphan_to_owner.get(&uid).unwrap_or(&uid);
-            *resolved_heals.entry(uid).or_insert(0) += heal;
+            let total = resolved_heals.entry(uid).or_insert((0, 0));
+            total.0 += heal;
+            total.1 += effective;
         }
         let bt = battle_time.max(1000);
-        for (&uid, &heal) in &resolved_heals {
+        for (&uid, &(heal, effective)) in &resolved_heals {
             let entry = dps_data.map.entry(uid).or_insert_with(|| {
                 let nickname = resolve_nickname(uid, &nickname_data, &summon_data);
                 let cached_job = self.cached_job(&nickname);
@@ -576,7 +578,24 @@ impl DpsCalculator {
                 }
             });
             entry.heal_amount = heal as f64;
+            entry.effective_heal = effective as f64;
             entry.hps = heal as f64 / bt as f64 * 1000.0;
+        }
+        // Damage taken on the shown targets' fights (a mob's hits land on its
+        // fight) — only on rows already there: taking hits alone makes no row.
+        for &tid in &target_ids {
+            let Some(target_data) = combat_data.get(&tid) else { continue };
+            for (&actor_id, actor_data) in &target_data.actors {
+                if actor_data.damage_received <= 0 {
+                    continue;
+                }
+                let nickname = resolve_nickname(actor_id, &nickname_data, &summon_data);
+                let uid = *canonical.get(&nickname).unwrap_or(&actor_id);
+                let uid = *orphan_to_owner.get(&uid).unwrap_or(&uid);
+                if let Some(entry) = dps_data.map.get_mut(&uid) {
+                    entry.damage_received += actor_data.damage_received as f64;
+                }
+            }
         }
 
         // Filter and compute DPS
@@ -2094,6 +2113,23 @@ mod tests {
         assert!(storage.get_target_snapshot(99999).is_none());
         live.restart_target_selection(true);
         assert_eq!(reader.get_details_context().current_target_id, live.get_details_context().current_target_id);
+    }
+
+    #[test]
+    fn a_row_carries_the_damage_its_player_took_on_the_shown_fight() {
+        let storage = Arc::new(DataStorage::new());
+        storage.set_local_player_id(Some(2259));
+        storage.append_nickname(2259, "Naicha");
+        storage.append_mob(50_000, 1);
+        storage.append_damage(hit(2259, 50_000, 1_000));
+        let mut taken = hit(50_000, 2259, 1_500);
+        taken.set_skill_code(1_200_001);
+        taken.set_damage(300);
+        storage.append_damage(taken);
+        let mut calc = meter(&storage);
+        calc.set_target_selection_mode("mostDamage");
+        let view = calc.get_dps();
+        assert_eq!(view.map[&2259].damage_received, 300.0);
     }
 
     #[test]
