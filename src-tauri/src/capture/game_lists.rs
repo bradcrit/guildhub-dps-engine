@@ -24,11 +24,14 @@
 //! game's, the same for every character. Only the ones in `CURRENCIES` are
 //! looked for, by their id.
 //!
-//! **Duty missions** (`1C 8D`, the Journal's list, at login and after each
-//! reward taken): `<list u32> <done today u32> <count u8> <missions …>`. List 1
-//! is Duty → Mission, its "done today" the Journal's "Per Server Daily
-//! Completion" (0/5 → 1/5 → 2/5 as rewards were taken, 2026-10-25). Other
-//! lists (0) come when the Journal opens; only list 1 is read.
+//! **Duty missions** (`1C 8D`, Duty → Mission, at login and after each reward
+//! taken): `<u32> <rewards taken today u32> <count u8> <missions …>`, a mission
+//! `<slot u32> <id u32> <u32> <u32> <state u8> <n u8>` and n rewards `<item
+//! u32> <amount varint> <u8> <chance u32> <u32>`. State 1 open, 3 done with the
+//! reward not taken yet, 4 reward taken. The Journal's "Per Server Daily
+//! Completion" counts 3 and 4: 5/5 with three rewards taken and two waiting,
+//! 2026-10-26 10:44. The first number is no list: 0 → 1 on 2026-10-25, 1 → 3
+//! on 2026-10-26 as the list was refreshed (the Daily Refreshes used?).
 //!
 //! **Morph counts** (Odyle Substance Morph — the weekly limits per recipe):
 //! `8F 8D` when the Morph window opens, `<u32 0> <n varint> n × (<recipe u32>
@@ -70,15 +73,12 @@ pub enum ListUpdate {
     /// Currencies as (item id, amount); `whole`: the inventory at login, a
     /// currency not in it is at 0.
     Items { items: Vec<(u32, u64)>, whole: bool },
-    /// Duty missions whose reward was taken today.
+    /// Duty missions done today (their reward taken or not).
     Duties { done: u32 },
     /// Morph counts as (recipe, count), the server's and your character's;
     /// `whole`: every recipe (the Morph window opened), one not in it is at 0.
     Morphs { server: Vec<(u32, u32)>, character: Vec<(u32, u32)>, whole: bool },
 }
-
-/// The Journal's list of Duty → Mission (`1C 8D`'s first number).
-const DUTY_MISSIONS: u32 = 1;
 
 pub fn parse(packet: &[u8]) -> Option<ListUpdate> {
     let length = super::stream_processor::read_varint(packet, 0);
@@ -96,10 +96,11 @@ pub fn parse(packet: &[u8]) -> Option<ListUpdate> {
             (!items.is_empty()).then_some(ListUpdate::Items { items, whole: false })
         }
         [0x1C, 0x8D] => {
-            let list = u32::from_le_bytes(body.get(0..4)?.try_into().ok()?);
-            let done = u32::from_le_bytes(body.get(4..8)?.try_into().ok()?);
-            // Generous: only to turn away a list that isn't the one.
-            (list == DUTY_MISSIONS && done <= 100).then_some(ListUpdate::Duties { done })
+            let taken = u32::from_le_bytes(body.get(4..8)?.try_into().ok()?);
+            // The missions cut off (a test's): the rewards taken, at least.
+            let done = missions_done(body).unwrap_or(taken);
+            // Generous: only to turn away bytes that merely look like the list.
+            (done <= 100).then_some(ListUpdate::Duties { done })
         }
         [0x8F, 0x8D] => morph_lists(body),
         [0x8B, 0x8D] => {
@@ -132,6 +133,28 @@ fn morph_lists(body: &[u8]) -> Option<ListUpdate> {
     let character = read()?;
     (at == body.len() && !(server.is_empty() && character.is_empty()))
         .then_some(ListUpdate::Morphs { server, character, whole: true })
+}
+
+/// `1C 8D`: the missions done (state 3 or 4) — all of them read, or nothing.
+fn missions_done(body: &[u8]) -> Option<u32> {
+    let count = *body.get(8)?;
+    let mut at = 9;
+    let mut done = 0;
+    for _ in 0..count {
+        let state = *body.get(at + 16)?;
+        let rewards = *body.get(at + 17)?;
+        at += 18;
+        for _ in 0..rewards {
+            at += 4;
+            varint(body, &mut at)?;
+            at += 9;
+        }
+        body.get(..at)?;
+        if matches!(state, 3 | 4) {
+            done += 1;
+        }
+    }
+    Some(done)
 }
 
 fn varint(body: &[u8], at: &mut usize) -> Option<u32> {
@@ -289,11 +312,25 @@ mod tests {
         assert_eq!(parse(&p), Some(ListUpdate::Morphs { server: vec![(32_070_002, 0)], character: vec![(32_070_002, 2)], whole: false }));
     }
 
-    /// The Journal's other list, as it opened at 2026-10-25 13:23:49.
+    /// The list before any refresh (first number 0), 2026-10-25 13:23:49.
     #[test]
-    fn another_journal_list_is_nothing() {
+    fn the_first_number_is_no_list() {
         let p = packet("1C 8D", "00 00 00 00 00 00 00 00 0F 00 01 00 00 C7 20 23 00");
-        assert_eq!(parse(&p), None);
+        assert_eq!(parse(&p), Some(ListUpdate::Duties { done: 0 }));
+    }
+
+    /// One reward taken, one waiting, one open — as 2026-10-26 10:44:51, cut to
+    /// three missions of one reward each: the waiting one counts, as in the Journal.
+    #[test]
+    fn a_done_mission_counts_before_its_reward_is_taken() {
+        let p = packet(
+            "1C 8D",
+            "03 00 00 00 01 00 00 00 03 \
+             24 01 00 00 A1 20 23 00 29 01 00 00 00 00 00 00 04 01 68 26 B4 1F C8 01 00 00 E1 F5 05 00 00 00 00 \
+             4E 01 00 00 B7 20 23 00 2C 01 00 00 00 00 00 00 03 01 37 33 70 37 F4 03 00 00 E1 F5 05 00 00 00 00 \
+             4B 01 00 00 D3 20 23 00 00 00 00 00 00 00 00 00 01 01 21 33 70 37 A0 99 02 00 40 8A F7 01 00 00 00 00",
+        );
+        assert_eq!(parse(&p), Some(ListUpdate::Duties { done: 2 }));
     }
 
     #[test]
