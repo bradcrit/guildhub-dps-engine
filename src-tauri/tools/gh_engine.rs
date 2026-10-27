@@ -84,7 +84,7 @@
 //! `petShop` (`{"server","at","tab","refreshAt","offers":[{"item","count",
 //! "tier","price","original"}]}`) each time a tab of the Black Cloud
 //! Merchant's shop is opened (`91 56`; the server sends it only then, not at
-//! login): `tab` from its listing ids (21 Special, 22 Pets, 23 Skins),
+//! login), passed on at once — `server` null while not known yet: `tab` from its listing ids (21 Special, 22 Pets, 23 Skins),
 //! `refreshAt` when the shop changes its wares next (unix ms, the full hour;
 //! null: not read), `item` the game's item id (a pet's is its soul item's
 //! + 100000), `tier` the discount (0 −10 %, 1 −20 %, 2 −30 %, 3 −50 %),
@@ -524,6 +524,23 @@ impl Engine {
         serde_json::json!({ "cubes": cubes, "opened": self.storage.cubes_opened() }).to_string()
     }
 
+    /// The shop lists read since the last call, as `petShop` JSON — at once,
+    /// `server` null while it isn't known (the meter started mid-game).
+    fn take_shop_events(&self, server: u16) -> Vec<String> {
+        let mut pets = self.pets.lock();
+        let (shops, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *pets).into_iter().partition(|(_, name, _)| name == "pet-shop");
+        *pets = rest;
+        shops
+            .into_iter()
+            .filter_map(|(at, _, data)| {
+                let mut body = data.as_object()?.clone();
+                body.insert("server".into(), if server == 0 { serde_json::Value::Null } else { server.into() });
+                body.insert("at".into(), at.into());
+                Some(serde_json::Value::Object(body).to_string())
+            })
+            .collect()
+    }
+
     /// The pet records ready to be passed on, oldest first, as (event, JSON):
     /// everything up to a pet list younger than PET_LIST_SETTLE_MS, which
     /// waits with what came after it.
@@ -542,7 +559,6 @@ impl Engine {
                     "pet-list" => "petList",
                     "pet-souls" => "petSouls",
                     "pet-level" => "petLevel",
-                    "pet-shop" => "petShop",
                     _ => return None,
                 };
                 Some((event, serde_json::Value::Object(body).to_string()))
@@ -1108,6 +1124,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 }
                 for body in engine.take_loot_events() {
                     let _ = engine.events.send(("loot", body));
+                }
+                // The shop lists don't wait for the server: they're about what's on sale now.
+                for body in engine.take_shop_events(server) {
+                    let _ = engine.events.send(("petShop", body));
                 }
                 // The server isn't known yet (the meter started mid-game): the maps and pets wait for it.
                 if server == 0 {
