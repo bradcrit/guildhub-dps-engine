@@ -81,6 +81,14 @@
 //! one kill can feed several pets; `petLevel` (`{"server","at","pet","level"}`)
 //! when a pet reaches a level (the game resets its souls to 0 then, and
 //! doesn't send this for every step). `pet` is the game's pet id (1001 …).
+//! `petShop` (`{"server","at","tab","refreshAt","offers":[{"item","count",
+//! "tier","price","original"}]}`) each time a tab of the Black Cloud
+//! Merchant's shop is opened (`91 56`; the server sends it only then, not at
+//! login): `tab` from its listing ids (21 Special, 22 Pets, 23 Skins),
+//! `refreshAt` when the shop changes its wares next (unix ms, the full hour;
+//! null: not read), `item` the game's item id (a pet's is its soul item's
+//! + 100000), `tier` the discount (0 −10 %, 1 −20 %, 2 −30 %, 3 −50 %),
+//! `price` and `original` in Kinah.
 //! `npcs` (`{"npcs":[{"npc","count"}],"target"}`) on every change and once on
 //! connecting: the living mobs in sight by NPC code, from their spawn until
 //! they die, despawn or a zone load — what the pet tracker farms nearby.
@@ -212,6 +220,44 @@ const PET_DECODERS: &str = r#"[
     { "name": "pet-level", "opcode": "14 90", "fields": [
         { "type": "skip:2" }, { "name": "pet", "type": "u32" }, { "name": "level", "type": "u32" } ] }
 ]"#;
+/// The Black Cloud Merchant's shop list (see the top of this file).
+const SHOP_OPCODE: [u8; 2] = [0x91, 0x56];
+/// One offer of it: listing id u32, item u32, count u64, tier u8, 0x5D, original u64, price u64.
+const SHOP_ENTRY_LEN: usize = 34;
+const SHOP_ENTRY_MARK: u8 = 0x5D;
+
+/// A shop list's offers (`91 56`, `body` after the opcode: request id u8,
+/// count u8, the offers, then the next change as unix ms) — null when none
+/// reads. A byte sits between some offers (0x55, 0x05 before the 2nd, 6th,
+/// 10th …): skipped, as is anything that doesn't read as one.
+fn shop_event(body: &[u8]) -> Option<serde_json::Value> {
+    let count = *body.get(1)? as usize;
+    let u32_at = |b: &[u8], i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    let u64_at = |b: &[u8], i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+    let mut offers = Vec::new();
+    let mut tab = None;
+    let mut at = 2;
+    while offers.len() < count && at + SHOP_ENTRY_LEN <= body.len() {
+        let e = &body[at..at + SHOP_ENTRY_LEN];
+        let (listing, item, items, tier, original, price) = (u32_at(e, 0), u32_at(e, 4), u64_at(e, 8), e[16], u64_at(e, 18), u64_at(e, 26));
+        if e[17] != SHOP_ENTRY_MARK || !(1..=1_000_000).contains(&items) || price == 0 || price > original || original >= 1_000_000_000_000 {
+            at += 1;
+            continue;
+        }
+        tab.get_or_insert(listing / 10_000);
+        offers.push(serde_json::json!({ "item": item, "count": items, "tier": tier, "price": price, "original": original }));
+        at += SHOP_ENTRY_LEN;
+    }
+    if offers.is_empty() {
+        return None;
+    }
+    let refresh_at = body
+        .get(at..at + 8)
+        .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+        .filter(|t| (1_600_000_000_000..4_000_000_000_000).contains(t));
+    Some(serde_json::json!({ "tab": tab, "refreshAt": refresh_at, "offers": offers }))
+}
+
 /// How often the cooldown and cast bars' state is looked at.
 const SKILLS_RATE: Duration = Duration::from_millis(100);
 /// Where the learned monster cast times are kept between sessions.
@@ -496,6 +542,7 @@ impl Engine {
                     "pet-list" => "petList",
                     "pet-souls" => "petSouls",
                     "pet-level" => "petLevel",
+                    "pet-shop" => "petShop",
                     _ => return None,
                 };
                 Some((event, serde_json::Value::Object(body).to_string()))
@@ -895,6 +942,15 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
             }
             let at = len as usize;
             let Some(opcode) = packet.get(at..at + 2) else { return };
+            if opcode == SHOP_OPCODE {
+                if let Some(data) = shop_event(&packet[at + 2..]) {
+                    let mut pets = pets.lock();
+                    if pets.len() < MAX_PENDING_PETS {
+                        pets.push((a2tools_dps_meter_lib::clock::now_ms(), "pet-shop".to_string(), data));
+                    }
+                }
+                return;
+            }
             for d in decoders.iter().filter(|d| d.opcode == opcode) {
                 let Some(data) = d.decode(&packet[at + 2..]) else { continue };
                 let mut pets = pets.lock();
@@ -1463,6 +1519,23 @@ mod tests {
             souls.decode(&body).unwrap(),
             serde_json::json!({"souls": [{"pet": 1015, "amount": 1}, {"pet": 1120, "amount": 1}]})
         );
+    }
+
+    /// The Pets tab of the Black Cloud Merchant (a capture of ours,
+    /// 2026-10-27 15:22): ten pets, the bytes between some offers skipped,
+    /// the next change at 16:00.
+    #[test]
+    fn a_shop_list_reads_its_offers() {
+        let hex = "CC0AAB5B030091CADF1F0100000000000000025DA0860100000000007011010000000000558E5B030072CADF1F0100000000000000005DA086010000000000905F010000000000E55B0300EFCADF1F0100000000000000005DA086010000000000905F010000000000CA5B030094CADF1F0100000000000000025DA0860100000000007011010000000000C55B0300ACCADF1F0100000000000000005DA086010000000000905F01000000000055FF5B0300B5CADF1F0100000000000000015DA0860100000000008038010000000000225C030016CBDF1F0100000000000000005DA086010000000000905F010000000000DA5B0300E4CADF1F0100000000000000015DA0860100000000008038010000000000635B030043CADF1F0100000000000000025DA0860100000000007011010000000000058F5B030073CADF1F0100000000000000025DA08601000000000070110100000000008015E07DA101000000000000";
+        let body: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let event = shop_event(&body).unwrap();
+        assert_eq!(event["tab"], 22);
+        assert_eq!(event["refreshAt"], 1_793_113_200_000_i64);
+        let offers = event["offers"].as_array().unwrap();
+        assert_eq!(offers.len(), 10);
+        assert_eq!(offers[0], serde_json::json!({ "item": 534760081, "count": 1, "tier": 2, "price": 70000, "original": 100000 }));
+        assert_eq!(offers[9]["item"], 534760051);
+        assert!(shop_event(&body[..20]).is_none());
     }
 
     #[test]
