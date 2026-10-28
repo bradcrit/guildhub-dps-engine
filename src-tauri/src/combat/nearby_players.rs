@@ -156,6 +156,10 @@ pub struct RecapAttacker {
     pub name: String,
     pub class: Option<JobClass>,
     pub rank: Option<u8>,
+    /// Their server, from their legion (`NearbyPlayer::server`).
+    pub server: Option<u16>,
+    /// Of your race, in an Abyss pairing of one race (`NearbyPlayer::paired`).
+    pub paired: bool,
     pub damage: u64,
     pub hits: u32,
     /// The skill that did the most of their damage.
@@ -170,6 +174,9 @@ pub struct KillRecord {
     pub class: Option<JobClass>,
     pub item_level: Option<u32>,
     pub rank: Option<u8>,
+    /// As `RecapAttacker::server` and `paired`.
+    pub server: Option<u16>,
+    pub paired: bool,
     /// The last hit was yours: a kill; else an assist.
     pub killing_blow: bool,
     /// Your damage on them, your hits and the skill that did the most of it.
@@ -447,7 +454,7 @@ impl NearbyPlayers {
     fn died(&mut self, at: i64) {
         let hits = hits_before(&mut self.hits_on_me, at);
         let Some(last) = hits.last() else { return };
-        let name_of = |id: i32| self.players.get(&id).map(|p| (p.name.clone(), p.class, p.rank));
+        let name_of = |id: i32| self.players.get(&id).map(|p| (p.name.clone(), p.class, p.rank, p.server, p.paired));
         let Some((killer, ..)) = name_of(last.actor) else { return };
         let mut actors: Vec<i32> = hits.iter().map(|h| h.actor).collect();
         actors.sort_unstable();
@@ -455,10 +462,11 @@ impl NearbyPlayers {
         let mut attackers: Vec<_> = actors
             .into_iter()
             .filter_map(|actor| {
-                let (name, class, rank) = name_of(actor)?;
+                let (name, class, rank, server, paired) = name_of(actor)?;
                 let theirs = || hits.iter().filter(move |h| h.actor == actor);
                 let damage = theirs().map(|h| h.damage).sum();
-                Some(RecapAttacker { name, class, rank, damage, hits: theirs().count() as u32, top_skill: top_skill(theirs()) })
+                let (hits, top_skill) = (theirs().count() as u32, top_skill(theirs()));
+                Some(RecapAttacker { name, class, rank, server, paired, damage, hits, top_skill })
             })
             .collect();
         attackers.sort_by(|a, b| b.damage.cmp(&a.damage).then(a.name.cmp(&b.name)));
@@ -485,6 +493,8 @@ impl NearbyPlayers {
             class: p.class,
             item_level: p.item_level,
             rank: p.rank,
+            server: p.server,
+            paired: p.paired,
             killing_blow: hits.last().is_some_and(|h| h.actor == me),
             damage: my_hits.iter().map(|h| h.damage).sum(),
             hits: my_hits.len() as u32,
