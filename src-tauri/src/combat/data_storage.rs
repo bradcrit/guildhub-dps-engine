@@ -1030,9 +1030,9 @@ impl DataStorage {
     }
 
     /// A player spawned in sight, with what their spawn says of them.
-    pub fn note_nearby_spawn(&self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8, rank: Option<u8>) {
+    pub fn note_nearby_spawn(&self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8, paired: bool, rank: Option<u8>) {
         let mut nearby = self.nearby.lock();
-        nearby.spawn(id, name, class, item_level, faction, now_ms());
+        nearby.spawn(id, name, class, item_level, faction, paired, now_ms());
         nearby.set_rank(id, rank);
     }
 

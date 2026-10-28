@@ -1055,7 +1055,15 @@ impl StreamProcessor {
         self.data_storage
             .append_nickname_authoritative(actor_id, &sanitized);
         if let Some(profile) = spawn_profile(data, field.end) {
-            self.data_storage.note_nearby_spawn(actor_id, &sanitized, profile.class, profile.item_level, profile.faction, profile.rank);
+            self.data_storage.note_nearby_spawn(
+                actor_id,
+                &sanitized,
+                profile.class,
+                profile.item_level,
+                profile.faction,
+                profile.paired,
+                profile.rank,
+            );
         }
     }
 
@@ -3195,7 +3203,9 @@ fn player_spawn_at(data: &[u8], offset_after_opcode: usize) -> Option<(i32, Stri
 #[derive(Debug, PartialEq)]
 struct SpawnProfile {
     class: Option<JobClass>,
+    /// The race, or in an Abyss pairing of one race the side (`paired`).
     faction: u8,
+    paired: bool,
     item_level: Option<u32>,
     /// The Abyss rank (`pvp_rank`).
     rank: Option<u8>,
@@ -3212,9 +3222,16 @@ struct SpawnProfile {
 /// `<level u32> 00 00 00 00 <item level u32> [<u32>] de 02 0c` — 2254 for
 /// raas, 2240 for Balyone, as the game showed them inspected (17:03). The
 /// first such run within the record's usual length.
+///
+/// Two bytes after the faction, the side in an Abyss pairing of one race: on
+/// 2026-10-28, Asmodians against Asmodians, every spawn said faction 2, and
+/// that byte 1 for the 5 players of server 2311, 2 for the 29 of Bradcrit's
+/// server 2313. 0 in a pairing of the two races (raas). Where it is 1 or 2
+/// it is what tells friend from foe, so it stands for the faction.
 fn spawn_profile(data: &[u8], after: usize) -> Option<SpawnProfile> {
     let class = data.get(after..after + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
-    let faction = *data.get(after + 4).filter(|f| matches!(f, 1 | 2))?;
+    let race = *data.get(after + 4).filter(|f| matches!(f, 1 | 2))?;
+    let side = data.get(after + 6).copied().filter(|s| matches!(s, 1 | 2));
     let window = data.get(after..data.len().min(after + 2048))?;
     let u32_at = |at: usize| u32::from_le_bytes(window[at..at + 4].try_into().unwrap());
     let item_level = (16..window.len().saturating_sub(2)).find_map(|i| {
@@ -3228,7 +3245,13 @@ fn spawn_profile(data: &[u8], after: usize) -> Option<SpawnProfile> {
             ((1..=99).contains(&level) && u32_at(level_at + 4) == 0 && (1..=9999).contains(&item_level)).then_some(item_level)
         })
     });
-    Some(SpawnProfile { class: JobClass::from_roster_class(class), faction, item_level, rank: pvp_rank(data) })
+    Some(SpawnProfile {
+        class: JobClass::from_roster_class(class),
+        faction: side.unwrap_or(race),
+        paired: side.is_some(),
+        item_level,
+        rank: pvp_rank(data),
+    })
 }
 
 /// A player's Abyss rank, at the end of their spawn: 19 Trainee, 18 Ninth-
@@ -3783,7 +3806,7 @@ mod tests {
         let head = hex_bytes("18 00 00 00 02 02 00 92 C0 7B 2C 48 48 5B 29 48 00 62 BA 46");
         let tail = hex_bytes("27 02 48 F4 FF FF 2D 00 00 00 00 00 00 00 CE 08 00 00 DE 02 0C 64 64 64");
         let record = [head.clone(), vec![0x11; 900], tail.clone()].concat();
-        let raas = SpawnProfile { class: Some(JobClass::Elementalist), faction: 2, item_level: Some(2254), rank: None };
+        let raas = SpawnProfile { class: Some(JobClass::Elementalist), faction: 2, paired: false, item_level: Some(2254), rank: None };
         assert_eq!(spawn_profile(&record, 0), Some(raas));
         // Her spawn at 01:29 had a u32 between the item level and the marker.
         let later = hex_bytes("2D 00 00 00 00 00 00 00 C9 08 00 00 4F 00 00 00 DE 02 0C");
@@ -3796,6 +3819,13 @@ mod tests {
         let mut bad = head;
         bad[4] = 7;
         assert_eq!(spawn_profile(&bad, 0), None);
+        // Asmodians against Asmodians (2026-10-28): Arvein of server 2311
+        // and Lilin of Bradcrit's 2313, both faction 2, the side tells them apart.
+        let arvein = hex_bytes("24 00 00 00 02 02 01 80 D2 8D BE 74 47 EB 2A D6 46 00 14 02 47");
+        let lilin = hex_bytes("10 00 00 00 02 02 02 00 92 EB 48 51 47 54 3A 4B C7 00 FC 9F 46");
+        let side = |head: &[u8]| spawn_profile(&[head.to_vec(), vec![0x11; 900]].concat(), 0).map(|p| (p.faction, p.paired));
+        assert_eq!(side(&arvein), Some((1, true)));
+        assert_eq!(side(&lilin), Some((2, true)));
     }
 
     #[test]
@@ -3804,8 +3834,8 @@ mod tests {
         let sp = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
         storage.note_self_faction(2);
         storage.set_local_identity_from_game(15567, Some("Bradcrit".into()));
-        storage.note_nearby_spawn(14199, "MILFSHAKE", None, None, 1, None);
-        storage.note_nearby_spawn(11788, "Kikay", None, None, 2, None);
+        storage.note_nearby_spawn(14199, "MILFSHAKE", None, None, 1, false, None);
+        storage.note_nearby_spawn(11788, "Kikay", None, None, 2, false, None);
         let framed = |body: &[u8]| [vec![(body.len() + 1) as u8], body.to_vec()].concat();
         // MILFSHAKE's skill on Bradcrit (17:05:28.926): seen, but no attack —
         // a skill aimed at you is as often a buff or a heal.
@@ -3827,8 +3857,8 @@ mod tests {
     fn no_enemies_in_a_dungeon_and_never_your_party() {
         let storage = Arc::new(DataStorage::new());
         storage.note_self_faction(2);
-        storage.note_nearby_spawn(3001, "Chantress", Some(JobClass::Chanter), None, 1, None);
-        storage.note_nearby_spawn(3002, "Stranger", None, None, 1, None);
+        storage.note_nearby_spawn(3001, "Chantress", Some(JobClass::Chanter), None, 1, false, None);
+        storage.note_nearby_spawn(3002, "Stranger", None, None, 1, false, None);
         storage.note_party_scope(3001);
         let names: Vec<_> = storage.nearby_enemies().into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Stranger"], "a party member is no enemy");

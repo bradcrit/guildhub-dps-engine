@@ -56,8 +56,12 @@ pub struct NearbyPlayer {
     pub class: Option<JobClass>,
     /// Equipment item level, as the inspect window shows it.
     pub item_level: Option<u32>,
-    /// The spawn's faction byte; yours is in your self record.
+    /// The spawn's faction byte; yours is in your self record. In an Abyss
+    /// pairing of one race, the side byte instead (`paired`).
     pub faction: u8,
+    /// `faction` is a side of an Abyss pairing of one race, not the race:
+    /// yours then is a party member's (`guess_faction_from_party`).
+    pub paired: bool,
     /// The Abyss rank: 19 Trainee, 18 Ninth-Class … 10 First-Class Soldier.
     pub rank: Option<u8>,
     pub last_seen_ms: i64,
@@ -188,6 +192,9 @@ pub struct NearbyPlayers {
     players: HashMap<i32, NearbyPlayer>,
     foes: HashMap<i32, Foe>,
     self_faction: Option<u8>,
+    /// Your side in an Abyss pairing of one race, from a party member in
+    /// sight; until known, `self_faction` stands for it.
+    self_side: Option<u8>,
     /// Your entity, from the hits (`DataStorage::note_nearby_damage`).
     me: Option<i32>,
     abyss: bool,
@@ -220,18 +227,25 @@ fn top_skill<'a>(hits: impl Iterator<Item = &'a Hit>) -> i32 {
 }
 
 impl NearbyPlayers {
-    /// Your faction, from your self record.
+    /// Your faction, from your self record. It comes with a zone load, after
+    /// which the side of a pairing is learned again.
     pub fn set_self_faction(&mut self, faction: u8) {
         self.self_faction = Some(faction);
+        self.self_side = None;
     }
 
     pub fn self_faction(&self) -> Option<u8> {
         self.self_faction
     }
 
+    /// Your faction or side, as the players in sight are compared with it.
+    fn mine(&self) -> Option<u8> {
+        self.self_side.or(self.self_faction)
+    }
+
     /// A player in sight of the other faction — false while your own isn't known.
     pub fn is_enemy(&self, id: i32) -> bool {
-        self.self_faction.is_some_and(|mine| self.players.get(&id).is_some_and(|p| p.faction != mine))
+        self.mine().is_some_and(|mine| self.players.get(&id).is_some_and(|p| p.faction != mine))
     }
 
     /// Your faction until your self record says it — the one you had last
@@ -245,12 +259,16 @@ impl NearbyPlayers {
     }
 
     /// `guess_self_faction` from the first player in sight `in_party` says is
-    /// in your party.
+    /// in your party — and in a pairing of one race your side, which your
+    /// self record doesn't state (it said 2, the race, on 2026-10-28).
     pub fn guess_faction_from_party(&mut self, in_party: impl Fn(&NearbyPlayer) -> bool) {
         if self.self_faction.is_none() {
             if let Some(faction) = self.players.values().find(|p| in_party(p)).map(|p| p.faction) {
                 self.guess_self_faction(faction);
             }
+        }
+        if self.self_side.is_none() {
+            self.self_side = self.players.values().find(|p| p.paired && in_party(p)).map(|p| p.faction);
         }
     }
 
@@ -272,7 +290,7 @@ impl NearbyPlayers {
 
     /// A player spawned in sight. The same entity again (a second copy of
     /// the record) keeps when it last attacked you and the damage between you.
-    pub fn spawn(&mut self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8, now_ms: i64) {
+    pub fn spawn(&mut self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8, paired: bool, now_ms: i64) {
         let same = self.players.get(&id).filter(|p| p.name == name);
         let attacked_me_ms = same.and_then(|p| p.attacked_me_ms);
         let item_level = item_level.or_else(|| same.and_then(|p| p.item_level));
@@ -283,7 +301,7 @@ impl NearbyPlayers {
         }
         self.players.insert(
             id,
-            NearbyPlayer { id, name: name.to_string(), class, item_level, faction, rank, last_seen_ms: now_ms, attacked_me_ms, dealt, taken },
+            NearbyPlayer { id, name: name.to_string(), class, item_level, faction, paired, rank, last_seen_ms: now_ms, attacked_me_ms, dealt, taken },
         );
     }
 
@@ -328,7 +346,7 @@ impl NearbyPlayers {
     pub fn hit_on_me(&mut self, actor: i32, damage: u64, skill: i32, actor_is_player: bool, now_ms: i64) {
         self.settle(now_ms);
         let from_player = actor_is_player || self.players.contains_key(&actor);
-        if from_player && !Self::across_factions(self.self_faction, self.players.get(&actor).map(|p| p.faction)) {
+        if from_player && !Self::across_factions(self.mine(), self.players.get(&actor).map(|p| p.faction)) {
             return;
         }
         if let Some(at) = self.my_vitals.hit(damage, now_ms) {
@@ -345,7 +363,7 @@ impl NearbyPlayers {
         self.settle(now_ms);
         let Some(target_faction) = self.players.get(&id).map(|p| p.faction) else { return };
         let mine = Some(actor) == self.me;
-        let actor_faction = if mine { self.self_faction } else { self.players.get(&actor).map(|p| p.faction) };
+        let actor_faction = if mine { self.mine() } else { self.players.get(&actor).map(|p| p.faction) };
         let from_player = mine || actor_is_player || actor_faction.is_some();
         if from_player && !Self::across_factions(actor_faction, Some(target_faction)) {
             return;
@@ -412,7 +430,7 @@ impl NearbyPlayers {
     /// A player in sight died at `at`: your kill, or assist, if they are of
     /// the other faction and you hit them in the `RECAP_WINDOW_MS` before.
     fn player_died(&mut self, id: i32, at: i64) {
-        let (Some(me), Some(mine)) = (self.me, self.self_faction) else { return };
+        let (Some(me), Some(mine)) = (self.me, self.mine()) else { return };
         let Some(p) = self.players.get(&id).filter(|p| p.faction != mine) else { return };
         let Some(foe) = self.foes.get_mut(&id) else { return };
         let hits = hits_before(&mut foe.hits, at);
@@ -485,7 +503,7 @@ impl NearbyPlayers {
         self.players.retain(|_, p| now_ms - p.last_seen_ms < FORGET_AFTER_MS);
         let players = &self.players;
         self.foes.retain(|id, _| players.contains_key(id));
-        let Some(mine) = self.self_faction else { return Vec::new() };
+        let Some(mine) = self.mine() else { return Vec::new() };
         let mut out: Vec<_> = self.players.values().filter(|p| p.faction != mine).cloned().collect();
         out.sort_by(|a, b| {
             b.attacked_me_ms
@@ -504,10 +522,10 @@ mod tests {
     #[test]
     fn only_the_other_faction_attackers_first_then_the_one_seen_last() {
         let mut n = NearbyPlayers::default();
-        n.spawn(1, "Friend", None, Some(2200), 2, 0);
-        n.spawn(2, "Ranger", Some(JobClass::Ranger), Some(2100), 1, 0);
-        n.spawn(3, "HuK", None, None, 1, 0);
-        n.spawn(4, "MILFSHAKE", None, None, 1, 0);
+        n.spawn(1, "Friend", None, Some(2200), 2, false, 0);
+        n.spawn(2, "Ranger", Some(JobClass::Ranger), Some(2100), 1, false, 0);
+        n.spawn(3, "HuK", None, None, 1, false, 0);
+        n.spawn(4, "MILFSHAKE", None, None, 1, false, 0);
         assert!(n.enemies(0).is_empty(), "your faction isn't known yet");
         n.set_self_faction(2);
         n.seen(3, 500);
@@ -520,8 +538,8 @@ mod tests {
     #[test]
     fn an_enemy_is_a_player_in_sight_of_the_other_faction() {
         let mut n = NearbyPlayers::default();
-        n.spawn(1, "Friend", None, None, 2, 0);
-        n.spawn(2, "Foe", None, None, 1, 0);
+        n.spawn(1, "Friend", None, None, 2, false, 0);
+        n.spawn(2, "Foe", None, None, 1, false, 0);
         assert!(!n.is_enemy(2), "your faction isn't known yet");
         n.set_self_faction(2);
         assert!(!n.is_enemy(1));
@@ -533,14 +551,14 @@ mod tests {
     fn a_despawn_or_a_long_silence_ends_a_player_and_a_second_spawn_keeps_the_attack() {
         let mut n = NearbyPlayers::default();
         n.set_self_faction(2);
-        n.spawn(2, "Ranger", None, Some(2100), 1, 0);
+        n.spawn(2, "Ranger", None, Some(2100), 1, false, 0);
         n.attacked_me(2, 500, 1, 50);
-        n.spawn(2, "Ranger", None, None, 1, 60);
+        n.spawn(2, "Ranger", None, None, 1, false, 60);
         let ranger = &n.enemies(100)[0];
         assert_eq!((ranger.attacked_me_ms, ranger.item_level, ranger.taken), (Some(50), Some(2100), 500));
         n.despawn(2);
         assert!(n.enemies(100).is_empty());
-        n.spawn(3, "HuK", None, None, 1, 0);
+        n.spawn(3, "HuK", None, None, 1, false, 0);
         assert!(n.enemies(FORGET_AFTER_MS).is_empty());
     }
 
@@ -560,8 +578,8 @@ mod tests {
         n.set_self_faction(2);
         n.set_me(100);
         n.set_abyss(true);
-        n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, 0);
-        n.spawn(2, "HuK", Some(JobClass::Gladiator), None, 1, 0);
+        n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, false, 0);
+        n.spawn(2, "HuK", Some(JobClass::Gladiator), None, 1, false, 0);
         n.hit_on_me(1, 900, 11, true, 1_000); // long before: not in the recap
         n.hit_on_player(1, 100, 4_000, 31, true, 1_000);
         n.hit_on_player(7, 100, 4_000, 31, true, 1_000); // no player in sight
@@ -570,7 +588,7 @@ mod tests {
         n.hit_on_me(1, 1_000, 12, true, 21_000);
         n.hit_on_me(1, 1_500, 13, true, 22_000); // 5 000 HP gone: dead
         n.hit_on_me(2, 500, 22, true, 22_100); // on its way already
-        n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, 22_200); // a second copy keeps the damage
+        n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, false, 22_200); // a second copy keeps the damage
         let ranger = n.enemies(22_200).into_iter().find(|p| p.id == 1).unwrap();
         assert_eq!((ranger.dealt, ranger.taken), (4_000, 3_400));
         assert!(n.last_death(23_000).is_none(), "not confirmed yet");
@@ -592,7 +610,7 @@ mod tests {
     fn hits_a_shield_took_are_no_death() {
         let mut n = NearbyPlayers::default();
         n.set_self_faction(2);
-        n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, 0);
+        n.spawn(1, "Ranger", Some(JobClass::Ranger), None, 1, false, 0);
         n.my_hp(1_000, 0);
         n.hit_on_me(1, 3_000, 11, true, 100);
         n.my_hp(900, 400); // the HP after: a shield took most of it
@@ -606,11 +624,11 @@ mod tests {
         let mut n = NearbyPlayers::default();
         n.set_self_faction(2);
         n.set_me(100);
-        n.spawn(1, "Ranger", Some(JobClass::Ranger), Some(2300), 1, 0);
-        n.spawn(2, "HuK", None, None, 1, 0);
-        n.spawn(3, "Friend", None, None, 2, 0);
-        n.spawn(4, "Stranger", None, None, 1, 0);
-        n.spawn(200, "Mate", None, None, 2, 0);
+        n.spawn(1, "Ranger", Some(JobClass::Ranger), Some(2300), 1, false, 0);
+        n.spawn(2, "HuK", None, None, 1, false, 0);
+        n.spawn(3, "Friend", None, None, 2, false, 0);
+        n.spawn(4, "Stranger", None, None, 1, false, 0);
+        n.spawn(200, "Mate", None, None, 2, false, 0);
 
         // Ranger: HP 0 after your last hit, a party member's before it.
         n.player_hp(1, 5_000, 1_000);
@@ -643,8 +661,8 @@ mod tests {
         let mut n = NearbyPlayers::default();
         n.set_self_faction(2);
         n.set_me(100);
-        n.spawn(1, "Mirajane23", Some(JobClass::Cleric), None, 2, 0);
-        n.spawn(2, "Okk", None, None, 2, 0);
+        n.spawn(1, "Mirajane23", Some(JobClass::Cleric), None, 2, false, 0);
+        n.spawn(2, "Okk", None, None, 2, false, 0);
         n.my_hp(5_000, 0);
         n.hit_on_me(1, 7_640, 41, true, 100);
         n.hit_on_me(77, 9_000, 41, true, 100); // a player not in sight: can't tell
@@ -661,8 +679,8 @@ mod tests {
         // No self record since the meter started (it comes with a zone load).
         let mut n = NearbyPlayers::default();
         n.set_me(100);
-        n.spawn(1, "Ranger", None, None, 1, 0);
-        n.spawn(3, "Mate", None, None, 2, 0);
+        n.spawn(1, "Ranger", None, None, 1, false, 0);
+        n.spawn(3, "Mate", None, None, 2, false, 0);
         n.player_hp(1, 1_000, 0);
         n.hit_on_player(1, 100, 500, 31, true, 100);
         assert!(n.enemies(200).is_empty());
@@ -675,5 +693,25 @@ mod tests {
         assert_eq!(n.kills(2_000).len(), 1, "and the kill counts");
         n.set_self_faction(1); // the self record has the last word
         assert_eq!(n.self_faction(), Some(1));
+    }
+
+    #[test]
+    fn in_a_pairing_of_one_race_the_side_tells_friend_from_foe() {
+        // Asmodians against Asmodians (2026-10-28): your self record says 2,
+        // the race; the spawns say the side.
+        let mut n = NearbyPlayers::default();
+        n.set_self_faction(2);
+        n.spawn(1, "Arvein", None, None, 1, true, 0);
+        n.spawn(2, "Lilin", None, None, 2, true, 0);
+        let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Arvein"]);
+        // Your server on side 1: a party member in sight says so.
+        n.spawn(3, "Mate", None, None, 1, true, 0);
+        n.guess_faction_from_party(|p| p.name == "Mate");
+        let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Lilin"]);
+        // A zone load: learned again.
+        n.set_self_faction(2);
+        assert!(n.is_enemy(1));
     }
 }
