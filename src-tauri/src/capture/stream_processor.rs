@@ -299,6 +299,13 @@ impl StreamProcessor {
         }
         // HP, MP, stamina, flight time (the resource bars).
         if let Some(update) = crate::capture::resources::parse(packet) {
+            // Its HP is a player's HP too (deaths, the death recap). The HP
+            // scan takes only a record of HP alone; Bradcrit's HP 0, killed
+            // in the Abyss (13:37:53 on 2026-10-28), came with his flight
+            // time and was missed.
+            if let Some(&(_, hp)) = update.wide.iter().find(|&&(stat, _)| stat == crate::capture::resources::HP) {
+                self.data_storage.note_player_hp(update.entity, i32::try_from(hp).unwrap_or(i32::MAX));
+            }
             self.data_storage.note_resources(update);
         }
         // Skills used, your cooldowns, who is in combat (cooldown and cast bars).
@@ -1062,6 +1069,7 @@ impl StreamProcessor {
                 profile.item_level,
                 profile.faction,
                 profile.paired,
+                profile.server,
                 profile.rank,
             );
         }
@@ -3206,6 +3214,8 @@ struct SpawnProfile {
     /// The race, or in an Abyss pairing of one race the side (`paired`).
     faction: u8,
     paired: bool,
+    /// The server of their legion (`legion_server`).
+    server: Option<u16>,
     item_level: Option<u32>,
     /// The Abyss rank (`pvp_rank`).
     rank: Option<u8>,
@@ -3249,8 +3259,31 @@ fn spawn_profile(data: &[u8], after: usize) -> Option<SpawnProfile> {
         class: JobClass::from_roster_class(class),
         faction: side.unwrap_or(race),
         paired: side.is_some(),
+        server: legion_server(data, after),
         item_level,
         rank: pvp_rank(data),
+    })
+}
+
+/// The server of a player's legion, from their spawn's legion entry within
+/// 200 bytes of `after` (the end of the name field):
+/// `<server u16> <legion u32> 00 00 <server u16> <len u8> <legion name>` —
+/// Raly's `07 09 2b 01 00 00 00 00 07 09 05` "GREED", of server 2311. None
+/// out of a legion. Of the 49 such entries in the spawns of 2026-10-28 the
+/// 45 of server 2313 had side 2, the 4 of 2311 side 1 (`spawn_profile`).
+fn legion_server(data: &[u8], after: usize) -> Option<u16> {
+    let window = data.get(after..data.len().min(after + 200 + 11))?;
+    let u16_at = |at: usize| u16::from_le_bytes([window[at], window[at + 1]]);
+    (0..window.len().saturating_sub(11)).find_map(|i| {
+        let server = u16_at(i);
+        let len = window[i + 10] as usize;
+        let name = window.get(i + 11..i + 11 + len)?;
+        ((1000..3000).contains(&server)
+            && window[i + 6..i + 8] == [0, 0]
+            && u16_at(i + 8) == server
+            && (1..=24).contains(&len)
+            && std::str::from_utf8(name).is_ok_and(|n| n.chars().all(|c| c.is_alphanumeric() || c == ' ')))
+        .then_some(server)
     })
 }
 
@@ -3806,7 +3839,7 @@ mod tests {
         let head = hex_bytes("18 00 00 00 02 02 00 92 C0 7B 2C 48 48 5B 29 48 00 62 BA 46");
         let tail = hex_bytes("27 02 48 F4 FF FF 2D 00 00 00 00 00 00 00 CE 08 00 00 DE 02 0C 64 64 64");
         let record = [head.clone(), vec![0x11; 900], tail.clone()].concat();
-        let raas = SpawnProfile { class: Some(JobClass::Elementalist), faction: 2, paired: false, item_level: Some(2254), rank: None };
+        let raas = SpawnProfile { class: Some(JobClass::Elementalist), faction: 2, paired: false, server: None, item_level: Some(2254), rank: None };
         assert_eq!(spawn_profile(&record, 0), Some(raas));
         // Her spawn at 01:29 had a u32 between the item level and the marker.
         let later = hex_bytes("2D 00 00 00 00 00 00 00 C9 08 00 00 4F 00 00 00 DE 02 0C");
@@ -3829,13 +3862,26 @@ mod tests {
     }
 
     #[test]
+    fn a_spawn_names_its_players_legion_server() {
+        // Raly (2026-10-28), 115 bytes on from his name: legion GREED, server 2311.
+        let entry = hex_bytes("07 09 2B 01 00 00 00 00 07 09 05 47 52 45 45 44 02 00");
+        let record = [vec![0x11; 115], entry.clone()].concat();
+        assert_eq!(legion_server(&record, 0), Some(2311));
+        // Out of a legion: the server once, no entry.
+        let none = hex_bytes("09 09 0E 11 10 5D C4 C9 01 FF FF FF FF FF FF FF FF");
+        assert_eq!(legion_server(&[vec![0x11; 95], none].concat(), 0), None);
+        // Past the 200 bytes: not taken.
+        assert_eq!(legion_server(&[vec![0x11; 260], entry].concat(), 0), None);
+    }
+
+    #[test]
     fn players_in_sight_spawn_attack_you_and_leave() {
         let storage = Arc::new(DataStorage::new());
         let sp = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
         storage.note_self_faction(2);
         storage.set_local_identity_from_game(15567, Some("Bradcrit".into()));
-        storage.note_nearby_spawn(14199, "MILFSHAKE", None, None, 1, false, None);
-        storage.note_nearby_spawn(11788, "Kikay", None, None, 2, false, None);
+        storage.note_nearby_spawn(14199, "MILFSHAKE", None, None, 1, false, None, None);
+        storage.note_nearby_spawn(11788, "Kikay", None, None, 2, false, None, None);
         let framed = |body: &[u8]| [vec![(body.len() + 1) as u8], body.to_vec()].concat();
         // MILFSHAKE's skill on Bradcrit (17:05:28.926): seen, but no attack —
         // a skill aimed at you is as often a buff or a heal.
@@ -3857,8 +3903,8 @@ mod tests {
     fn no_enemies_in_a_dungeon_and_never_your_party() {
         let storage = Arc::new(DataStorage::new());
         storage.note_self_faction(2);
-        storage.note_nearby_spawn(3001, "Chantress", Some(JobClass::Chanter), None, 1, false, None);
-        storage.note_nearby_spawn(3002, "Stranger", None, None, 1, false, None);
+        storage.note_nearby_spawn(3001, "Chantress", Some(JobClass::Chanter), None, 1, false, None, None);
+        storage.note_nearby_spawn(3002, "Stranger", None, None, 1, false, None, None);
         storage.note_party_scope(3001);
         let names: Vec<_> = storage.nearby_enemies().into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Stranger"], "a party member is no enemy");

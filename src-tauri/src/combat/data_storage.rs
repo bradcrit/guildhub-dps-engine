@@ -1030,10 +1030,11 @@ impl DataStorage {
     }
 
     /// A player spawned in sight, with what their spawn says of them.
-    pub fn note_nearby_spawn(&self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8, paired: bool, rank: Option<u8>) {
+    pub fn note_nearby_spawn(&self, id: i32, name: &str, class: Option<JobClass>, item_level: Option<u32>, faction: u8, paired: bool, server: Option<u16>, rank: Option<u8>) {
         let mut nearby = self.nearby.lock();
         nearby.spawn(id, name, class, item_level, faction, paired, now_ms());
         nearby.set_rank(id, rank);
+        nearby.set_server(id, server);
     }
 
     /// An entity moved or used a skill; only players in sight are kept.
@@ -1045,13 +1046,15 @@ impl DataStorage {
     /// `target` is you and `actor` a player in sight; on a player in sight,
     /// their HP going down (and your damage on them, when `actor` is you).
     /// Only damage counts — a skill aimed at you is a Chanter's buff or a
-    /// Cleric's heal just as often.
+    /// Cleric's heal just as often. A summon's hit is its owner's: KENNAI's
+    /// four spirits dealt a third of what killed Bradcrit (2026-10-28), and
+    /// as hits of no player in sight they were left out, so no death came.
     pub fn note_nearby_damage(&self, actor: i32, target: i32, damage: i32, skill: i32) {
         let Some(me) = self.local_player_id() else { return };
         if damage <= 0 || actor == target {
             return;
         }
-        let (actor_is_player, party) = {
+        let (actor, actor_is_player, party) = {
             let inner = self.inner.read();
             // No PvP in a dungeon: everything between players there is your party's.
             if inner.current_dungeon_id > 0 {
@@ -1060,8 +1063,12 @@ impl DataStorage {
             let resolved = summon_resolver::resolve(actor, &inner.summon_storage);
             let party: (HashSet<String>, HashSet<i32>) =
                 (inner.party_members.keys().cloned().collect(), inner.loot_identity.party_scope.iter().copied().collect());
-            (inner.known_player_ids.contains(&resolved), party)
+            let actor_is_player = inner.known_player_ids.contains(&resolved);
+            (if actor_is_player { resolved } else { actor }, actor_is_player, party)
         };
+        if actor == target {
+            return;
+        }
         let mut nearby = self.nearby.lock();
         nearby.set_me(me as i32);
         nearby.guess_faction_from_party(|p| party.0.contains(&p.name) || party.1.contains(&p.id));
@@ -1832,6 +1839,9 @@ impl DataStorage {
     pub fn note_self_server(&self, server_id: u16) {
         if server_id == 0 || (1000..3000).contains(&server_id) {
             self.inner.write().self_server = server_id;
+        }
+        if server_id != 0 {
+            self.nearby.lock().set_self_server(server_id);
         }
     }
 

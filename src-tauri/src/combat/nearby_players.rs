@@ -62,6 +62,8 @@ pub struct NearbyPlayer {
     /// `faction` is a side of an Abyss pairing of one race, not the race:
     /// yours then is a party member's (`guess_faction_from_party`).
     pub paired: bool,
+    /// Their server, from their legion's entry in the spawn; None out of one.
+    pub server: Option<u16>,
     /// The Abyss rank: 19 Trainee, 18 Ninth-Class … 10 First-Class Soldier.
     pub rank: Option<u8>,
     pub last_seen_ms: i64,
@@ -193,8 +195,10 @@ pub struct NearbyPlayers {
     foes: HashMap<i32, Foe>,
     self_faction: Option<u8>,
     /// Your side in an Abyss pairing of one race, from a party member in
-    /// sight; until known, `self_faction` stands for it.
+    /// sight; until known, a player of your server's (`mine`).
     self_side: Option<u8>,
+    /// Your server, from your self record.
+    self_server: Option<u16>,
     /// Your entity, from the hits (`DataStorage::note_nearby_damage`).
     me: Option<i32>,
     abyss: bool,
@@ -238,9 +242,22 @@ impl NearbyPlayers {
         self.self_faction
     }
 
-    /// Your faction or side, as the players in sight are compared with it.
+    /// Your server, from your self record.
+    pub fn set_self_server(&mut self, server: u16) {
+        self.self_server = Some(server);
+    }
+
+    /// Your faction or side, as the players in sight are compared with it:
+    /// in a pairing of one race a party member's side, else the side of a
+    /// player in sight whose legion is of your server (solo, 2026-10-28:
+    /// 45 of them on Bradcrit's server 2313 all on side 2, the 4 of 2311 on
+    /// side 1), else your self record's faction.
     fn mine(&self) -> Option<u8> {
-        self.self_side.or(self.self_faction)
+        let server_side = || {
+            let server = self.self_server?;
+            self.players.values().find(|p| p.paired && p.server == Some(server)).map(|p| p.faction)
+        };
+        self.self_side.or_else(server_side).or(self.self_faction)
     }
 
     /// A player in sight of the other faction — false while your own isn't known.
@@ -295,14 +312,35 @@ impl NearbyPlayers {
         let attacked_me_ms = same.and_then(|p| p.attacked_me_ms);
         let item_level = item_level.or_else(|| same.and_then(|p| p.item_level));
         let rank = same.and_then(|p| p.rank);
+        let server = same.and_then(|p| p.server);
         let (dealt, taken) = same.map_or((0, 0), |p| (p.dealt, p.taken));
         if same.is_none() {
             self.foes.remove(&id);
         }
         self.players.insert(
             id,
-            NearbyPlayer { id, name: name.to_string(), class, item_level, faction, paired, rank, last_seen_ms: now_ms, attacked_me_ms, dealt, taken },
+            NearbyPlayer {
+                id,
+                name: name.to_string(),
+                class,
+                item_level,
+                faction,
+                paired,
+                server,
+                rank,
+                last_seen_ms: now_ms,
+                attacked_me_ms,
+                dealt,
+                taken,
+            },
         );
+    }
+
+    /// A player's server, as their spawn told it (kept when it didn't).
+    pub fn set_server(&mut self, id: i32, server: Option<u16>) {
+        if let (Some(p), Some(server)) = (self.players.get_mut(&id), server) {
+            p.server = Some(server);
+        }
     }
 
     /// A player's Abyss rank, as their spawn told it (kept when it didn't).
@@ -713,5 +751,28 @@ mod tests {
         // A zone load: learned again.
         n.set_self_faction(2);
         assert!(n.is_enemy(1));
+    }
+
+    #[test]
+    fn solo_in_a_pairing_of_one_race_a_legion_of_your_server_tells_your_side() {
+        // On server 2311, whose side is 1, solo: the self record's 2 is the race.
+        let mut n = NearbyPlayers::default();
+        n.set_self_faction(2);
+        n.set_self_server(2311);
+        n.spawn(1, "Raly", None, None, 1, true, 0);
+        n.spawn(2, "Kronk", None, None, 2, true, 0);
+        // No one of your server in sight: the self record's 2, wrong here.
+        n.set_server(2, Some(2313));
+        let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Raly"]);
+        // Raly's legion is of your server: your side is his.
+        n.set_server(1, Some(2311));
+        let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Kronk"]);
+        // A party member in sight says it before them.
+        n.spawn(3, "Mate", None, None, 2, true, 0);
+        n.guess_faction_from_party(|p| p.name == "Mate");
+        let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Raly"]);
     }
 }
