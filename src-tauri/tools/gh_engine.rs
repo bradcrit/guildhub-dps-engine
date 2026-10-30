@@ -126,7 +126,8 @@
 //! (`{"skill","name","startedAt","castMs"}`, `castMs` learned from its earlier
 //! casts, null while not known — the cast lands about then) or null,
 //! `deadline` its time limit (unix ms) or null. Every time is unix ms.
-//! `icon` is a file name on NC's icon CDN (null: none known).
+//! `icon` is a file name on NC's icon CDN (null: none known) — an abnormal
+//! without one of its own gets its skill's, as it gets its skill's name.
 //! `resources` (`{"hp","mp","stamina","flight"}`, every 100 ms at most, on a
 //! change, and once on connecting) for the resource bars
 //! (`capture::resources`): each `{"current","max"}` of your character, null
@@ -447,7 +448,7 @@ impl Engine {
                 serde_json::json!({
                     "abnormal": abnormal, "skill": skill,
                     "name": self.bar_data.abnormal_names.get(&abnormal).cloned().or_else(|| skill.and_then(name)),
-                    "icon": self.bar_data.abnormal_icons.get(&abnormal),
+                    "icon": self.bar_data.abnormal_icons.get(&abnormal).map(String::as_str).or_else(|| skill.and_then(|s| self.bar_data.skill_icon(s))),
                     "endsAt": end, "totalMs": total, "stacks": stacks, "mine": mine, "hostile": hostile,
                 })
             })
