@@ -67,10 +67,36 @@ pub fn is_field_boss(code: i32) -> bool {
     FIELD_BOSSES.binary_search_by_key(&code, |&(npc, _)| npc).is_ok()
 }
 
-/// Whether the meter shares an NPC's kill and HP: a field boss, or one of
-/// the Abyss's Dimensional Cores (`abyss_cores`).
+/// The Abyss's scheduled bosses (Lower Reshanta: Watcher Kaira every 3 h,
+/// the three Guardian Lord Nahmas Fri/Sun, the Executors Mon/Thu/Sat), the
+/// ones the Abyss map lists after Argo without a time. Their kills and HP go
+/// to GuildHub only, not to a2tools.app: the world-map ids are read off the
+/// map's order (2002 Kaira … 2008 Executor Kaira, 2026-10-30), not yet seen
+/// next to a kill. (NPC code, world-map boss id), sorted by NPC code.
+pub const ABYSS_SCHEDULED_BOSSES: &[(i32, u32)] = &[
+    (2600084, 2003), // Guardian Lord Nahma
+    (2600089, 2002), // Watcher Kaira
+    (2600093, 2004), // Guardian Lord Nahma
+    (2600094, 2005), // Guardian Lord Nahma
+    (2600096, 2006), // Executor Tamasa
+    (2600097, 2007), // Executor Argo
+    (2600098, 2008), // Executor Kaira
+];
+
+/// Whether an NPC code is one of the Abyss's scheduled bosses.
+pub fn is_abyss_scheduled(code: i32) -> bool {
+    ABYSS_SCHEDULED_BOSSES.binary_search_by_key(&code, |&(npc, _)| npc).is_ok()
+}
+
+/// The NPC code of a world-map boss id, field boss or scheduled Abyss boss.
+pub fn npc_of_map_id(id: u32) -> Option<i32> {
+    FIELD_BOSSES.iter().chain(ABYSS_SCHEDULED_BOSSES).find(|&&(_, map)| map == id).map(|&(npc, _)| npc)
+}
+
+/// Whether the meter shares an NPC's kill and HP: a field boss, a scheduled
+/// Abyss boss, or one of the Abyss's Dimensional Cores (`abyss_cores`).
 pub fn is_reported(code: i32) -> bool {
-    is_field_boss(code) || super::abyss_cores::is_core(code)
+    is_field_boss(code) || is_abyss_scheduled(code) || super::abyss_cores::is_core(code)
 }
 
 #[cfg(test)]
@@ -82,5 +108,14 @@ mod tests {
         assert!(FIELD_BOSSES.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(is_field_boss(2100079)); // Bodyguard Teegant
         assert!(!is_field_boss(2100080));
+    }
+
+    #[test]
+    fn the_abyss_scheduled_bosses_are_reported_but_no_field_bosses() {
+        assert!(ABYSS_SCHEDULED_BOSSES.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(is_reported(2600089) && !is_field_boss(2600089)); // Watcher Kaira
+        assert_eq!(world_map_id(2600097), None); // Executor Argo: not for a2tools.app
+        assert_eq!(npc_of_map_id(2001), Some(2600068)); // Argo, the Spirit King
+        assert_eq!(npc_of_map_id(2008), Some(2600098)); // Executor Kaira
     }
 }

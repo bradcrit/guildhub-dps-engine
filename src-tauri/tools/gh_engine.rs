@@ -156,7 +156,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use a2tools_dps_meter_lib::capture::boss_map::BossMap;
 use a2tools_dps_meter_lib::capture::captured_payload::CapturedPayload;
-use a2tools_dps_meter_lib::capture::field_bosses::FIELD_BOSSES;
+use a2tools_dps_meter_lib::capture::field_bosses::npc_of_map_id;
 use a2tools_dps_meter_lib::capture::game_lists::CURRENCIES;
 use a2tools_dps_meter_lib::capture::loot::{Loot, LootReader};
 use a2tools_dps_meter_lib::capture::combat_port_detector::CombatPortDetector;
@@ -830,7 +830,7 @@ fn boss_map_event(server: u16, map: &BossMap) -> Option<serde_json::Value> {
         .bosses
         .iter()
         .filter_map(|b| {
-            let &(npc, _) = FIELD_BOSSES.iter().find(|&&(_, id)| id == b.id)?;
+            let npc = npc_of_map_id(b.id)?;
             Some(serde_json::json!({ "npc": npc, "up": b.up, "at": b.time_ms }))
         })
         .collect();
