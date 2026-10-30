@@ -1319,7 +1319,10 @@ impl DataStorage {
 
     /// `caster` is against you: a monster, or a player of the other faction
     /// in sight — a summon counts as its summoner. The game data has no
-    /// buff/debuff flag, so this is how the HP bar tells a debuff.
+    /// buff/debuff flag, so this is how the HP bar tells a debuff. As in
+    /// `nearby_enemies`, no player is a foe in a dungeon, and one of your
+    /// party never is: dungeons mix the factions, and an Elyos Chanter's
+    /// mantras on an Asmodian showed on the debuff bar (2026-10-30).
     pub fn is_hostile_caster(&self, caster: i32) -> bool {
         if caster <= 0 || self.local_player_id() == Some(i64::from(caster)) {
             return false;
@@ -1328,6 +1331,11 @@ impl DataStorage {
             let inner = self.inner.read();
             let resolved = summon_resolver::resolve(caster, &inner.summon_storage);
             if inner.known_player_ids.contains(&resolved) {
+                let in_party = inner.loot_identity.party_scope.contains(&resolved)
+                    || inner.nickname_storage.get(&resolved).is_some_and(|name| inner.party_members.contains_key(name));
+                if inner.current_dungeon_id > 0 || in_party {
+                    return false;
+                }
                 resolved
             } else {
                 return inner.mob_storage.contains_key(&resolved)
