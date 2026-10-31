@@ -357,29 +357,22 @@ struct BarData {
     abnormal_names: HashMap<u32, String>,
     /// Every abnormal of the game's in `abnormals.json`: whether it files it as a debuff.
     debuffs: HashMap<u32, bool>,
-    /// Skills (first four digits) whose abnormals belong to another skill:
-    /// each one's abnormals have the other's icon and the other's its own.
-    /// The name tables name an abnormal after the skill of its digits, so
-    /// these two get each other's name — Lunge Stance's buff read Zikel's
-    /// Blessing and Zikel's Blessing's Lunge Stance (2026-10-31).
+    /// Skills (first four digits) whose abnormals have another skill's icon,
+    /// and that skill's abnormals theirs: the game data swapped the two. The
+    /// skill applies its own abnormal (Lunge Stance 1140 → 114000x01), but
+    /// it showed Zikel's Blessing's crown and Zikel's Blessing Lunge Stance's
+    /// fire (2026-10-31) — they get their skill's icon.
     swapped: HashMap<u32, u32>,
 }
 
 impl BarData {
-    /// The skill whose name an abnormal on you goes by instead of its own:
-    /// a `swapped` one's, or the skill that applied one of yours when the
-    /// two have the same icon but not the same digits.
-    fn named_by(&self, abnormal: u32, skill: Option<u32>, mine: bool) -> Option<u32> {
+    /// The icon an abnormal shows: its skill's for a `swapped` skill, else its own.
+    fn abnormal_icon(&self, abnormal: u32) -> Option<&str> {
         let digits = abnormal.to_string();
-        if digits.len() == 9 {
-            if let Some(&other) = digits[..4].parse().ok().and_then(|own: u32| self.swapped.get(&own)) {
-                return Some(other * 10_000);
-            }
+        if digits.len() == 9 && digits[..4].parse().is_ok_and(|own: u32| self.swapped.contains_key(&own)) {
+            return self.skill_icons.get(&digits[..4]).map(String::as_str);
         }
-        let skill = skill.filter(|_| mine)?;
-        let icon = self.abnormal_icons.get(&abnormal)?;
-        let own = skill.to_string();
-        (own.len() == 8 && !digits.starts_with(&own[..4]) && self.skill_icon(skill) == Some(icon.as_str())).then_some(skill)
+        self.abnormal_icons.get(&abnormal).map(String::as_str)
     }
 
     /// An abnormal with the game's stand-in icon (`PLACEHOLDER_ICONS`).
@@ -509,10 +502,8 @@ impl Engine {
                 let total = end.map(|e| (e - start).max(0));
                 serde_json::json!({
                     "abnormal": abnormal, "skill": skill,
-                    "name": self.bar_data.named_by(abnormal, skill, mine).and_then(name)
-                        .or_else(|| self.bar_data.abnormal_names.get(&abnormal).cloned())
-                        .or_else(|| skill.and_then(name)),
-                    "icon": self.bar_data.abnormal_icons.get(&abnormal).map(String::as_str).or_else(|| skill.and_then(|s| self.bar_data.skill_icon(s))),
+                    "name": self.bar_data.abnormal_names.get(&abnormal).cloned().or_else(|| skill.and_then(name)),
+                    "icon": self.bar_data.abnormal_icon(abnormal).or_else(|| skill.and_then(|s| self.bar_data.skill_icon(s))),
                     "endsAt": end, "totalMs": total, "stacks": stacks, "mine": mine, "hostile": hostile,
                 })
             })
@@ -1631,8 +1622,8 @@ mod tests {
     }
 
     /// Lunge Stance's abnormals have Zikel's Blessing's icon and the other
-    /// way round; a skill whose icon is shared or whose abnormals have two
-    /// icons is no swap.
+    /// way round, so they show their skill's; a skill whose icon is shared
+    /// or whose abnormals have two icons is no swap.
     #[test]
     fn two_skills_with_each_others_abnormal_icons_are_swapped() {
         let skill_icons: HashMap<String, String> = [
@@ -1654,11 +1645,10 @@ mod tests {
         let swapped = swapped_skills(&skill_icons, &abnormal_icons);
         assert_eq!(swapped, HashMap::from([(1125, 1140), (1140, 1125)]));
         let data = BarData { skill_icons, abnormal_icons, swapped, ..Default::default() };
-        assert_eq!(data.named_by(112500101, None, false), Some(11400000));
-        assert_eq!(data.named_by(114000001, Some(11250010), true), Some(11250000));
-        assert_eq!(data.named_by(177600001, Some(17770010), true), Some(17770010));
-        assert_eq!(data.named_by(177600001, Some(17770010), false), None);
-        assert_eq!(data.named_by(177700001, Some(17770010), true), None);
+        assert_eq!(data.abnormal_icon(114000001), Some("ICON_GL_SKILL_024"));
+        assert_eq!(data.abnormal_icon(112500101), Some("ICON_GL_SKILL_040"));
+        assert_eq!(data.abnormal_icon(177600001), Some("ICON_CL_SKILL_Passive_006"));
+        assert_eq!(data.abnormal_icon(10012401), Some("ICON_GL_SKILL_040"));
     }
 
     #[test]
