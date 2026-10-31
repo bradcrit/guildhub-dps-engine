@@ -355,7 +355,7 @@ struct BarData {
     skill_icons: HashMap<String, String>,
     abnormal_icons: HashMap<u32, String>,
     abnormal_names: HashMap<u32, String>,
-    /// Every abnormal `abnormals.json` lists: whether the game files it as a debuff.
+    /// Every abnormal of the game's in `abnormals.json`: whether it files it as a debuff.
     debuffs: HashMap<u32, bool>,
     /// Skills (first four digits) whose abnormals belong to another skill:
     /// each one's abnormals have the other's icon and the other's its own.
@@ -427,7 +427,8 @@ fn load_bar_data(dir: &std::path::Path, language: &str, abnormals: Option<&str>)
         .unwrap_or_default();
     let abnormal_icons: HashMap<u32, String> =
         table.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.get("icon")?.as_str()?.to_string()))).collect();
-    let debuffs = table.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v["debuff"].as_bool().unwrap_or(false)))).collect();
+    // Only the game's own entries say; the Companion adds icons for some it lacks.
+    let debuffs = table.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.get("debuff")?.as_bool()?))).collect();
     let skill_icons: HashMap<String, String> = read(dir.join("skill_icons.json")).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     let swapped = swapped_skills(&skill_icons, &abnormal_icons);
     BarData { skill_icons, abnormal_icons, abnormal_names, debuffs, swapped }
