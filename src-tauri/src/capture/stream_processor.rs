@@ -1071,6 +1071,13 @@ impl StreamProcessor {
         self.data_storage.note_player_spawn(actor_id);
         self.data_storage
             .append_nickname_authoritative(actor_id, &sanitized);
+        // A party member's HP and MP for the party frames, before their first `1b 92`.
+        if self.data_storage.in_party_roster(&sanitized)
+            && let Some((hp, max_hp, mp, max_mp)) = spawn_vitals(data, field.end)
+        {
+            self.data_storage.note_party_hp(actor_id, hp, max_hp);
+            self.data_storage.note_party_mp(actor_id, mp, max_mp);
+        }
         if let Some(profile) = spawn_profile(data, field.end) {
             self.data_storage.note_nearby_spawn(
                 actor_id,
@@ -3229,6 +3236,38 @@ struct SpawnProfile {
     item_level: Option<u32>,
     /// The Abyss rank (`pvp_rank`).
     rank: Option<u8>,
+}
+
+/// How far past the name field a spawn's HP block is looked for: after the
+/// name, a few flags and the position (12 to 40 bytes in 47 spawns of
+/// 2026-10-31).
+const SPAWN_VITALS_WITHIN: usize = 80;
+
+/// The player's HP and MP in their spawn, past `after` (the end of its name
+/// field): `01 <hp varint> <max hp varint> <mp u32> <max mp u32>` and 8 zero
+/// bytes — the layout of `1b 92`'s after its entity. A party member at full
+/// HP gets no `1b 92` until it changes; this names it as they come into
+/// view (2026-10-31: Tostado 29,868 / 29,868, MP 3,634 / 3,634, the same as
+/// his next `1b 92`). The first run that reads so.
+fn spawn_vitals(data: &[u8], after: usize) -> Option<(i32, i32, u32, u32)> {
+    let u32_at = |i: usize| data.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    (after..after + SPAWN_VITALS_WITHIN).find_map(|i| {
+        if *data.get(i)? != 0x01 {
+            return None;
+        }
+        let hp = read_varint(data, i + 1);
+        if hp.length <= 0 {
+            return None;
+        }
+        let max = read_varint(data, i + 1 + hp.length as usize);
+        if max.length <= 0 || !(1_000..=50_000_000).contains(&max.value) || !(0..=max.value).contains(&hp.value) {
+            return None;
+        }
+        let at = i + 1 + hp.length as usize + max.length as usize;
+        let (mp, max_mp) = (u32_at(at)?, u32_at(at + 4)?);
+        let zeros = data.get(at + 8..at + 16)?.iter().all(|&b| b == 0);
+        (zeros && max_mp > 0 && max_mp <= 1_000_000 && mp <= max_mp).then_some((hp.value, max.value, mp, max_mp))
+    })
 }
 
 /// The player's class, faction and item level in their spawn, from `after`,

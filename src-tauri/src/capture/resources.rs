@@ -110,6 +110,17 @@ impl Resources {
         self.wide.extend(update.wide.iter().copied());
     }
 
+    /// Takes over what `older` knew and this doesn't — your values under the
+    /// entity id you had before a zone load (the maxima come only at login).
+    pub fn fill_from(&mut self, older: &Resources) {
+        for (&stat, &value) in &older.small {
+            self.small.entry(stat).or_insert(value);
+        }
+        for (&stat, &value) in &older.wide {
+            self.wide.entry(stat).or_insert(value);
+        }
+    }
+
     /// A u32 stat (MP, stamina, flight time) with its maximum, None until
     /// the maximum was heard of. The value comes only as it changes: full
     /// until then, and never above the maximum.

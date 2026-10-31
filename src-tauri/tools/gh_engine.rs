@@ -584,7 +584,11 @@ impl Engine {
             .into_iter()
             .map(|(name, member)| {
                 let id = self.storage.party_member_id(&name);
-                let resources = id.map(|id| self.storage.entity_resources(id)).unwrap_or_default();
+                let resources = match id {
+                    Some(id) if Some(id) == me => self.storage.self_resources(),
+                    Some(id) => self.storage.entity_resources(id),
+                    None => Default::default(),
+                };
                 let mut debuffs: Vec<(u32, Option<u32>, Option<i64>, i64, u32)> = Vec::new();
                 for (instance, end) in id.map(|id| self.storage.abnormals_on(id)).unwrap_or_default() {
                     if end.is_some_and(|e| e <= now) || self.bar_data.inner_state(instance.abnormal) {

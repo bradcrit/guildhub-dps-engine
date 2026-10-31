@@ -35,7 +35,12 @@ fn print_party(storage: &DataStorage, at_ms: i64) {
     println!("{time}");
     for (name, member) in roster {
         let id = storage.party_member_id(&name);
-        let resources = id.map(|id| storage.entity_resources(id)).unwrap_or_default();
+        let me = storage.local_player_id().and_then(|me| i32::try_from(me).ok());
+        let resources = match id {
+            Some(id) if Some(id) == me => storage.self_resources(),
+            Some(id) => storage.entity_resources(id),
+            None => Default::default(),
+        };
         let (hp, mp) = (resources.wide(HP), resources.small(MP));
         for g in [hp, mp].into_iter().flatten() {
             assert!(g.current <= g.max, "{name}: {} of {}", g.current, g.max);

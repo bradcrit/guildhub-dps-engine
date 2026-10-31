@@ -646,6 +646,9 @@ pub struct DataStorage {
     /// Each entity's resources as `00 8d` sent them (`capture::resources`),
     /// yours read by the resource bars. Its own lock, as `abnormals`.
     resources: Mutex<HashMap<i32, Resources>>,
+    /// The entity id your resources were last read under (`self_resources`):
+    /// a zone load gives you a new one, and your values move along with you.
+    resources_self: Mutex<Option<i32>>,
 }
 
 /// The timeline and when it was last pruned.
@@ -1036,6 +1039,7 @@ impl DataStorage {
             stagger: Mutex::new(StaggerLog::default()),
             skill_timers: Mutex::new(SkillTimers::default()),
             resources: Mutex::new(HashMap::new()),
+            resources_self: Mutex::new(None),
         }
     }
 
@@ -1389,17 +1393,27 @@ impl DataStorage {
         // Read before the resources lock, never under it.
         let full = self.resources.lock().len() >= RESOURCE_ENTITIES_KEPT;
         let party: HashSet<i32> = if full { self.inner.read().party_hp_at.keys().copied().collect() } else { HashSet::new() };
+        // Your id before a zone load too, until `self_resources` took its values over.
+        let read_as_me = *self.resources_self.lock();
         let mut all = self.resources.lock();
         if all.len() >= RESOURCE_ENTITIES_KEPT && !all.contains_key(&update.entity) {
-            all.retain(|&entity, _| Some(entity) == me || party.contains(&entity));
+            all.retain(|&entity, _| Some(entity) == me || Some(entity) == read_as_me || party.contains(&entity));
         }
         all.entry(update.entity).or_default().note(&update);
     }
 
-    /// Your resources, empty while you aren't known.
+    /// Your resources, empty while you aren't known. Under a new entity id
+    /// (a zone load) what your old one knew is taken over: the game sends
+    /// your maxima only at login, and every bar stayed away after a dungeon
+    /// entry (2026-10-31).
     pub fn self_resources(&self) -> Resources {
         let Some(me) = self.local_player_id().and_then(|id| i32::try_from(id).ok()) else { return Resources::default() };
-        self.entity_resources(me)
+        let before = self.resources_self.lock().replace(me);
+        let mut all = self.resources.lock();
+        if let Some(old) = before.filter(|&old| old != me).and_then(|old| all.get(&old).cloned()) {
+            all.entry(me).or_default().fill_from(&old);
+        }
+        all.get(&me).cloned().unwrap_or_default()
     }
 
     /// `entity`'s resources as last heard (a party member's from `1b 92`), empty when none.
@@ -2942,6 +2956,11 @@ impl DataStorage {
 
     pub fn get_party_members(&self) -> HashMap<String, PartyMember> {
         self.inner.read().party_members.clone()
+    }
+
+    /// `name` is in the party roster now.
+    pub fn in_party_roster(&self, name: &str) -> bool {
+        self.inner.read().party_members.contains_key(name)
     }
 
     /// The roster a saved fight takes its players' level, gear score, combat
