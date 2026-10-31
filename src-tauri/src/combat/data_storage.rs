@@ -141,6 +141,11 @@ pub struct GameLists {
     /// When the game last sent them (wall clock ms) — a count from before the
     /// daily reset is yesterday's, the game doesn't send a new one at the reset.
     pub duties_at: i64,
+    /// They came with a login (before the self record): the game sends the
+    /// list as it was before the reset then, till the Journal is opened —
+    /// 5 done at a login 11 h after the reset, 0 once the Journal opened
+    /// (2026-10-31).
+    pub duties_at_login: bool,
     /// Morph counts by recipe, the server's and your character's.
     pub morphs_server: std::collections::BTreeMap<u32, u32>,
     pub morphs_character: std::collections::BTreeMap<u32, u32>,
@@ -2081,6 +2086,7 @@ impl DataStorage {
                 }
                 lists.duties = Some(done);
                 lists.duties_at = now_ms();
+                lists.duties_at_login = lists.awaits_self_record;
                 false
             }
             ListUpdate::Morphs { server, character, whole } => {
@@ -3935,6 +3941,20 @@ fn is_mob(inner: &Inner, id: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Duty list of a login (after the whole entry counts, before the
+    /// self record) is marked as such; one later in the session isn't.
+    #[test]
+    fn the_duty_list_of_a_login_is_marked() {
+        let s = DataStorage::new();
+        s.note_game_list(ListUpdate::Duties { done: 2 });
+        assert!(!s.game_lists().duties_at_login);
+        s.note_game_list(ListUpdate::Counts { entries: Vec::new(), whole: true });
+        s.note_game_list(ListUpdate::Duties { done: 5 });
+        let lists = s.game_lists();
+        assert_eq!(lists.duties, Some(5));
+        assert!(lists.duties_at_login);
+    }
 
     /// Your HP bar without a login: `1b 92` (in a party) gives HP and max
     /// HP; a later `00 8d` maximum (an item, a skill) holds over it, and the

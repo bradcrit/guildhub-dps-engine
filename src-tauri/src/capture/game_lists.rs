@@ -31,7 +31,10 @@
 //! reward not taken yet, 4 reward taken. The Journal's "Per Server Daily
 //! Completion" counts 3 and 4: 5/5 with three rewards taken and two waiting,
 //! 2026-10-26 10:44. The first number is no list: 0 → 1 on 2026-10-25, 1 → 3
-//! on 2026-10-26 as the list was refreshed (the Daily Refreshes used?).
+//! on 2026-10-26 as the list was refreshed (the Daily Refreshes used?). The
+//! list at a login after the daily reset is still yesterday's until the
+//! Journal is opened: 5 done at 18:19 UTC on 2026-10-31, 0 at 18:56 as the
+//! Journal opened.
 //!
 //! **Morph counts** (Odyle Substance Morph — the weekly limits per recipe):
 //! `8F 8D` when the Morph window opens, `<u32 0> <n varint> n × (<recipe u32>
