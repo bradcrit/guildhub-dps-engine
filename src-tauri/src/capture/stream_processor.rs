@@ -710,6 +710,16 @@ impl StreamProcessor {
         // A party member's HP reaching 0 is how their death shows (Details'
         // DPS chart marks it).
         self.data_storage.note_party_hp(actor_id, hp_info.value, hp_max_info.value);
+        // MP follows as u32 LE current and max (2026-10-31: a Templar's
+        // 3,634 / 3,634, falling with each skill and back at full).
+        pos += hp_max_info.length as usize;
+        if let Some(mp) = packet.get(pos..pos + 8) {
+            let current = u32::from_le_bytes(mp[..4].try_into().unwrap());
+            let max = u32::from_le_bytes(mp[4..].try_into().unwrap());
+            if max > 0 && max <= 1_000_000 && current <= max {
+                self.data_storage.note_party_mp(actor_id, current, max);
+            }
+        }
 
         true
     }

@@ -817,6 +817,10 @@ struct Inner {
     /// Each party member's max HP as `1b 92` sends it (`effective_heal`) —
     /// not `mob_hp_data`, which for a player is only the highest HP seen.
     party_max_hp: HashMap<i32, i32>,
+    /// When `1b 92` last named each entity: a character keeps its name under
+    /// an old entity id after a zone load, the newest is the one in the world
+    /// (`party_member_id`).
+    party_hp_at: HashMap<i32, i64>,
     /// Linked summons that left the world (`42 36` flag 7). Their damage over
     /// time ticks on, but the game's Damage Analyzer counts no tick after the
     /// spirit is gone, so the meter does not either. Kept through a reset, like
@@ -996,6 +1000,7 @@ impl DataStorage {
                 a2tools_users: HashSet::new(),
                 last_hp: HashMap::new(),
                 party_max_hp: HashMap::new(),
+                party_hp_at: HashMap::new(),
                 despawned_summon_ids: HashSet::new(),
                 boss_entity_ids: HashSet::new(),
                 training_dummy_ids: HashSet::new(),
@@ -1314,12 +1319,30 @@ impl DataStorage {
     /// while you aren't known.
     pub fn self_abnormals(&self) -> Vec<(abnormal::Instance, Option<i64>)> {
         let Some(me) = self.local_player_id().and_then(|id| i32::try_from(id).ok()) else { return Vec::new() };
+        self.abnormals_on(me)
+    }
+
+    /// The abnormals on `entity` now, as `self_abnormals` — a party member's
+    /// for the party frames.
+    pub fn abnormals_on(&self, entity: i32) -> Vec<(abnormal::Instance, Option<i64>)> {
         let log = self.abnormals.lock();
         let lag = log.timeline.server_lag_ms();
-        log.timeline.live_on(me).into_iter().map(|i| {
+        log.timeline.live_on(entity).into_iter().map(|i| {
             let end = (!i.endless).then_some(i.server_end_ms).flatten().map(|e| e + lag);
             (i, end)
         }).collect()
+    }
+
+    /// The abnormals a skill took off since the last call, as (abnormal,
+    /// entity, by) — see `abnormal::Timeline::take_taken_off`.
+    pub fn take_abnormals_taken_off(&self) -> Vec<(u32, i32, i32)> {
+        self.abnormals.lock().timeline.take_taken_off()
+    }
+
+    /// `id` is a player's character (a summon counts as its summoner).
+    pub fn is_player(&self, id: i32) -> bool {
+        let inner = self.inner.read();
+        inner.known_player_ids.contains(&summon_resolver::resolve(id, &inner.summon_storage))
     }
 
     /// `caster` is against you: a monster, or a player of the other faction
@@ -1359,12 +1382,16 @@ impl DataStorage {
 
     /// One `00 8d` record (`capture::resources`). Kept for any entity —
     /// your login record can come before the game says who you are — and
-    /// cut back to yours past `RESOURCE_ENTITIES_KEPT`.
+    /// cut back to yours and the party's past `RESOURCE_ENTITIES_KEPT`: a
+    /// party member at full HP gets no new `1b 92` to bring theirs back.
     pub fn note_resources(&self, update: resources::Update) {
         let me = self.local_player_id().and_then(|id| i32::try_from(id).ok());
+        // Read before the resources lock, never under it.
+        let full = self.resources.lock().len() >= RESOURCE_ENTITIES_KEPT;
+        let party: HashSet<i32> = if full { self.inner.read().party_hp_at.keys().copied().collect() } else { HashSet::new() };
         let mut all = self.resources.lock();
         if all.len() >= RESOURCE_ENTITIES_KEPT && !all.contains_key(&update.entity) {
-            all.retain(|&entity, _| Some(entity) == me);
+            all.retain(|&entity, _| Some(entity) == me || party.contains(&entity));
         }
         all.entry(update.entity).or_default().note(&update);
     }
@@ -1372,7 +1399,12 @@ impl DataStorage {
     /// Your resources, empty while you aren't known.
     pub fn self_resources(&self) -> Resources {
         let Some(me) = self.local_player_id().and_then(|id| i32::try_from(id).ok()) else { return Resources::default() };
-        self.resources.lock().get(&me).cloned().unwrap_or_default()
+        self.entity_resources(me)
+    }
+
+    /// `entity`'s resources as last heard (a party member's from `1b 92`), empty when none.
+    pub fn entity_resources(&self, entity: i32) -> Resources {
+        self.resources.lock().get(&entity).cloned().unwrap_or_default()
     }
 
     /// Your cooldowns still running, the soonest back first.
@@ -2437,10 +2469,21 @@ impl DataStorage {
         }
     }
 
+    /// A party member's MP, sent along with their HP in `1b 92` — for the
+    /// party frames, as a `00 8d` MP record would be.
+    pub fn note_party_mp(&self, entity_id: i32, mp: u32, max_mp: u32) {
+        self.note_resources(resources::Update {
+            entity: entity_id,
+            small: vec![(resources::MP, mp), (resources::MP + resources::MAX_OFFSET, max_mp)],
+            wide: Vec::new(),
+        });
+    }
+
     fn note_hp_of(&self, entity_id: i32, hp: i32, max_hp: Option<i32>) {
         let mut inner = self.inner.write();
         if let Some(max) = max_hp.filter(|&m| m > 0) {
             inner.party_max_hp.insert(entity_id, max);
+            inner.party_hp_at.insert(entity_id, now_ms());
         }
         let before = inner.last_hp.insert(entity_id, hp);
         if hp == 0 && before.is_some_and(|b| b > 0) {
@@ -3040,6 +3083,21 @@ impl DataStorage {
     }
 
     /// Reverse lookup: find entity ID by nickname (for summon owner resolution).
+    /// The entity of the party member named `name`: you by your own id, anyone
+    /// else by the id `1b 92` named last — their old ids keep the name.
+    pub fn party_member_id(&self, name: &str) -> Option<i32> {
+        let inner = self.inner.read();
+        if inner.local_player_id.is_some() && inner.local_character_name.as_deref() == Some(name) {
+            return inner.local_player_id.and_then(|id| i32::try_from(id).ok());
+        }
+        inner
+            .nickname_storage
+            .iter()
+            .filter(|(_, nick)| nick.as_str() == name)
+            .max_by_key(|(id, _)| (inner.party_hp_at.get(id).copied().unwrap_or(0), **id))
+            .map(|(&id, _)| id)
+    }
+
     pub fn find_id_by_nickname(&self, name: &str) -> Option<i32> {
         let inner = self.inner.read();
         for (&id, nick) in &inner.nickname_storage {

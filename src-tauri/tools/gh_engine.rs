@@ -135,6 +135,16 @@
 //! until its maximum is known (the login sends it; a meter started
 //! mid-session hears it at the next login — HP in a party at once, from its
 //! `1b 92`).
+//! `party` (`{"members":[{"id","name","class","slot","me","hp","mp","dead",
+//! "debuffs"}]}`, every 100 ms at most, on a change, and once on connecting)
+//! for the party frames: the roster's members in slot order (empty outside a
+//! party), `id` their entity (null while not seen), `hp`/`mp` each
+//! `{"current","max"}` or null (`1b 92`, about once a second while it
+//! changes; yours from your resources), `dead` at 0 HP; `debuffs` the debuffs
+//! on them (`{"abnormal","name","icon","endsAt","totalMs","stacks",
+//! "cleansable"}`, as `skills`' buffs), the ones a party member can take off
+//! first — `cleansable` learnt from other players' skills taking them off
+//! (`<data-dir>/cleansable.json`).
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -265,6 +275,12 @@ const SKILLS_RATE: Duration = Duration::from_millis(100);
 /// Where the learned monster cast times are kept between sessions.
 const CAST_TIMES_FILE: &str = "cast_times.json";
 const CAST_TIMES_SAVE_EVERY: Duration = Duration::from_secs(60);
+/// The debuffs a party member can take off, learnt (`learn_cleansable`) and
+/// kept between sessions: `[abnormal, …]`.
+const CLEANSABLE_FILE: &str = "cleansable.json";
+/// Known before anything is learnt: Burn (two kinds) and Stun, which a
+/// Cleric's cleanse took off other players on 2026-10-31.
+const CLEANSABLE_SEEN: [u32; 3] = [12_000_001, 12_000_121, 12_000_161];
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEAD: usize = 8 * 1024;
@@ -320,6 +336,11 @@ struct Engine {
     skill_bars: watch::Sender<Arc<str>>,
     /// Your HP, MP, stamina and flight time as JSON (`resources_json`).
     resource_bars: watch::Sender<Arc<str>>,
+    /// The party frames' state as JSON (`party_json`).
+    party: watch::Sender<Arc<str>>,
+    /// The debuffs seen taken off by another player (`learn_cleansable`),
+    /// kept for the next session in CLEANSABLE_FILE.
+    cleansable: Mutex<HashSet<u32>>,
     /// The entity the meter's view follows (`DpsData::target_id`), 0: none.
     target: AtomicI32,
     /// Icons and names for the bars (`load_bar_data`).
@@ -529,6 +550,88 @@ impl Engine {
             "stamina": gauge(r.small(STAMINA)), "flight": gauge(r.small(FLIGHT)),
         })
         .to_string()
+    }
+
+    /// Learns which debuffs a party member can take off: one a player's skill
+    /// took off someone else (a Cleric's cleanse), not their own escape.
+    /// True when it learned a new one.
+    fn learn_cleansable(&self) -> bool {
+        let mut learned = false;
+        for (abnormal, entity, by) in self.storage.take_abnormals_taken_off() {
+            // On a player only: an Assassin's marks on a monster are taken off by their own finisher.
+            if by == entity || !self.storage.is_player(by) || !self.storage.is_player(entity) || self.bar_data.debuffs.get(&abnormal) != Some(&true) {
+                continue;
+            }
+            learned |= self.cleansable.lock().insert(abnormal);
+        }
+        learned
+    }
+
+    /// The party frames' state (see the top of this file).
+    fn party_json(&self) -> String {
+        use a2tools_dps_meter_lib::capture::resources::{Gauge, HP, MP};
+        let roster = self.storage.get_party_members();
+        if roster.len() < 2 {
+            return serde_json::json!({ "members": [] }).to_string();
+        }
+        let me = self.storage.local_player_id().and_then(|id| i32::try_from(id).ok());
+        let now = a2tools_dps_meter_lib::clock::now_ms();
+        let cleansable = self.cleansable.lock().clone();
+        let gauge = |g: Option<Gauge>| g.map(|g| serde_json::json!({ "current": g.current, "max": g.max }));
+        let mut members: Vec<_> = roster.into_iter().collect();
+        members.sort_by_key(|(name, m)| (m.slot, name.clone()));
+        let members: Vec<_> = members
+            .into_iter()
+            .map(|(name, member)| {
+                let id = self.storage.party_member_id(&name);
+                let resources = id.map(|id| self.storage.entity_resources(id)).unwrap_or_default();
+                let mut debuffs: Vec<(u32, Option<u32>, Option<i64>, i64, u32)> = Vec::new();
+                for (instance, end) in id.map(|id| self.storage.abnormals_on(id)).unwrap_or_default() {
+                    if end.is_some_and(|e| e <= now) || self.bar_data.inner_state(instance.abnormal) {
+                        continue;
+                    }
+                    let hostile = match self.bar_data.debuffs.get(&instance.abnormal) {
+                        Some(&debuff) => debuff,
+                        None => self.storage.is_hostile_caster(instance.caster) && !self.bar_data.boon(instance.abnormal),
+                    };
+                    if !hostile {
+                        continue;
+                    }
+                    let end = end.filter(|&e| e - now <= 86_400_000);
+                    match debuffs.iter_mut().find(|d| d.0 == instance.abnormal) {
+                        Some(row) => {
+                            row.4 += 1;
+                            if end > row.2 {
+                                (row.2, row.3) = (end, instance.start_ms);
+                            }
+                        }
+                        None => debuffs.push((instance.abnormal, instance.skill, end, instance.start_ms, 1)),
+                    }
+                }
+                debuffs.sort_by_key(|d| (!cleansable.contains(&d.0), d.2.is_none(), d.2, d.0));
+                let debuffs: Vec<_> = debuffs
+                    .into_iter()
+                    .map(|(abnormal, skill, end, start, stacks)| {
+                        serde_json::json!({
+                            "abnormal": abnormal,
+                            "name": self.bar_data.abnormal_names.get(&abnormal).cloned().or_else(|| skill.map(|s| self.skills.lookup_skill_name(s as i32)).filter(|n| !n.is_empty())),
+                            "icon": self.bar_data.abnormal_icon(abnormal).or_else(|| skill.and_then(|s| self.bar_data.skill_icon(s))),
+                            "endsAt": end, "totalMs": end.map(|e| (e - start).max(0)), "stacks": stacks,
+                            "cleansable": cleansable.contains(&abnormal),
+                        })
+                    })
+                    .collect();
+                let hp = gauge(resources.wide(HP));
+                serde_json::json!({
+                    "id": id, "name": name, "class": member.job.map(class_key), "slot": member.slot,
+                    "me": id.is_some() && id == me,
+                    "hp": hp, "mp": gauge(resources.small(MP)),
+                    "dead": resources.wide(HP).is_some_and(|g| g.current == 0),
+                    "debuffs": debuffs,
+                })
+            })
+            .collect();
+        serde_json::json!({ "members": members }).to_string()
     }
 
     fn save(&self, records: Vec<FightRecord>) {
@@ -962,6 +1065,12 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (cubes, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (skill_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (resource_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let (party, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let cleansable_path = args.data_dir.join(CLEANSABLE_FILE);
+    let mut cleansable: HashSet<u32> = CLEANSABLE_SEEN.into_iter().collect();
+    if let Some(learned) = std::fs::read_to_string(&cleansable_path).ok().and_then(|text| serde_json::from_str::<Vec<u32>>(&text).ok()) {
+        cleansable.extend(learned);
+    }
     let (events, _) = broadcast::channel(64);
     let engine = Arc::new(Engine {
         token,
@@ -979,6 +1088,8 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         cubes,
         skill_bars,
         resource_bars,
+        party,
+        cleansable: Mutex::new(cleansable),
         target: AtomicI32::new(0),
         bar_data,
         events,
@@ -1124,6 +1235,17 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let resources = engine.resources_json();
                 if **engine.resource_bars.borrow() != *resources {
                     engine.resource_bars.send_replace(Arc::from(resources));
+                }
+                if engine.learn_cleansable() {
+                    let mut learned: Vec<u32> = engine.cleansable.lock().iter().copied().collect();
+                    learned.sort_unstable();
+                    if let Ok(text) = serde_json::to_string(&learned) {
+                        let _ = std::fs::write(&cleansable_path, text);
+                    }
+                }
+                let party = engine.party_json();
+                if **engine.party.borrow() != *party {
+                    engine.party.send_replace(Arc::from(party));
                 }
                 if saved.elapsed() >= CAST_TIMES_SAVE_EVERY {
                     saved = std::time::Instant::now();
@@ -1489,6 +1611,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     let mut cubes = engine.cubes.subscribe();
     let mut skill_bars = engine.skill_bars.subscribe();
     let mut resource_bars = engine.resource_bars.subscribe();
+    let mut party = engine.party.subscribe();
     let mut events = engine.events.subscribe();
     let mut beat = tokio::time::interval(HEARTBEAT_EVERY);
     beat.tick().await;
@@ -1499,6 +1622,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     cubes.mark_changed();
     skill_bars.mark_changed();
     resource_bars.mark_changed();
+    party.mark_changed();
     loop {
         let frame = tokio::select! {
             changed = dps.changed() => {
@@ -1570,6 +1694,16 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
                     continue;
                 }
                 format!("event: resources\ndata: {current}\n\n")
+            }
+            changed = party.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let current = party.borrow_and_update().clone();
+                if current.is_empty() {
+                    continue;
+                }
+                format!("event: party\ndata: {current}\n\n")
             }
             event = events.recv() => match event {
                 Ok((name, data)) => format!("event: {name}\ndata: {data}\n\n"),

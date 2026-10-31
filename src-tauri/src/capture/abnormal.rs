@@ -424,7 +424,14 @@ pub struct Timeline {
     /// says why instead.
     pushed: Vec<((i32, i32), usize)>,
     pushed_ms: i64,
+    /// Abnormals a skill took off since the last `take_taken_off`, as
+    /// (abnormal, entity, by): a Cleric's cleanse names the Cleric. Bounded
+    /// to TAKEN_OFF_KEPT while nobody takes them.
+    taken_off: Vec<(u32, i32, i32)>,
 }
+
+/// Most `Timeline::taken_off` entries held between two reads.
+const TAKEN_OFF_KEPT: usize = 256;
 
 impl Timeline {
     /// The stack limit of each abnormal that stacks (`abnormals.json`).
@@ -532,6 +539,11 @@ impl Timeline {
                         (reason, None) => End::Removed(reason),
                     };
                     if let Some(live) = self.live.remove(&(entity, r.instance)) {
+                        if let Some((by, _, _)) = r.by
+                            && self.taken_off.len() < TAKEN_OFF_KEPT
+                        {
+                            self.taken_off.push((live.abnormal, entity, by));
+                        }
                         self.close(live, ms, end);
                     } else if let Some(&(_, at)) = self.pushed.iter().find(|p| p.0 == (entity, r.instance)) {
                         self.instances[at].end = end;
@@ -669,6 +681,11 @@ impl Timeline {
             self.instances.iter().chain(self.live.values()).filter(overlaps).cloned().collect();
         out.sort_by_key(|i| (i.start_ms, i.entity, i.instance));
         out
+    }
+
+    /// The abnormals a skill took off since the last call (see `taken_off`).
+    pub fn take_taken_off(&mut self) -> Vec<(u32, i32, i32)> {
+        std::mem::take(&mut self.taken_off)
     }
 
     /// The instances still on `entity`.
