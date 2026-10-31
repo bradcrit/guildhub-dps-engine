@@ -119,8 +119,9 @@
 //! "totalMs"}`, `skill` without its specialization digits); `buffs` the
 //! buffs and debuffs on you (`{"abnormal","skill","name","icon","endsAt",
 //! "totalMs","stacks","mine","hostile"}`, `endsAt`/`totalMs` null for one
-//! without a timer, `mine` cast by you, `hostile` by a monster or a player of
-//! the other faction — a debuff), the soonest to end first; `target` what the
+//! without a timer, `mine` cast by you, `hostile` a debuff — as the game data
+//! files it, or for an abnormal it doesn't list, cast by a monster or a player
+//! of the other faction), the soonest to end first; `target` what the
 //! monster you fight is up to (`{"entity","cast","deadline"}`, null while
 //! you fight none): `cast` the skill it is casting
 //! (`{"skill","name","startedAt","castMs"}`, `castMs` learned from its earlier
@@ -347,16 +348,40 @@ struct Engine {
 }
 
 /// What the `skills` event names skills and abnormals with: skill icons by
-/// a skill's first four digits (`skill_icons.json`), abnormal icons
-/// (`abnormals.json`) and abnormal names (`i18n/abnormals`).
+/// a skill's first four digits (`skill_icons.json`), abnormal icons and
+/// debuff flags (`abnormals.json`) and abnormal names (`i18n/abnormals`).
 #[derive(Default)]
 struct BarData {
     skill_icons: HashMap<String, String>,
     abnormal_icons: HashMap<u32, String>,
     abnormal_names: HashMap<u32, String>,
+    /// Every abnormal `abnormals.json` lists: whether the game files it as a debuff.
+    debuffs: HashMap<u32, bool>,
+    /// Skills (first four digits) whose abnormals belong to another skill:
+    /// each one's abnormals have the other's icon and the other's its own.
+    /// The name tables name an abnormal after the skill of its digits, so
+    /// these two get each other's name — Lunge Stance's buff read Zikel's
+    /// Blessing and Zikel's Blessing's Lunge Stance (2026-10-31).
+    swapped: HashMap<u32, u32>,
 }
 
 impl BarData {
+    /// The skill whose name an abnormal on you goes by instead of its own:
+    /// a `swapped` one's, or the skill that applied one of yours when the
+    /// two have the same icon but not the same digits.
+    fn named_by(&self, abnormal: u32, skill: Option<u32>, mine: bool) -> Option<u32> {
+        let digits = abnormal.to_string();
+        if digits.len() == 9 {
+            if let Some(&other) = digits[..4].parse().ok().and_then(|own: u32| self.swapped.get(&own)) {
+                return Some(other * 10_000);
+            }
+        }
+        let skill = skill.filter(|_| mine)?;
+        let icon = self.abnormal_icons.get(&abnormal)?;
+        let own = skill.to_string();
+        (own.len() == 8 && !digits.starts_with(&own[..4]) && self.skill_icon(skill) == Some(icon.as_str())).then_some(skill)
+    }
+
     /// An abnormal with the game's stand-in icon (`PLACEHOLDER_ICONS`).
     fn inner_state(&self, abnormal: u32) -> bool {
         self.abnormal_icons.get(&abnormal).is_some_and(|icon| PLACEHOLDER_ICONS.contains(&icon.as_str()))
@@ -396,13 +421,46 @@ fn load_bar_data(dir: &std::path::Path, language: &str, abnormals: Option<&str>)
         found if !found.is_empty() => found,
         _ => ids(read(names.join("en.json"))),
     };
-    let abnormal_icons = abnormals
+    let table = abnormals
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
         .and_then(|v| v.get("abnormals").and_then(|a| a.as_object()).cloned())
-        .map(|o| o.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.get("icon")?.as_str()?.to_string()))).collect())
         .unwrap_or_default();
-    let skill_icons = read(dir.join("skill_icons.json")).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-    BarData { skill_icons, abnormal_icons, abnormal_names }
+    let abnormal_icons: HashMap<u32, String> =
+        table.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.get("icon")?.as_str()?.to_string()))).collect();
+    let debuffs = table.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v["debuff"].as_bool().unwrap_or(false)))).collect();
+    let skill_icons: HashMap<String, String> = read(dir.join("skill_icons.json")).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let swapped = swapped_skills(&skill_icons, &abnormal_icons);
+    BarData { skill_icons, abnormal_icons, abnormal_names, debuffs, swapped }
+}
+
+/// `BarData::swapped`: skill A's abnormals (nine digits, A's four first) all
+/// have skill B's icon, B's alone, and B's all have A's.
+fn swapped_skills(skill_icons: &HashMap<String, String>, abnormal_icons: &HashMap<u32, String>) -> HashMap<u32, u32> {
+    let mut icons: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (id, icon) in abnormal_icons {
+        if (100_000_000..1_000_000_000).contains(id) {
+            let digits = id.to_string();
+            if let Some((skill, _)) = skill_icons.get_key_value(&digits[..4]) {
+                icons.entry(skill.as_str()).or_default().insert(icon.as_str());
+            }
+        }
+    }
+    let only = |skill: &str| icons.get(skill).filter(|set| set.len() == 1).and_then(|set| set.iter().next().copied());
+    let owner = |icon: &str| {
+        let owners: Vec<_> = skill_icons.iter().filter(|(_, own)| own.as_str() == icon).map(|(skill, _)| skill.as_str()).collect();
+        if let [skill] = owners[..] { Some(skill) } else { None }
+    };
+    let mut swapped = HashMap::new();
+    for (a, a_icon) in skill_icons {
+        let Some(b_icon) = only(a).filter(|icon| icon != a_icon) else { continue };
+        let Some(b) = owner(b_icon) else { continue };
+        if owner(a_icon) == Some(a.as_str()) && only(b) == Some(a_icon.as_str()) {
+            if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+                swapped.insert(a, b);
+            }
+        }
+    }
+    swapped
 }
 
 impl Engine {
@@ -427,7 +485,10 @@ impl Engine {
             // Ending in weeks: as good as no timer (an account buff).
             let end = end.filter(|&e| e - now <= 86_400_000);
             let mine = Some(instance.caster) == me;
-            let hostile = !mine && self.storage.is_hostile_caster(instance.caster) && !self.bar_data.boon(instance.abnormal);
+            let hostile = match self.bar_data.debuffs.get(&instance.abnormal) {
+                Some(&debuff) => debuff,
+                None => !mine && self.storage.is_hostile_caster(instance.caster) && !self.bar_data.boon(instance.abnormal),
+            };
             match rows.iter_mut().find(|r| r.0 == instance.abnormal) {
                 Some(row) => {
                     row.4 += 1;
@@ -447,7 +508,9 @@ impl Engine {
                 let total = end.map(|e| (e - start).max(0));
                 serde_json::json!({
                     "abnormal": abnormal, "skill": skill,
-                    "name": self.bar_data.abnormal_names.get(&abnormal).cloned().or_else(|| skill.and_then(name)),
+                    "name": self.bar_data.named_by(abnormal, skill, mine).and_then(name)
+                        .or_else(|| self.bar_data.abnormal_names.get(&abnormal).cloned())
+                        .or_else(|| skill.and_then(name)),
                     "icon": self.bar_data.abnormal_icons.get(&abnormal).map(String::as_str).or_else(|| skill.and_then(|s| self.bar_data.skill_icon(s))),
                     "endsAt": end, "totalMs": total, "stacks": stacks, "mine": mine, "hostile": hostile,
                 })
@@ -1564,6 +1627,37 @@ mod tests {
         assert_eq!(offers[0], serde_json::json!({ "item": 534760081, "count": 1, "tier": 2, "price": 70000, "original": 100000 }));
         assert_eq!(offers[9]["item"], 534760051);
         assert!(shop_event(&body[..20]).is_none());
+    }
+
+    /// Lunge Stance's abnormals have Zikel's Blessing's icon and the other
+    /// way round; a skill whose icon is shared or whose abnormals have two
+    /// icons is no swap.
+    #[test]
+    fn two_skills_with_each_others_abnormal_icons_are_swapped() {
+        let skill_icons: HashMap<String, String> = [
+            ("1125", "ICON_GL_SKILL_040"), ("1140", "ICON_GL_SKILL_024"),
+            ("1776", "ICON_CL_SKILL_Passive_005"), ("1777", "ICON_CL_SKILL_Passive_006"),
+            ("1201", "ICON_CO_SKILL_001"), ("1215", "ICON_CO_SKILL_001"), ("1300", "ICON_AS_SKILL_008"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let abnormal_icons: HashMap<u32, String> = [
+            (112500001, "ICON_GL_SKILL_024"), (112500101, "ICON_GL_SKILL_024"), (114000001, "ICON_GL_SKILL_040"),
+            (177600001, "ICON_CL_SKILL_Passive_006"), (177700001, "ICON_CL_SKILL_Passive_007"),
+            (130000011, "ICON_CO_SKILL_001"), (120100001, "ICON_AS_SKILL_008"), (10012401, "ICON_GL_SKILL_040"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k, v.to_string()))
+        .collect();
+        let swapped = swapped_skills(&skill_icons, &abnormal_icons);
+        assert_eq!(swapped, HashMap::from([(1125, 1140), (1140, 1125)]));
+        let data = BarData { skill_icons, abnormal_icons, swapped, ..Default::default() };
+        assert_eq!(data.named_by(112500101, None, false), Some(11400000));
+        assert_eq!(data.named_by(114000001, Some(11250010), true), Some(11250000));
+        assert_eq!(data.named_by(177600001, Some(17770010), true), Some(17770010));
+        assert_eq!(data.named_by(177600001, Some(17770010), false), None);
+        assert_eq!(data.named_by(177700001, Some(17770010), true), None);
     }
 
     #[test]

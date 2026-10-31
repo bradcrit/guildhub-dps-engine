@@ -1323,8 +1323,8 @@ impl DataStorage {
     }
 
     /// `caster` is against you: a monster, or a player of the other faction
-    /// in sight — a summon counts as its summoner. The game data has no
-    /// buff/debuff flag, so this is how the HP bar tells a debuff. As in
+    /// in sight — a summon counts as its summoner. This is how the HP bar
+    /// tells a debuff the game data doesn't file as buff or debuff. As in
     /// `nearby_enemies`, no player is a foe in a dungeon, and one of your
     /// party never is: dungeons mix the factions, and an Elyos Chanter's
     /// mantras on an Asmodian showed on the debuff bar (2026-10-30).
