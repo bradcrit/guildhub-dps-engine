@@ -135,10 +135,11 @@
 //! until its maximum is known (the login sends it; a meter started
 //! mid-session hears it at the next login — HP in a party at once, from its
 //! `1b 92`).
-//! `party` (`{"members":[{"id","name","class","level","slot","me","hp","mp",
+//! `party` (`{"members":[{"id","name","class","level","slot","me","near","hp","mp",
 //! "dead","debuffs"}]}`, every 100 ms at most, on a change, and once on connecting)
 //! for the party frames: the roster's members in slot order (empty outside a
-//! party), `level` as the roster states it (null: 0 there), `id` their entity (null while not seen), `hp`/`mp` each
+//! party), `near` while they are in sight (you always; spawned and not gone
+//! since, as the game fades a member far off in its own frames), `level` as the roster states it (null: 0 there), `id` their entity (null while not seen), `hp`/`mp` each
 //! `{"current","max"}` or null (`1b 92`, about once a second while it
 //! changes; yours from your resources), `dead` at 0 HP; `debuffs` the debuffs
 //! on them (`{"abnormal","name","icon","endsAt","totalMs","stacks",
@@ -630,6 +631,7 @@ impl Engine {
                     "id": id, "name": name, "class": member.job.map(class_key),
                     "level": (member.level > 0).then_some(member.level), "slot": member.slot,
                     "me": id.is_some() && id == me,
+                    "near": id.is_some_and(|id| Some(id) == me || self.storage.player_in_sight(id)),
                     "hp": hp, "mp": gauge(resources.small(MP)),
                     "dead": resources.wide(HP).is_some_and(|g| g.current == 0),
                     "debuffs": debuffs,

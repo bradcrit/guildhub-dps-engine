@@ -824,6 +824,9 @@ struct Inner {
     /// an old entity id after a zone load, the newest is the one in the world
     /// (`party_member_id`).
     party_hp_at: HashMap<i32, i64>,
+    /// The players spawned in sight (`45 36`) and not gone since (`47 36`,
+    /// a zone load): the party frames fade a member who isn't.
+    players_in_sight: HashSet<i32>,
     /// Linked summons that left the world (`42 36` flag 7). Their damage over
     /// time ticks on, but the game's Damage Analyzer counts no tick after the
     /// spirit is gone, so the meter does not either. Kept through a reset, like
@@ -1004,6 +1007,7 @@ impl DataStorage {
                 last_hp: HashMap::new(),
                 party_max_hp: HashMap::new(),
                 party_hp_at: HashMap::new(),
+                players_in_sight: HashSet::new(),
                 despawned_summon_ids: HashSet::new(),
                 boss_entity_ids: HashSet::new(),
                 training_dummy_ids: HashSet::new(),
@@ -1124,7 +1128,9 @@ impl DataStorage {
 
     pub fn note_nearby_despawn(&self, id: i32) {
         self.nearby.lock().despawn(id);
-        self.inner.write().entity_positions.remove(&id);
+        let mut inner = self.inner.write();
+        inner.entity_positions.remove(&id);
+        inner.players_in_sight.remove(&id);
     }
 
     /// Your faction, from your self record.
@@ -2696,7 +2702,15 @@ impl DataStorage {
 
     /// A `44/45 36` player spawn for `id`: a player, not anyone's summon.
     pub fn note_player_spawn(&self, id: i32) {
-        forget_entity(&mut self.inner.write(), id);
+        let mut inner = self.inner.write();
+        forget_entity(&mut inner, id);
+        inner.players_in_sight.insert(id);
+    }
+
+    /// The player `id` is in sight: spawned (`45 36`) and not gone again
+    /// (`47 36`, a zone load) — a party member far off is not.
+    pub fn player_in_sight(&self, id: i32) -> bool {
+        self.inner.read().players_in_sight.contains(&id)
     }
 
     pub fn get_summon_spawn_ids(&self) -> HashSet<i32> {
@@ -2904,6 +2918,7 @@ impl DataStorage {
         inner.loot_identity.scope_counts.clear();
         let from = inner.current_map_id.replace(map_id);
         inner.mobs_in_sight.clear();
+        inner.players_in_sight.clear();
         inner.entity_positions.clear();
         inner.self_guess = None;
         // Logged with the cubes it drops: one the game sent just before the

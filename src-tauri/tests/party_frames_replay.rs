@@ -53,8 +53,9 @@ fn print_party(storage: &DataStorage, at_ms: i64) {
             .map(|(i, _)| i.abnormal)
             .collect();
         println!(
-            "  {} {name} ({id:?}): hp {:?} mp {:?} hostile {debuffs:?}",
+            "  {} {name} ({id:?}){}: hp {:?} mp {:?} hostile {debuffs:?}",
             member.slot,
+            if id.is_some_and(|id| Some(id) == me || storage.player_in_sight(id)) { "" } else { " far" },
             hp.map(|g| (g.current, g.max)),
             mp.map(|g| (g.current, g.max)),
         );
