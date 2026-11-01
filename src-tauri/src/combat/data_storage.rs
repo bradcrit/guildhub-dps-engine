@@ -2410,7 +2410,7 @@ impl DataStorage {
         self.inner.read().a2tools_users.clone()
     }
 
-    /// The field bosses to report now (`boss_report.rs`, every 3 seconds):
+    /// The field bosses to report now (`boss_report.rs`, every second):
     /// each whose HP changed since the last call, and each still being
     /// fought (its HP moving or it taking damage in the last IN_COMBAT_MS),
     /// changed or not. One whose HP came back up RESET_RISE points or more

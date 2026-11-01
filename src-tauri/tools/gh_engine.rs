@@ -207,8 +207,9 @@ const CUBE_POS_MAX_AGE_MS: i64 = 5_000;
 /// starts knowing them. Written at most this often, when it learnt more.
 const SIGHT_RADII_FILE: &str = "sight_radii.json";
 const SIGHT_RADII_SAVE_EVERY: Duration = Duration::from_secs(60);
-/// How often field boss HP is looked at (as upstream's sender does).
-const BOSS_HP_EVERY: Duration = Duration::from_secs(3);
+/// How often field boss HP is looked at: only bosses whose percent moved
+/// go out, so a fight shows live on the radar without idle traffic.
+const BOSS_HP_EVERY: Duration = Duration::from_secs(1);
 /// A map read longer ago than this isn't passed on (waiting for the server).
 const MAP_MAX_AGE_MS: i64 = 10 * 60_000;
 /// The same map, unchanged, is passed on again after this long at the earliest.
