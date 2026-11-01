@@ -284,6 +284,8 @@ const CLEANSABLE_FILE: &str = "cleansable.json";
 /// Cleric's cleanse took off other players on 2026-10-31.
 const CLEANSABLE_SEEN: [u32; 3] = [12_000_001, 12_000_121, 12_000_161];
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
+/// The one-off events (kills, fights, loot, pets …) a reader may fall behind by before they're dropped.
+const EVENTS_BUFFER: usize = 1024;
 const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEAD: usize = 8 * 1024;
 
@@ -1079,7 +1081,8 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     if let Some(learned) = std::fs::read_to_string(&cleansable_path).ok().and_then(|text| serde_json::from_str::<Vec<u32>>(&text).ok()) {
         cleansable.extend(learned);
     }
-    let (events, _) = broadcast::channel(64);
+    // Room for a burst (a cube's loot, a shop's tabs, kills at once) while the app reads slowly — see events().
+    let (events, _) = broadcast::channel(EVENTS_BUFFER);
     let engine = Arc::new(Engine {
         token,
         storage: storage.clone(),
@@ -1715,7 +1718,11 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
             }
             event = events.recv() => match event {
                 Ok((name, data)) => format!("event: {name}\ndata: {data}\n\n"),
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // Fell behind by more than EVENTS_BUFFER: those are gone — at least it's said.
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!("Event stream fell behind: {missed} events dropped");
+                    continue;
+                }
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             _ = beat.tick() => ": heartbeat\n\n".to_string(),
