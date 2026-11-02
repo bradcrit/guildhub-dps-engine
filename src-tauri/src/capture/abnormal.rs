@@ -42,7 +42,7 @@
 //!
 //! Ported from Seralth's Daevalog (GPL-3.0), `src-tauri/src/capture/abnormal.rs`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use super::stream_processor::read_varint;
 
@@ -63,6 +63,8 @@ pub const ALL_STATS: [u8; 2] = [0x49, 0x36];
 /// The `end` of an abnormal that never ends: 2100-01-01 00:00 in Korea
 /// (UTC+9), in all 7,815 such records of 29 captures.
 const NEVER: i64 = 4_102_412_400_000;
+/// The last adds the server lag is the least of.
+const LAG_SAMPLES: usize = 32;
 /// Bytes after the skill: one byte, then the caster's position (x, y, z
 /// floats; 26-96 units from the caster's own track, far from the target's).
 const ADD_TAIL: usize = 13;
@@ -414,8 +416,14 @@ pub struct Timeline {
     map_loads: usize,
     /// The entity of the last `4a 36`: you.
     own: Option<i32>,
-    /// Capture time minus server time at the last add: about 25-120 ms.
+    /// Capture time minus server time: the least of `lags`. About 25-120
+    /// ms with a PC clock in step with the server's, off by as much as the
+    /// clock is — below 0 where it is behind.
     lag_ms: i64,
+    /// Capture time minus server start of the last adds: the network delay
+    /// on top of the clocks' difference, more for an abnormal on since
+    /// before its add (an entity coming into view).
+    lags: VecDeque<i64>,
     swept_ms: i64,
     /// Abnormal id -> the stacks one entity can hold, where more than one.
     stack_limits: HashMap<u32, u32>,
@@ -481,7 +489,11 @@ impl Timeline {
                     self.close(old, ms, End::Removed(0));
                 }
                 if let (Some(length), Some(end)) = (a.length_ms, a.end_ms) {
-                    self.lag_ms = (ms - (end - length)).clamp(0, 1_000);
+                    if self.lags.len() == LAG_SAMPLES {
+                        self.lags.pop_front();
+                    }
+                    self.lags.push_back(ms - (end - length));
+                    self.lag_ms = self.lags.iter().copied().min().unwrap_or(0);
                 }
                 if let Some(&limit) = self.stack_limits.get(&a.abnormal) {
                     self.push_out(ms, a.entity, a.abnormal, limit);
@@ -695,8 +707,8 @@ impl Timeline {
         out
     }
 
-    /// Capture time minus server time at the last add (about 25-120 ms):
-    /// what turns the server's `end` into our clock.
+    /// Capture time minus server time (see `lag_ms`): what turns the
+    /// server's `end` into our clock.
     pub fn server_lag_ms(&self) -> i64 {
         self.lag_ms
     }
@@ -927,7 +939,8 @@ mod tests {
     fn a_debuff_kept_up_by_several_players_changes_hands() {
         // 2026-10-06, Kernon of the West (48776): one Curse (161400005),
         // instance 293, applied by entity 1168, then by the local player
-        // 15740, then by 16129.
+        // 15740, then by 16129. 1168's ran its 7 s out unseen first: the
+        // local player's is dated from its length (36 ms late, as the add).
         let mut t = Timeline::default();
         t.note(10_974, &hex("352a3888fd020113a502c5c49e09581b000000000000b2a79214a101000090090aea46f6000037cbb3c7f0172dc700e44646"));
         t.note(33_279, &hex("342b3888fd0213a502c5c49e09581b000000000000cefe9214a1010000fc7a0d6c47f6000242f9b6c7d97b2dc700c43d46"));
@@ -936,16 +949,16 @@ mod tests {
         assert_eq!(
             got,
             [
-                (293, 1168, 10_974, Some(33_279), End::Recast),
-                (293, 15740, 33_279, Some(34_816), End::Recast),
+                (293, 1168, 10_974, Some(17_974), End::Unseen),
+                (293, 15740, 33_274, Some(34_816), End::Recast),
                 (293, 16129, 34_816, None, End::Open),
             ]
         );
         // Your share of it, and the track of everyone's Curse together.
         let mine = tracks(&t.all_instances(), |c| c);
-        assert_eq!(mine.iter().find(|t| t.owner == 15740).map(|t| (t.start_ms, t.end_ms)), Some((33_279, Some(34_816))));
+        assert_eq!(mine.iter().find(|t| t.owner == 15740).map(|t| (t.start_ms, t.end_ms)), Some((33_274, Some(34_816))));
         let all = tracks(&t.all_instances(), |_| 0);
-        assert_eq!(all.iter().map(|t| (t.start_ms, t.end_ms, t.stacks.clone())).collect::<Vec<_>>(), [(10_974, None, vec![(10_974, 1)])]);
+        assert_eq!(all.iter().map(|t| (t.start_ms, t.end_ms, t.stacks.clone())).collect::<Vec<_>>(), [(10_974, Some(17_974), vec![(10_974, 1), (17_974, 0)]), (33_274, None, vec![(33_274, 1)])]);
     }
 
     #[test]
@@ -1019,9 +1032,9 @@ mod tests {
             ]
         );
         // Without the limit the two oldest stay on to their timers (plus the
-        // 58 ms the last add came late).
+        // 57 ms the adds came late at the least).
         let unlimited = read(HashMap::new());
-        assert_eq!(unlimited[..2], [(114, 1_791_237_559_346, End::Unseen), (118, 1_791_237_564_796, End::Unseen)]);
+        assert_eq!(unlimited[..2], [(114, 1_791_237_559_345, End::Unseen), (118, 1_791_237_564_795, End::Unseen)]);
     }
 
     #[test]
