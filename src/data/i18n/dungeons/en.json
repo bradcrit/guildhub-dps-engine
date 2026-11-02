@@ -202,5 +202,13 @@
   "610044": {
     "name": "Dying Dramata's Nest",
     "difficulty": "hard"
+  },
+  "610052": {
+    "name": "Deus Research Base",
+    "difficulty": "transcendence"
+  },
+  "610062": {
+    "name": "Shattered Arkanis",
+    "difficulty": "transcendence"
   }
 }
