@@ -1,5 +1,6 @@
-//! The respawning field bosses on open maps, by the NPC code their spawn
-//! names: the ones whose kills and HP milestones the meter shares
+//! The respawning field bosses on open maps and the Abyss's bosses, by the
+//! NPC code their spawn names: the ones whose kills and HP milestones the
+//! meter shares
 //! (`boss_report.rs`). From the game's tables, as a2tools.app's
 //! `field_bosses.py` (tools/boss_timers/build_bosses.py) lists them.
 
@@ -53,7 +54,18 @@ pub const FIELD_BOSSES: &[(i32, u32)] = &[
     (2400853, 111022), // High Commander Lagta
     (2400854, 111023), // Soul Ruler Kashapa
     (2400855, 111024), // Silent Dartan
+    // The Abyss's bosses (map 20). All but Argo, the Spirit King keep a
+    // fixed schedule (the game's PeriodSpawn), which Event Timers knows; their
+    // kills and HP are shared all the same, as the others' (2026-10-28: a
+    // player fought Watcher Kaira down and no HP reached anyone).
     (2600068, 2001), // Argo, the Spirit King
+    (2600084, 2003), // Guardian Lord Nahma
+    (2600089, 2002), // Watcher Kaira
+    (2600093, 2004), // Guardian Lord Nahma
+    (2600094, 2005), // Guardian Lord Nahma
+    (2600096, 2006), // Executor Tamasa
+    (2600097, 2007), // Executor Argo
+    (2600098, 2008), // Executor Kaira
 ];
 
 /// The world-map boss id of a field boss's NPC code, the id a2tools.app
@@ -69,10 +81,10 @@ pub fn is_field_boss(code: i32) -> bool {
 
 /// The Abyss's scheduled bosses (Lower Reshanta: Watcher Kaira every 3 h,
 /// the three Guardian Lord Nahmas Fri/Sun, the Executors Mon/Thu/Sat), the
-/// ones the Abyss map lists after Argo without a time. Their kills and HP go
-/// to GuildHub only, not to a2tools.app: the world-map ids are read off the
-/// map's order (2002 Kaira … 2008 Executor Kaira, 2026-10-30), not yet seen
-/// next to a kill. (NPC code, world-map boss id), sorted by NPC code.
+/// ones the Abyss map lists after Argo without a time. Upstream lists them
+/// among `FIELD_BOSSES` too since 2.0.82, with the same world-map ids (2002
+/// Kaira … 2008 Executor Kaira), so a2tools.app gets them as well.
+/// (NPC code, world-map boss id), sorted by NPC code.
 pub const ABYSS_SCHEDULED_BOSSES: &[(i32, u32)] = &[
     (2600084, 2003), // Guardian Lord Nahma
     (2600089, 2002), // Watcher Kaira
@@ -108,13 +120,16 @@ mod tests {
         assert!(FIELD_BOSSES.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(is_field_boss(2100079)); // Bodyguard Teegant
         assert!(!is_field_boss(2100080));
+        assert_eq!(world_map_id(2600089), Some(2002)); // Watcher Kaira, the Abyss
     }
 
     #[test]
-    fn the_abyss_scheduled_bosses_are_reported_but_no_field_bosses() {
+    fn the_abyss_scheduled_bosses_are_reported() {
         assert!(ABYSS_SCHEDULED_BOSSES.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(is_reported(2600089) && !is_field_boss(2600089)); // Watcher Kaira
-        assert_eq!(world_map_id(2600097), None); // Executor Argo: not for a2tools.app
+        assert!(is_reported(2600089)); // Watcher Kaira
+        for &(npc, map) in ABYSS_SCHEDULED_BOSSES {
+            assert_eq!(world_map_id(npc), Some(map)); // the same ids as upstream's list
+        }
         assert_eq!(npc_of_map_id(2001), Some(2600068)); // Argo, the Spirit King
         assert_eq!(npc_of_map_id(2008), Some(2600098)); // Executor Kaira
     }

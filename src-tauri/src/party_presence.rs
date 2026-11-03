@@ -1,7 +1,7 @@
 //! Which party members also run A2Tools: a small mark beside their names.
 //!
-//! On unless turned off (`dpsMeter.partyPresence`, asked once with a popup,
-//! ticked by default). While the player is in a party, the meter registers
+//! Off unless turned on (`dpsMeter.partyPresence`, asked once with a popup,
+//! unticked; #131: it tells party members you use a meter). While the player is in a party, the meter registers
 //! its own character with a2tools.app and asks about its party members: the
 //! ones not asked about yet, as the party fills (a dungeon's matchmaking, an
 //! invite), and every 10 minutes the ones that weren't using it, in case they
@@ -65,7 +65,7 @@ pub fn spawn(app: tauri::AppHandle) {
         loop {
             tokio::time::sleep(CHECK).await;
             let Some(state) = app.try_state::<AppState>() else { continue };
-            if state.settings.get(SETTING_KEY).as_deref() == Some("false") {
+            if state.settings.get(SETTING_KEY).as_deref() != Some("true") {
                 if !users.is_empty() {
                     users.clear();
                     state.data_storage.set_a2tools_users(HashSet::new());

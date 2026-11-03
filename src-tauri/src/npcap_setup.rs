@@ -89,7 +89,8 @@ fn installer_name(page: &str) -> Option<String> {
 #[cfg(feature = "online")]
 async fn fetch_installer(http: &reqwest::Client) -> Result<PathBuf, String> {
     let page = http.get(SITE).send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
-    let page = page.text().await.map_err(|e| e.to_string())?;
+    // Read up to 1 MB: the page only names the installer (talyaseen, #140).
+    let page = String::from_utf8_lossy(&crate::update_check::read_capped(page, 1024 * 1024).await?).into_owned();
     let name = installer_name(&page).ok_or("npcap.com lists no installer")?;
     let response = http
         .get(format!("{SITE}dist/{name}"))
@@ -97,7 +98,8 @@ async fn fetch_installer(http: &reqwest::Client) -> Result<PathBuf, String> {
         .await
         .and_then(|r| r.error_for_status())
         .map_err(|e| e.to_string())?;
-    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    // Npcap's installers are 1-2 MB.
+    let bytes = crate::update_check::read_capped(response, 32 * 1024 * 1024).await?;
     // A Windows program, and about the size of one (1.89 is 1.3 MB).
     if bytes.len() < 200_000 || !bytes.starts_with(b"MZ") {
         return Err("the download is not an installer".into());
@@ -128,6 +130,16 @@ pub fn offer(app: tauri::AppHandle, capturer: PcapCapturer) {
     });
 }
 
+/// The meter's installer starts it with this when the player ticked "Install
+/// Npcap" on its page (wix/main.wxs): Npcap's own installer, downloaded from
+/// npcap.com, follows at once, unasked.
+pub const INSTALL_ARG: &str = "--install-npcap";
+
+#[cfg(feature = "online")]
+fn asked_by_installer() -> bool {
+    std::env::args().any(|a| a == INSTALL_ARG)
+}
+
 /// Ask, download Npcap's installer from npcap.com, run it and start capturing.
 #[cfg(feature = "online")]
 fn offer_download(app: tauri::AppHandle, capturer: PcapCapturer) {
@@ -137,10 +149,14 @@ fn offer_download(app: tauri::AppHandle, capturer: PcapCapturer) {
         let t = texts(state.i18n_data_dir.as_deref(), &lang);
         let http = state.http.clone();
 
-        let (title, ask) = (t.title.clone(), t.ask.clone());
-        let yes = tauri::async_runtime::spawn_blocking(move || platform::dialog::ask_yes_no(&title, &ask))
-            .await
-            .unwrap_or(false);
+        // Started by the installer with "Install Npcap" ticked: the player
+        // has answered already.
+        let yes = asked_by_installer() || {
+            let (title, ask) = (t.title.clone(), t.ask.clone());
+            tauri::async_runtime::spawn_blocking(move || platform::dialog::ask_yes_no(&title, &ask))
+                .await
+                .unwrap_or(false)
+        };
         if !yes {
             tracing::info!("Npcap missing; the player will install it themselves");
             return;

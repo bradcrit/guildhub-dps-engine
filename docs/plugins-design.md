@@ -67,12 +67,22 @@ pet-souls/
 
 Each plugin runs in a sandboxed iframe inside a host window the meter owns (one small window per plugin panel, like Details):
 
-- The iframe has `sandbox="allow-scripts"` and no `allow-same-origin`: an opaque origin, no access to the host page, its storage or `window.__TAURI__`.
+- The iframe has `sandbox="allow-scripts"` and no `allow-same-origin`: an opaque origin, no access to the host page or its storage. (On Windows the frame does get Tauri's globals; see below for why that gives it nothing.)
 - Its files are served by the meter from a `plugin://<id>/` scheme with their own Content-Security-Policy: `default-src 'none'; script-src plugin:; style-src plugin: 'unsafe-inline'; img-src plugin: data:; connect-src 'none'`. No network, no remote scripts.
 - It talks to the meter only by `postMessage` to the host page, which checks every request against the manifest's permissions before passing anything to the backend.
 - The host window's label is added to the Tauri capabilities so the host can call the backend; the iframe itself never can.
 
-To verify early (open question 1): that Tauri's injected IPC script and global do not reach a sandboxed child frame on WebView2 and WebKitGTK, and that the backend refuses IPC from a frame's opaque origin.
+**Tested (2026-10-30, audit H2).** A dev-mode probe plugin tried every way into the app's IPC from its frame. It ran hidden in the dock, as plugins do, and made each call with an allowed command (`plugin_storage_set`) that would have left a file in its data folder:
+
+| | Windows (WebView2 156, meter 2.0.87-dev) | Linux (WebKitGTK, KDE Wayland, meter 2.0.83) |
+|---|---|---|
+| Tauri's globals in the frame | `__TAURI__`, `__TAURI_INTERNALS__`, `ipc`, `chrome.webview` all there: wry injects its scripts into subframes | none; only WebKit's own `webkit.messageHandlers` |
+| `invoke()` through them | never answered (4 s), and no file was written: the backend never got the call | — |
+| a message posted straight to the IPC (`chrome.webview` / `webkit.messageHandlers.ipc`) | no effect | no effect (it lacks the invoke key) |
+| `fetch` to the IPC's URL | refused (the plugin's CSP) | refused |
+| the parent page (`parent.document`, `top.__TAURI__`) | blocked: origin `null` | blocked: sandboxed, no `allow-same-origin` |
+
+On Windows the frame's messages reach `CoreWebView2Frame.WebMessageReceived`, which wry doesn't listen to, so they go nowhere. On Linux the frame lacks the per-run invoke key. Behind both, the backend lets plugin windows, the dock and widgets call only the commands their host pages use (`plugins::allowed_from`). Run the probe again on a WebView2, WebKitGTK, Tauri or wry upgrade; `tools/escape-probe` is that plugin (load its folder in developer mode; it writes `probe.json` to its plugin data).
 
 ## The plugin API (apiVersion 1)
 
@@ -80,7 +90,7 @@ A small `a2` object the plugin loads (`plugin://sdk/a2.js`), wrapping postMessag
 
 | Call | Permission | What it does |
 |---|---|---|
-| `a2.on("character", fn)` | `events:character` | Your character: class, level, server, and when it changes |
+| `a2.on("character", fn)` | `events:character` | Your character: class, level, server, combat power, gear score, Odyle energy and content counts (entries left of Nightmare, Shugo Festival, Invasion, Daily Dungeon, Ascension Trial; Daily Duty taken and done today), the shop's purchase limits and the crafts made (once the shop or crafting window has opened), Kinah gained today and the week's Abyss Points, the Abyss passages' usage time left (with when it was seen), and when any of it changes |
 | `a2.on("zone", fn)` | `events:zone` | Zone/dungeon entered (dungeon id, difficulty) |
 | `a2.on("fight", fn)` | `events:fight` | Boss fight started/ended: boss code, duration, your damage |
 | `a2.on("decoded:<name>", fn)` | `decoder:<name>` | Fields from one of the plugin's decoders (below) |
@@ -88,6 +98,8 @@ A small `a2` object the plugin loads (`plugin://sdk/a2.js`), wrapping postMessag
 | `a2.notify(text, {sound})` | `notify` | A toast in the meter (and a sound if the user allows) |
 | `a2.now()` | none | Server-aligned time, for timers |
 | `a2.on("language", fn)` | none | The meter's language code, at start and whenever the user changes it |
+| `a2.watchFps(on)`, `a2.on("fps", fn)` | `fps` | The game's frame rate about every second, `{ fps, state }` (meter 2.0.78; Windows, counted from DXGI's Present events while the meter runs as administrator) |
+| `a2.fpsAdmin()` | `fps` | Ask the player to restart the meter as administrator (the meter's prompt, then Windows'); it stays so until turned off in Settings |
 
 Everything is asynchronous; nothing blocks the meter. A plugin that floods messages is rate-limited and then paused.
 

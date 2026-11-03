@@ -1,6 +1,6 @@
 [package]
 name = "a2tools-dps-meter"
-version = "2.0.77"
+version = "2.0.87"
 description = "A2Tools DPS Meter - AION 2 real-time DPS overlay"
 authors = ["taengu"]
 edition = "2024"
@@ -23,6 +23,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 #
 # is the check that enforces it.
 default = ["desktop", "online"]
+# Never shipped: the updater reads its manifest from test/ on the CDN, to try
+# a release's update path on an installed build (signed and checked as ever).
+update-test = ["online"]
 # Everything that talks to a service outside this computer: the A2 Tools
 # account and uploads, the supporter roster, update checks and the updater,
 # Send Logs to Dev, Discord activity, the OBS stream overlay and the Npcap
@@ -143,7 +146,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std"], o
 flate2 = { version = "1.1.10", optional = true }
 # Evidence slices are compressed with zstd (share::compress_slice); the log
 # service reads it with a pure-Rust decoder.
-zstd = { version = "0.13", default-features = false, optional = true }
+zstd = { version = "0.14.3", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
@@ -157,6 +160,10 @@ windows = { version = "0.59", features = [
     "Win32_Security_Authorization",
     # DPAPI, for encrypting the account token at rest.
     "Win32_Security_Cryptography",
+    # Npcap's installer: its Authenticode signature and signer, before it runs.
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
     "Win32_System_Threading",
     # Npcap's folder on the DLL search path (SetDllDirectoryW).
     "Win32_System_LibraryLoader",
@@ -166,6 +173,9 @@ windows = { version = "0.59", features = [
     "Win32_System_Com",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    # The game's frame rate, from DXGI's Present events (platform/win32/fps.rs).
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Time",
 ] }
 
 # Desktop-only, so optional and enabled by `desktop`: the log service builds
@@ -192,6 +202,6 @@ zbus = { version = "5", optional = true }
 
 [dev-dependencies]
 flate2 = "1"
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 # The log service's pure-Rust zstd decoder, to check it reads what the meter writes.
-ruzstd = "0.7"
+ruzstd = "0.9.1"

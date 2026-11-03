@@ -4,20 +4,43 @@
     "display": {
       "dps": "DPS",
       "total": "DMG",
+      "damageReceived": "TAKEN",
       "ariaDps": "Showing DPS",
       "ariaDamage": "Showing total damage",
-      "both": "BOTH",
-      "ariaBoth": "Showing DPS and total damage",
+      "ariaDamageReceived": "Showing damage taken",
       "hps": "HPS",
       "totalHeal": "HEAL",
       "stagger": "STAG",
       "ariaHps": "Showing raw healing per second (excludes passive regen)",
       "ariaHeal": "Showing total raw healing (excludes passive regen)",
-      "ariaStagger": "Showing stagger dealt to the boss's gauge"
+      "ariaStagger": "Showing stagger dealt to the boss's gauge",
+      "names": {
+        "dps": "Damage per second",
+        "totalDamage": "Total damage",
+        "damageReceived": "Damage taken",
+        "hps": "Healing per second",
+        "totalHeal": "Total healing",
+        "stagger": "Stagger",
+        "bossStagger": "Boss stagger %",
+        "statColours": "Stat colours",
+        "deaths": "Death count"
+      },
+      "sortBy": "Sort by this",
+      "menuTip": "Pick what the rows show. Wheel or right-click: next metric",
+      "bossStaggerTip": "How far the boss's stagger gauge is worn down, on its HP bar",
+      "sortCol": "Sort",
+      "showCol": "Show",
+      "statColoursTip": "Each stat in its own colour on the rows, the menu and the button"
     },
     "updates": {
       "meter": "A2Tools DPS Meter {version} is available",
       "plugins": "Plugin updates: {list}"
+    },
+    "targetMode": {
+      "lastHitByMe": "The enemy you hit last",
+      "bossTargets": "Bosses only",
+      "trainTargets": "Training dummies",
+      "allTargets": "Every enemy, combined"
     }
   },
   "details": {
@@ -253,6 +276,13 @@
     "viewDungeon": "Group by dungeon",
     "viewGrouped": "Group by boss",
     "fightCount": "{n} fights",
+    "best": "Best {time}",
+    "top": "Top {damage}",
+    "showAll": "Show all {n}",
+    "showFewer": "Show fewer",
+    "expandAll": "Expand all",
+    "collapseAll": "Collapse all",
+    "training": "Training",
     "fightCountOne": "1 fight",
     "previewUpload": "Preview upload",
     "previewUploadTip": "Write what sharing this fight would upload. Nothing is sent.",
@@ -263,7 +293,45 @@
     "uploadWorking": "Uploading…",
     "uploadDonePublic": "Uploaded. Link copied: {url}",
     "uploadDonePrivate": "Uploaded as private. Link copied: {url}",
-    "openWorld": "Open world"
+    "openWorld": "Open world",
+    "tabFights": "Fights",
+    "tabBests": "Personal bests",
+    "search": "Boss or dungeon…",
+    "allCharacters": "All characters",
+    "allDifficulties": "All difficulties",
+    "periodAll": "All time",
+    "periodToday": "Last 24 hours",
+    "period7": "Last 7 days",
+    "period30": "Last 30 days",
+    "sort": "Sort",
+    "sortNewest": "Newest",
+    "sortFastest": "Fastest kill",
+    "sortPartyDps": "Party DPS",
+    "sortMyDps": "Your DPS",
+    "sortRecent": "Most recent",
+    "sortTier": "Dungeon tier",
+    "killsOnly": "Kills only",
+    "wipe": "Wipe",
+    "pb": "PB",
+    "pbTip": "One of your personal bests",
+    "party": "Party",
+    "you": "You",
+    "totalDamage": "Total damage",
+    "finalBoss": "Final boss",
+    "fightGone": "That fight is no longer saved; its best is kept.",
+    "unconfirmedTip": "The kill wasn't recorded (a fight from before 2.0.87): judged from the damage dealt.",
+    "openBest": "Open this fight",
+    "killOne": "1 kill",
+    "wipeOne": "1 wipe",
+    "kills": "{n} kills",
+    "wipes": "{n} wipes",
+    "otherBosses": "Other bosses ({n})",
+    "otherLevels": "Other levels ({n})",
+    "noBests": "No dungeon kills yet.",
+    "encounter": "Encounter",
+    "fastestKill": "Fastest kill",
+    "yourBest": "Your best DPS",
+    "partyBest": "Party best"
   },
   "settings": {
     "title": "Settings",
@@ -312,22 +380,31 @@
     "showOdyle": "Show Odyle energy",
     "odyleEnergy": "Odyle Energy",
     "showTtk": "Show time to kill estimate",
-    "showHealModes": "Show healing in the DPS/DMG button",
-    "showStaggerMode": "Show stagger in the DPS/DMG button",
     "showTotalDps": "Show party total",
     "roundDps": "Shorten DPS to thousands (13k)",
     "showDpsSuffix": "Add /s to DPS",
     "autoHideMeter": "Hide when AION2 isn't focused",
     "hideWhenGameClosed": "Hide while AION2 is closed",
     "hideWhenSolo": "Show only in a party",
+    "hideOutOfCombat": {
+      "label": "Hide out of combat",
+      "off": "Off",
+      "seconds": "After {seconds} s"
+    },
     "showSuspendBtn": "Show pause capture button",
     "showLockBtn": "Show click-through lock button",
     "playerLimit": {
       "label": "Max players shown"
     },
+    "meterAnchor": {
+      "label": "Meter stays fixed at",
+      "options": {
+        "top": "Top",
+        "middle": "Centre",
+        "bottom": "Bottom"
+      }
+    },
     "partyPresence": "Show A2Tools users in my party",
-    "shareBossTimers": "Share field boss timers",
-    "shareSupplyRequests": "Share Supply Requests",
     "debugLogging": "Debug logging",
     "quit": "Quit",
     "discord": {
@@ -541,15 +618,23 @@
       "failed": "Sign-in failed: {error}",
       "supporter": "Supporter",
       "autoUpload": "Upload boss fights automatically",
-      "autoUploadHint": "When a boss fight ends it is uploaded to your account, with the visibility you chose on a2tools.app. Other players stay masked. Training dummies are never uploaded."
+      "autoUploadHint": "When a boss fight ends it is uploaded to your account, with the visibility you chose on a2tools.app. Other players stay masked. Training dummies are never uploaded.",
+      "guestUpload": "Upload boss fights without an account",
+      "guestUploadHint": "When a boss fight ends it is uploaded to a2tools.app, public, without an account. Other players stay masked. Sign in later and the fights uploaded from this PC become yours.",
+      "guestClaimHint": "Fights uploaded from this PC are kept for you. Sign in here to make them yours, or get a code to claim them from another device.",
+      "guestClaimButton": "Get a claim code",
+      "guestClaimCode": "Enter {code} at {url} while signed in. The code expires in 15 minutes.",
+      "claimed": "{count} fights uploaded from this PC are now yours."
     },
     "sendLogs": {
-      "hint": "Sends your 3 most recent packet logs to the developer, for a bug report.",
+      "hint": "Sends your debug log and your most recent packet logs (3 files in all) to the developer, for a bug report.",
       "button": "Send Logs to Dev",
-      "confirm": "Send your 3 most recent packet logs to the A2 Tools developer?\n\nPacket logs are raw game traffic recorded while packet logging was on, including character names. Only the developer can open them, and they are deleted after 30 days.",
+      "confirm": "Send your debug log and your most recent packet logs to the A2 Tools developer?\n\nThe debug log records what the meter did. Packet logs are raw game traffic recorded while packet logging was on. Both can include character names. Only the developer can open them, and they are deleted after 30 days.",
       "sending": "Sending...",
       "sent": "Sent. Your report code is {code}: give it to the developer on Discord.",
-      "failed": "Could not send: {error}"
+      "failed": "Could not send: {error}",
+      "files": "These files will be sent:",
+      "contents": "Packet logs can include chat and other players' names."
     },
     "barGap": {
       "label": "Bar spacing"
@@ -562,12 +647,11 @@
       "lockedPort": "The adapter and port the game was found on.",
       "defaultMeterMode": "The target mode the meter opens in: Boss, Target, Train or All.",
       "playerLimit": "How many player rows the meter shows; the rest are left out.",
+      "meterAnchor": "The edge of the meter that stays put as rows come and go.",
       "pinMeToTop": "Your row stays first, whatever your damage.",
       "autoHideMeter": "The meter disappears while another window is in front of the game, and comes back with it.",
       "detailsMonitor": "Opens the Details window on the chosen display and keeps it there.",
       "showTtk": "Beside the battle timer, an estimate of how long the whole boss fight will take.",
-      "showHealModes": "The DPS/DMG button on the meter also cycles through healing per second and total healing.",
-      "showStaggerMode": "The DPS/DMG button on the meter also shows the stagger each player took off the boss's gauge.",
       "showTotalDps": "A bar under the rows with the party's combined DPS and damage.",
       "roundDps": "13,412 shows as 13k.",
       "showSuspendBtn": "A button on the meter that stops reading game traffic until you press it again.",
@@ -584,8 +668,6 @@
       "allTargetsWindow": "In All Targets mode, the meter adds up every target hit within this time of the latest hit.",
       "updateRate": "How often the meter's numbers refresh. Faster shows hits sooner but uses more CPU.",
       "partyPresence": "Party members who also use A2Tools see a small A2 tag beside your name, and you see theirs. Anyone in your party using A2Tools can see it, so they'll know you use a third-party meter. Only hashes of character names and servers are sent.",
-      "shareBossTimers": "Shares field boss timers with other players through a2tools.app (and its partner Aion 2 Timers): the bosses on your map when you open it, and the field bosses you see killed, and their HP while you fight them. Only the server, the bosses, their times and HP are sent.",
-      "shareSupplyRequests": "Shares your server's Supply Requests boards with a2tools.app's Profiteer when they change (after each reset): the server, the boards and their requests. Nothing about your character or its progress is sent.",
       "debugLogging": "Writes a diagnostic log the developer can use to track down problems.",
       "saveRawPackets": "Records raw game traffic for bug reports. Debug logging turns on with it.",
       "globalHotkeys": "The keys below work anywhere, even while the game is in front. Off, they are released for other programs. On Linux your desktop registers them and may ask you to approve them.",
@@ -593,7 +675,11 @@
       "showMeter": "Off: only your plugins show. The meter keeps reading combat and uploading in the background. Bring it back here, with the show/hide hotkey, or with the meter button on a plugin window.",
       "clearOnZone": "When the last fight leaves the meter after the zone changes. Every fight stays in History either way.",
       "hideWhenGameClosed": "The meter hides while the game isn't running, and comes back when it starts.",
-      "hideWhenSolo": "The meter hides while you're not in a party, and comes back when you join one. The Show/Hide keybind still brings it up."
+      "hideWhenSolo": "The meter hides while you're not in a party, and comes back when you join one. The Show/Hide keybind still brings it up.",
+      "hideOutOfCombat": "The meter hides once you've been out of combat this long, and comes back with the next hit. It stays up while Settings, History or Details is open, or the mouse is over it.",
+      "runAsAdmin": "Needed to show the game's frame rate. Windows asks each time the meter starts.",
+      "shareData": "Shares your server's field boss timers and Supply Requests with a2tools.app, to help keep A2Tools in sync for everyone: the bosses on your map, the ones you see killed and their HP, and the request boards after each reset. Nothing about your character is sent.",
+      "pluginAutoUpdate": "When the meter starts, plugin updates install by themselves, in the background. An update that asks for something new still waits for your yes."
     },
     "globalHotkeys": "Use keybinds",
     "hotkeyConsent": {
@@ -631,6 +717,7 @@
       "install": "Install",
       "update": "Update",
       "updateTo": "Update to {version}",
+      "downloading": "Downloading…",
       "installing": "Installing…",
       "installDone": "{name} {version} is installed.",
       "updatesAvailable": "Updates available: {list}",
@@ -640,6 +727,7 @@
       "consentUpdateTitle": "Update {name}?",
       "consentIntro": "It will be able to:",
       "consentNew": "The new version also asks to:",
+      "consentNetwork": "Like any web page, a plugin may be able to reach the internet.",
       "consentCancel": "Cancel",
       "permStorage": "Save its own data on this computer",
       "permNotify": "Show short messages in its window",
@@ -647,17 +735,24 @@
       "permWidgets": "Show small windows of its own, which you can move anywhere and lock in place",
       "permBossTimers": "Read the field boss timers players share through a2tools.app",
       "permCharacter": "See your character's name, server, class and level",
-      "permDecoder": "Read your own game data: {name}",
+      "permDecoder": "Read selected game fields (may include other players): {name}",
       "permNone": "Nothing beyond showing its window",
       "enabled": "Enabled",
       "enabledTip": "On: starts with the meter. Off: stays installed but doesn't run.",
-      "showMeter": "Show the DPS meter",
+      "showMeter": "Show the meter",
       "hideClosed": "Hide while AION2 is closed",
       "hideUnfocused": "Hide when AION2 isn't focused",
       "inDock": "In the plugin dock (off: its own window)",
       "search": "Search",
       "noMatch": "No plugins match.",
-      "permsTitle": "It can:"
+      "permsTitle": "It can:",
+      "permFps": "Show the game's frame rate (on Windows, the meter asks to run as administrator for it)",
+      "permDeathRecap": "After a player kills you: who they were and the damage they did to you",
+      "permScreenshot": "Take screenshots of its own window, to the clipboard and your screenshot folder",
+      "testHint": "Early versions for anyone to try, signed like the others. They may change or have rough edges: tell us what you find.",
+      "testTitle": "Test plugins",
+      "autoUpdate": "Update plugins automatically",
+      "whatsNew": "What's new in {version}"
     },
     "clearOnZone": {
       "label": "Clear the meter",
@@ -666,7 +761,11 @@
         "any": "Any zone change",
         "never": "Never (keep the last fight)"
       }
-    }
+    },
+    "runAsAdmin": "Run as administrator",
+    "runAsAdminTitle": "A2Tools - Run as administrator",
+    "runAsAdminAsk": "Showing the game's frame rate needs the meter to run as administrator.\n\nRestart the meter as administrator now? Windows will ask each time the meter starts. You can turn this off in Settings.",
+    "shareData": "Sync useful data to A2Tools"
   },
   "support": {
     "button": "Support Me",
@@ -692,7 +791,12 @@
       "btc": "Copy BTC address",
       "eth": "Copy ETH address",
       "usdc": "Copy USDC address"
-    }
+    },
+    "sponsorLabel": "Sponsored",
+    "sponsorShort": "Reduce your ping with ExitLag",
+    "sponsorCode": "Use code",
+    "sponsorDisclosure": "Affiliate link. A2 Tools earns a commission if you subscribe, which helps keep these tools free.",
+    "more": "More ways to donate on a2tools.app"
   },
   "battleTime": {
     "analysing": "Monitoring",
@@ -706,7 +810,8 @@
     "identifyingPlayer": "#{id}",
     "a2toolsUser": "Uses A2Tools",
     "dpsSuffix": "/s",
-    "others": "Others"
+    "others": "Others",
+    "deaths": "Died {count} times in this fight"
   },
   "skills": {
     "fallback": "Skill {code}",
@@ -784,7 +889,9 @@
     "hint": "Other players' names stay masked, and training dummies are never uploaded. You can change this any time in Settings.",
     "signIn": "Sign in",
     "later": "Not now",
-    "close": "Close"
+    "close": "Close",
+    "guest": "No account",
+    "guestHint": "No account? Fights still upload, and become yours when you sign in."
   },
   "npcapPrompt": {
     "ask": "A2Tools DPS Meter needs Npcap to read the game's network traffic, and Npcap is missing or not working.\n\nInstall it now? The meter downloads Npcap's installer from npcap.com and opens it. Once Npcap is installed, the meter starts capturing by itself.\n\nChoose No to install it yourself from https://npcap.com/#download",
@@ -815,5 +922,55 @@
     "settings": "Meter settings",
     "opacity": "Background opacity",
     "failed": "This plugin could not start: {error}"
+  },
+  "sharing": {
+    "title": "Help build the leaderboards?",
+    "sub": "Pick one to start. You can change it any time in Settings → Privacy.",
+    "shareTitle": "Share fights anonymously",
+    "recommended": "Recommended",
+    "shareText": "Your boss fights join a2tools.app's public logs with every name hidden. No account needed.",
+    "noTitle": "Don't share",
+    "noText": "Nothing about your fights leaves this PC.",
+    "signInBefore": "Want your fights under your name?",
+    "signIn": "Sign in with A2 Tools",
+    "signInAfter": "Fights shared before then move to your account.",
+    "previewTitle": "How a shared fight appears on a2tools.app",
+    "never": "Your PC's name and your character's full name are never sent.",
+    "policy": "Privacy policy",
+    "continue": "Continue"
+  },
+  "sharingNotice": {
+    "title": "Your fights help build the leaderboards",
+    "text": "Boss fights you finish are shared with a2tools.app with every name hidden, yours too (e.g. Na***a). No account needed, and you can stop any time in Settings → Privacy.",
+    "stop": "Stop sharing",
+    "details": "Details",
+    "keep": "Keep sharing",
+    "stopped": "Sharing stopped. The fights you shared before are being removed from a2tools.app."
+  },
+  "privacy": {
+    "title": "Privacy",
+    "intro": "What this meter shares with a2tools.app. Each one is your choice.",
+    "share": "Share boss fights anonymously",
+    "shareHint": "When a boss fight ends it joins a2tools.app's public logs and leaderboards. Every name is hidden, yours too. No account needed.",
+    "signedIn": "Signed in: your boss fights upload to your A2 Tools account (see A2 Tools Account).",
+    "never": "Never sent: chat, your PC's name, your character's full name. Send Logs to Dev (Advanced) sends logs only when you press it.",
+    "policy": "Full privacy policy"
+  },
+  "changelog": {
+    "title": "What's new",
+    "intro": "The latest releases, newest first.",
+    "allReleases": "All releases on GitHub",
+    "installed": "Installed",
+    "available": "Update available",
+    "loading": "Loading the release notes…",
+    "none": "No release notes yet.",
+    "failed": "Couldn't load the release notes. They are also on GitHub, below."
+  },
+  "footerMenu": {
+    "tip": "Choose what the footer shows",
+    "ttk": "Time to kill estimate",
+    "partyTotal": "Party total",
+    "odyle": "Odyle energy",
+    "ping": "Ping"
   }
 }

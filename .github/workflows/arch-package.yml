@@ -1,7 +1,8 @@
 name: Linux packages
 
-# Run by hand (Actions tab, or `gh workflow run arch-package.yml`). Builds the
-# meter's Linux packages and keeps them as downloads:
+# Runs on its own when a release tag (v*) is pushed, and by hand (Actions tab,
+# or `gh workflow run arch-package.yml`). Builds the meter's Linux packages and
+# keeps them as downloads:
 #
 # - the Arch package (packaging/arch/PKGBUILD, makepkg in an Arch container),
 #   for Arch, CachyOS, Manjaro, EndeavourOS;
@@ -13,17 +14,25 @@ name: Linux packages
 # meter never runs as root. Nothing here publishes anything: the files go to
 # the CDN by hand.
 #
-# For a release, run it on the release tag (`gh workflow run arch-package.yml
-# -f ref=v2.0.36`): the packages are then plain 2.0.36, and go to the CDN with
+# For a release, pushing the tag starts it (by hand: `gh workflow run
+# arch-package.yml -f ref=v2.0.36`): the packages are then plain 2.0.36, and go to the CDN with
 # the MSI before the manifest names them (archUrl, debUrl, rpmUrl), which is
 # what Linux meters update from.
 on:
+  # A pushed tag is checked out as itself (inputs.ref is empty then).
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       ref:
         description: "Tag or branch to build (a release tag for a release)"
         required: false
         default: main
+
+# Builds and tests only: nothing here writes to the repository (security
+# audit M13). Uploaded artifacts need no extra permission.
+permissions:
+  contents: read
 
 jobs:
   # Packs the binaries the .deb job built instead of compiling them again
@@ -45,11 +54,11 @@ jobs:
           pacman -Syu --noconfirm --needed git \
             webkit2gtk-4.1 gtk3 libpcap libcap hicolor-icon-theme \
             gst-plugins-base gst-plugins-good
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: linux-binaries
           path: src-tauri/target/release
@@ -66,7 +75,7 @@ jobs:
           chown -R builder "$GITHUB_WORKSPACE"
           su builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' && A2T_PREBUILT=1 makepkg --noconfirm --nodeps"
           ls -la "$GITHUB_WORKSPACE"/packaging/arch/*.pkg.tar.zst
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: arch-package
           path: packaging/arch/*.pkg.tar.zst
@@ -76,22 +85,24 @@ jobs:
     name: .deb and .rpm
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
           key: deb-rpm
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 20
           cache: npm
       # Cached between runs (it took a minute to download and install every
       # time); the list is the cache key, so changing it fetches afresh.
       - name: Build dependencies
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1
         with:
           packages: libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev rpm cpio mold
           version: 1
@@ -118,7 +129,7 @@ jobs:
           cargo build --release --manifest-path src-tauri/Cargo.toml --bin a2tools-hotkeys
           npx tauri build --bundles deb,rpm
       # The same two binaries for the Arch package (the makepkg job).
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: linux-binaries
           path: |
@@ -170,7 +181,7 @@ jobs:
           rpm -qlp out/*.rpm | grep -E '^/usr/(bin|share/applications)/'
           dpkg-deb --contents out/*.deb | grep -q usr/bin/a2tools-hotkeys
           rpm -qlp out/*.rpm | grep -qx /usr/bin/a2tools-hotkeys
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: deb-rpm-packages
           path: out/*
@@ -192,7 +203,7 @@ jobs:
           - image: fedora:41
             install: dnf install -y ./a2tools-dps-meter-*.x86_64.rpm
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: deb-rpm-packages
       # Dependencies resolve, the install script grants capture permission,
@@ -213,33 +224,57 @@ jobs:
           ls /usr/share/applications/ | grep -i a2tools
 
   # The RPM repository on the CDN (linux/rpm/), which Fedora and the
-  # image-based Fedoras install and update the meter from.
+  # image-based Fedoras install and update the meter from. Its package and
+  # its index (repomd.xml) are signed with the Linux packages key (secret
+  # LINUX_SIGNING_KEY; the public half is packaging/linux/a2tools.asc, served
+  # as linux/a2tools.asc) and a2tools.repo has dnf check both: otherwise a
+  # package swapped on the CDN would install as root (audit M4). The signed
+  # .rpm here is the one to publish, at every address.
   rpm-repo:
     name: RPM repository
     needs: deb-rpm
     runs-on: ubuntu-24.04
     container: fedora:41
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref }}
+          sparse-checkout: packaging/linux
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: deb-rpm-packages
-      - name: Metadata
+          path: built
+      - name: Sign and index
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
         run: |
-          dnf install -y createrepo_c
+          set -euo pipefail
+          test -n "$LINUX_SIGNING_KEY" || { echo "LINUX_SIGNING_KEY is not set: the repository can't be signed"; exit 1; }
+          dnf install -y createrepo_c rpm-sign gnupg2
+          export GNUPGHOME="$(mktemp -d)"
+          printf '%s\n' "$LINUX_SIGNING_KEY" | gpg --batch --import
+          # The key that signs is the one the repo file names.
+          fpr=$(gpg --batch --with-colons --show-keys packaging/linux/a2tools.asc | awk -F: '/^fpr/ {print $10; exit}')
+          gpg --batch --list-secret-keys "$fpr" > /dev/null
           mkdir -p repo/rpm
-          cp a2tools-dps-meter-*.x86_64.rpm repo/rpm/
+          cp built/a2tools-dps-meter-*.x86_64.rpm repo/rpm/
+          rpmsign --define "_gpg_name $fpr" --define "__gpg $(command -v gpg)" --addsign repo/rpm/*.rpm
+          rpm --import packaging/linux/a2tools.asc
+          rpm -K repo/rpm/*.rpm | tee /dev/stderr | grep -q 'signatures OK'
           createrepo_c repo/rpm
+          gpg --batch --yes --local-user "$fpr" --armor --detach-sign repo/rpm/repodata/repomd.xml
+          cp packaging/linux/a2tools.asc repo/
           ls -laR repo
       # Installed from the repository, the way a player does, rather than
-      # from the file.
+      # from the file, with both signatures checked.
       - name: Install from it
         run: |
-          printf '[a2tools]\nname=A2Tools DPS Meter (test)\nbaseurl=file://%s/repo/rpm/\ngpgcheck=0\n' "$PWD" \
+          printf '[a2tools]\nname=A2Tools DPS Meter (test)\nbaseurl=file://%s/repo/rpm/\ngpgcheck=1\nrepo_gpgcheck=1\ngpgkey=file://%s/repo/a2tools.asc\n' "$PWD" "$PWD" \
             > /etc/yum.repos.d/a2tools.repo
           dnf install -y a2-tools-dps-meter
           getcap /usr/bin/a2tools-dps-meter | grep cap_net_raw
           test -x /usr/bin/a2tools-hotkeys && test -z "$(getcap /usr/bin/a2tools-hotkeys)"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: rpm-repo
           path: repo
@@ -271,7 +306,7 @@ jobs:
             wait
             df -h /
           fi
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: rpm-repo
           path: repo
@@ -281,7 +316,7 @@ jobs:
           # ("max depth exceeded").
           sudo podman $PODMAN_ROOT run --rm -v "$PWD/repo:/repo:ro" ghcr.io/ublue-os/bazzite:stable bash -euc '
             cat /etc/os-release | grep -E "^(NAME|VERSION)="
-            printf "[a2tools]\nname=A2Tools DPS Meter (test)\nbaseurl=file:///repo/rpm/\ngpgcheck=0\n" > /etc/yum.repos.d/a2tools.repo
+            printf "[a2tools]\nname=A2Tools DPS Meter (test)\nbaseurl=file:///repo/rpm/\ngpgcheck=1\nrepo_gpgcheck=1\ngpgkey=file:///repo/a2tools.asc\n" > /etc/yum.repos.d/a2tools.repo
             if rpm-ostree install a2-tools-dps-meter; then
               echo "installed with rpm-ostree"
             else
@@ -309,7 +344,7 @@ jobs:
     # in 2.0.56). A real Steam Deck is still unconfirmed (docs/linux.md).
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: arch-package
           path: pkg
@@ -318,7 +353,7 @@ jobs:
           # Ubuntu's distrobox (1.7) is older than SteamOS's; use a current one.
           # The runner image ships podman; install it only if that changes.
           command -v podman || { sudo apt-get update && sudo apt-get install -y podman; }
-          curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sh -s -- --prefix ~/.local
+          curl -fsS https://raw.githubusercontent.com/89luca89/distrobox/1.8.2.5/install | sh -s -- --prefix ~/.local
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.local/bin:$PATH"
           distrobox version

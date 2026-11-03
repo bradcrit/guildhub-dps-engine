@@ -18,7 +18,11 @@ use x11_dl::xlib;
 /// the resize "glitched all over" (2026-10-17). KWin already resized the
 /// meter's other windows this way.
 pub fn compositor_resize_supported(window: &tauri::WebviewWindow) -> bool {
-    if !super::process::is_gnome() && !super::process::is_kde() {
+    // Hyprland too: resized by the app instead, a floating window keeps its
+    // centre, so the meter jumped left as its corner was pressed (the window
+    // grew for the drag) and back on release (#102). Its own resize keeps
+    // the edge that isn't dragged.
+    if !super::process::is_gnome() && !super::process::is_kde() && !super::process::is_hyprland() {
         return false;
     }
     use gtk::prelude::*;
@@ -45,6 +49,77 @@ pub fn resize_pointer_down(window: &tauri::WebviewWindow) -> Option<bool> {
         }
         Some(surface.device_position(&pointer).3.contains(gdk::ModifierType::BUTTON1_MASK))
     }).flatten()
+}
+
+/// A tool window resizable from its outer edge, as other windows are. For a
+/// window without a title bar tao takes the outer 5 px for the window
+/// manager's resize: it shows the resize cursor there and starts the resize
+/// on the press itself, and neither the page nor a motion handler hears of
+/// it. The meter keeps
+/// tool windows' size pinned (`set_size`, so KWin cannot tile one that is
+/// dragged), and KWin refused the resize: the cursor offered one that never
+/// came (CachyOS, 2026-10-28). So the size is unpinned, down to `min`, while
+/// the pointer is in that band, with a frame to send the new hints (GTK sends
+/// them only on a commit), and pinned again once it is back inside with no
+/// button held: in a KDE Wayland VM, Battle History went from 1117 to 1231 px
+/// wide, then KWin had it fixed at that size again.
+pub fn resizable_edges(window: &tauri::WebviewWindow, min: tauri::LogicalSize<f64>) {
+    use gtk::{gdk, glib, prelude::*};
+    let target = window.clone();
+    super::dialog::on_gtk_thread(move || {
+        let Ok(gtk_window) = target.gtk_window() else { return };
+        let unpinned = std::rc::Rc::new(std::cell::Cell::new(false));
+        let set = {
+            let unpinned = unpinned.clone();
+            let target = target.clone();
+            move |w: &gtk::ApplicationWindow, edge: bool| {
+                if edge == unpinned.get() {
+                    return;
+                }
+                unpinned.set(edge);
+                if edge {
+                    // Through tao, which keeps the limits itself and would put
+                    // its own back over GTK hints set here.
+                    release_size(&target, min);
+                    w.queue_resize();
+                    w.queue_draw();
+                    if let Some(clock) = w.frame_clock() {
+                        clock.request_phase(gdk::FrameClockPhase::LAYOUT | gdk::FrameClockPhase::PAINT);
+                    }
+                } else if let Ok(size) = target.inner_size() {
+                    set_size(&target, tauri::Size::Physical(size));
+                }
+            }
+        };
+        // Where the pointer is, read ten times a second: tao's band passes no
+        // motion on to other handlers. Pinned again only once the pointer is
+        // back inside, not on its leaving: the window manager's resize takes
+        // the pointer, and pinning then ended the resize as it began.
+        let weak = gtk_window.downgrade();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            let Some(w) = weak.upgrade() else { return glib::ControlFlow::Break };
+            let Some(surface) = w.window() else { return glib::ControlFlow::Continue };
+            let Some(pointer) = w.display().default_seat().and_then(|seat| seat.pointer()) else {
+                return glib::ControlFlow::Continue;
+            };
+            let (_, x, y, held) = surface.device_position(&pointer);
+            // A button held: a resize (or a drag) under way, the position
+            // stale while the window manager has the pointer. It ends pinned
+            // at its new size, on the next look after the release.
+            if held.contains(gdk::ModifierType::BUTTON1_MASK) {
+                return glib::ControlFlow::Continue;
+            }
+            let (width, height) = (surface.width(), surface.height());
+            let inside = x >= 0 && y >= 0 && x < width && y < height;
+            if !inside {
+                return glib::ControlFlow::Continue;
+            }
+            let band = surface.scale_factor() * 5 + 1;
+            let edge = !w.is_maximized() && (x < band || y < band || x >= width - band || y >= height - band);
+            set(&w, edge);
+            glib::ControlFlow::Continue
+        });
+    });
 }
 
 /// Commit unpinned size hints before requesting a compositor resize.
@@ -225,6 +300,15 @@ pub fn start_drag(window: &tauri::WebviewWindow) {
     let _ = window.start_dragging();
 }
 
+/// A tool window behind others, brought in front (see the Windows one). The
+/// compositor decides whether it takes focus.
+pub fn bring_forward(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_focus();
+}
+
 /// Show a window on top without taking focus from the game. A plain show
 /// maps the window and the window manager activates it as a new window
 /// (KWin did, under XWayland, for each plugin alert), so GTK is told first
@@ -266,9 +350,7 @@ fn click_through_asked() -> &'static std::sync::Mutex<std::collections::HashMap<
 /// it is shown, and once more a little later in case the compositor took
 /// its time.
 fn reapply_click_through(window: &tauri::WebviewWindow) {
-    let Some((ignore, keep)) = click_through_asked().lock().unwrap_or_else(|p| p.into_inner()).get(window.label()).cloned() else {
-        return;
-    };
+    let label = window.label().to_string();
     let window = window.clone();
     tauri::async_runtime::spawn(async move {
         for wait in [80, 400] {
@@ -276,7 +358,12 @@ fn reapply_click_through(window: &tauri::WebviewWindow) {
             if !window.is_visible().unwrap_or(false) {
                 return;
             }
-            input_region(&window, ignore, keep.clone());
+            // What it asks for now, not when it was shown: a widget grown
+            // by its page reports its new area in between, and the old one
+            // put back left the new part of the window click-through.
+            let asked = click_through_asked().lock().unwrap_or_else(|p| p.into_inner()).get(&label).cloned();
+            let Some((ignore, keep)) = asked else { return };
+            input_region(&window, ignore, keep);
         }
     });
 }
@@ -289,9 +376,10 @@ pub fn hide_without_focus(window: &tauri::WebviewWindow) {
 /// Here a window can be built hidden and shown later as it is.
 pub const HIDE_AFTER_BUILD: bool = false;
 
-/// The windows `hide_in_place` has hidden, by label.
-fn hidden_in_place() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static HIDDEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+/// The windows `hide_in_place` has hidden, by label, each with whether it
+/// stayed out of the taskbar before.
+fn hidden_in_place() -> &'static std::sync::Mutex<std::collections::HashMap<String, bool>> {
+    static HIDDEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> = std::sync::OnceLock::new();
     HIDDEN.get_or_init(Default::default)
 }
 
@@ -327,15 +415,14 @@ pub fn hide_in_place(window: &tauri::WebviewWindow) {
             return None;
         }
         gtk_window.set_opacity(0.0);
-        Some(())
+        Some(gtk_window.skips_taskbar_hint())
     })
-    .flatten()
-    .is_some();
-    if !concealed {
+    .flatten();
+    let Some(skipped_taskbar) = concealed else {
         hide_without_focus(window);
         return;
-    }
-    hidden_in_place().lock().unwrap_or_else(|p| p.into_inner()).insert(window.label().to_string());
+    };
+    hidden_in_place().lock().unwrap_or_else(|p| p.into_inner()).insert(window.label().to_string(), skipped_taskbar);
     click_through_except(window, true, None);
     let _ = window.set_skip_taskbar(true);
 }
@@ -343,12 +430,14 @@ pub fn hide_in_place(window: &tauri::WebviewWindow) {
 /// Show a window `hide_in_place` hid, where it is; false if it was not hidden
 /// that way (then it is shown as usual).
 pub fn reveal_in_place(window: &tauri::WebviewWindow) -> bool {
-    let was = hidden_in_place().lock().unwrap_or_else(|p| p.into_inner()).remove(window.label());
-    if !was {
+    let Some(skipped_taskbar) = hidden_in_place().lock().unwrap_or_else(|p| p.into_inner()).remove(window.label()) else {
         return false;
-    }
+    };
     click_through_except(window, false, None);
-    let _ = window.set_skip_taskbar(false);
+    // Back as it was: a widget went into the taskbar and Alt+Tab once shown
+    // again, and Alt+Tab then gave it the focus, the game's cursor gone and
+    // its clicks not going through (Hirai, KDE, 2026-10-31).
+    let _ = window.set_skip_taskbar(skipped_taskbar);
     let target = window.clone();
     super::dialog::on_gtk_thread(move || {
         use gtk::prelude::*;
@@ -377,9 +466,21 @@ pub fn places_own_windows() -> bool {
     super::focus::places_own_windows()
 }
 
+/// The edge the overlay keeps as it fits its rows (Settings → Meter stays
+/// fixed at), for the KWin script, which keeps it on native Wayland.
+pub fn set_main_anchor(anchor: crate::platform::meter_anchor::Anchor) {
+    super::focus::set_main_anchor(anchor);
+}
+
+/// Whether the overlay's next resize keeps its edge, or grows it for a moment
+/// (a panel, the promo): the KWin script has it before the resize.
+pub async fn anchor_next_resize(anchored: bool) {
+    super::focus::anchor_next_resize(anchored).await;
+}
+
 /// Whether `hide_in_place` has this window hidden.
 pub fn is_hidden_in_place(window: &tauri::WebviewWindow) -> bool {
-    hidden_in_place().lock().unwrap_or_else(|p| p.into_inner()).contains(window.label())
+    hidden_in_place().lock().unwrap_or_else(|p| p.into_inner()).contains_key(window.label())
 }
 
 /// Hide the meter while the game is not in front. Kept mapped (see
@@ -432,6 +533,20 @@ pub fn set_size(window: &tauri::WebviewWindow, size: tauri::Size) {
     let _ = window.set_size(size);
 }
 
+/// Size and move a window (`meter_anchor::resize`). Two requests here: Tauri
+/// has no call for both.
+pub fn set_size_and_position(window: &tauri::WebviewWindow, size: tauri::Size, pos: tauri::PhysicalPosition<i32>) {
+    set_size(window, size);
+    let _ = window.set_position(tauri::Position::Physical(pos));
+}
+
+/// Whether Settings offers "Meter stays fixed at": where the meter places its
+/// own windows (XWayland), or KWin keeps the edge (KDE Wayland, the script
+/// running). Not in an X11 session, nor on native Wayland elsewhere.
+pub fn meter_anchor_available() -> bool {
+    places_own_windows() || super::focus::kwin_places_windows()
+}
+
 /// Unpin a tool window's size so the window manager can resize it, down to
 /// `min` logical pixels. Window managers tile on a move, not on a resize, so
 /// this is safe for the length of a resize; `set_size` pins it again after.
@@ -472,4 +587,57 @@ pub fn tray_supported() -> bool {
         // SAFETY: loading runs the library's initialisers only, as the
         // tray's own loading would.
         .any(|name| unsafe { libloading::Library::new(name) }.is_ok())
+}
+
+/// The open windows of each process group (`ProcessGroup`) and their WebKit
+/// views: a new window of the group is related to one of them.
+struct GroupView(String, webkit2gtk::WebView);
+// SAFETY: as Tauri's own `WebviewAttributes` holding a related view: the
+// view only travels in a builder to the GTK thread, which uses it there;
+// elsewhere it is only cloned and dropped (GObject reference counting is
+// thread-safe), and the list's reference goes on the GTK thread (`joined`).
+unsafe impl Send for GroupView {}
+
+static GROUP_VIEWS: std::sync::Mutex<[Vec<GroupView>; 2]> = std::sync::Mutex::new([Vec::new(), Vec::new()]);
+
+fn group_slot(group: crate::platform::ProcessGroup) -> usize {
+    match group {
+        crate::platform::ProcessGroup::Meter => 0,
+        crate::platform::ProcessGroup::Plugins => 1,
+    }
+}
+
+/// A new window's page in its group's web process. WebKitGTK gives every
+/// view its own process, each holding some 70-110 MB of its own on top of
+/// the libraries every process maps, so each plugin widget cost a process:
+/// a player with five plugins saw 1.1 GiB (2.0.81). Related views share one.
+pub fn share_process<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'a, R, M>,
+    group: crate::platform::ProcessGroup,
+) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    let view = GROUP_VIEWS.lock().unwrap_or_else(|p| p.into_inner())[group_slot(group)].first().map(|v| v.1.clone());
+    match view {
+        Some(view) => builder.with_related_view(view),
+        None => builder,
+    }
+}
+
+/// A window of the group built: later windows of the group may share its
+/// process, until it closes.
+pub fn joined(window: &tauri::WebviewWindow, group: crate::platform::ProcessGroup) {
+    let slot = group_slot(group);
+    let label = window.label().to_string();
+    let _ = window.with_webview(move |webview| {
+        let view = webview.inner();
+        let mut views = GROUP_VIEWS.lock().unwrap_or_else(|p| p.into_inner());
+        if !views[slot].iter().any(|v| v.0 == label) {
+            views[slot].push(GroupView(label, view));
+        }
+    });
+    let label = window.label().to_string();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            GROUP_VIEWS.lock().unwrap_or_else(|p| p.into_inner())[slot].retain(|v| v.0 != label);
+        }
+    });
 }

@@ -7,6 +7,14 @@ fn hwnd_of(window: &tauri::WebviewWindow) -> Option<HWND> {
     window.hwnd().ok().map(|h| HWND(h.0))
 }
 
+/// Whether the window is on screen, as Windows has it. tao's own idea can be
+/// stale: `hide_without_focus` hides a window behind its back, and tao shows
+/// it again on its next style change (`set_ignore_cursor_events`), so a
+/// hidden window's cursor setting is left alone (see `widget_click_through`).
+fn shown(window: &tauri::WebviewWindow) -> bool {
+    hwnd_of(window).is_some_and(|hwnd| unsafe { IsWindowVisible(hwnd) }.as_bool())
+}
+
 /// Where the mouse pointer is, in physical screen pixels. The click-through
 /// lock uses it to keep its own button clickable.
 pub fn cursor_position() -> Option<(i32, i32)> {
@@ -23,6 +31,24 @@ pub fn start_drag(window: &tauri::WebviewWindow) {
         let _ = ReleaseCapture();
         const HTCAPTION: usize = 2;
         let _ = PostMessageW(Some(hwnd), WM_NCLBUTTONDOWN, WPARAM(HTCAPTION), LPARAM(0));
+    }
+}
+
+/// A tool window already open but behind others (or minimised), brought in
+/// front of them all when its button is clicked again. Windows refuses the
+/// front to a program that isn't in front (the overlay never is: it takes no
+/// focus), so it is raised, not activated: on top, the game keeping the
+/// keyboard. `set_focus` alone left it where it was.
+pub fn bring_forward(window: &tauri::WebviewWindow) {
+    let Some(hwnd) = hwnd_of(window) else { return };
+    unsafe {
+        let shown = if IsIconic(hwnd).as_bool() { SW_SHOWNOACTIVATE } else { SW_SHOWNA };
+        let _ = ShowWindow(hwnd, shown);
+        let _ = SetWindowPos(
+            hwnd, Some(HWND_TOPMOST),
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
 
@@ -144,6 +170,49 @@ pub fn set_size(window: &tauri::WebviewWindow, size: tauri::Size) {
     let _ = window.set_size(size);
 }
 
+/// Size and move a window in one `SetWindowPos` (`meter_anchor::resize`), so
+/// no frame is drawn grown the wrong way.
+pub fn set_size_and_position(window: &tauri::WebviewWindow, size: tauri::Size, pos: tauri::PhysicalPosition<i32>) {
+    let Some(hwnd) = hwnd_of(window) else {
+        let _ = window.set_size(size);
+        let _ = window.set_position(tauri::Position::Physical(pos));
+        return;
+    };
+    let Some(physical) = crate::platform::meter_anchor::physical_size(window, &size) else {
+        let _ = window.set_size(size);
+        let _ = window.set_position(tauri::Position::Physical(pos));
+        return;
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            pos.x,
+            pos.y,
+            physical.width as i32,
+            physical.height as i32,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// The edge the overlay keeps: the meter moves it itself here
+/// (`meter_anchor::resize`), KWin only on KDE Wayland.
+pub fn set_main_anchor(_anchor: crate::platform::meter_anchor::Anchor) {}
+
+/// Whether the overlay's next resize keeps its edge: for KWin on KDE Wayland
+/// only; here `resize_window` moves it itself.
+pub async fn anchor_next_resize(_anchored: bool) {}
+
+/// Whether Settings offers "Meter stays fixed at": always here, where the
+/// meter places its own windows.
+pub fn meter_anchor_available() -> bool {
+    true
+}
+
+/// Linux only: there tao's edge band and the pinned size need it.
+pub fn resizable_edges(_window: &tauri::WebviewWindow, _min: tauri::LogicalSize<f64>) {}
+
 pub fn release_size(_window: &tauri::WebviewWindow, _min: tauri::LogicalSize<f64>) {}
 
 pub fn primary_button_down() -> Option<bool> {
@@ -198,7 +267,10 @@ pub fn widget_click_through(window: &tauri::WebviewWindow, ignore: bool, keep: O
                 watched.remove(&label);
                 settled().lock().unwrap_or_else(|p| p.into_inner()).insert(label, ignore);
             }
-            let _ = window.set_ignore_cursor_events(ignore);
+            // Hidden: set when it is shown again (`relock`).
+            if shown(window) {
+                let _ = window.set_ignore_cursor_events(ignore);
+            }
         }
     }
     true
@@ -254,6 +326,11 @@ fn watch_widgets() {
             watched.iter().map(|(label, (window, parts, through))| (label.clone(), window.clone(), parts.clone(), *through)).collect()
         };
         for (label, window, parts, through) in snapshot {
+            // A widget its plugin closed (hidden): the pointer passing over
+            // where it was brought it back (Death Recap's popup, 2026-10-28).
+            if !shown(&window) {
+                continue;
+            }
             let Ok(origin) = window.inner_position() else {
                 watched().lock().unwrap_or_else(|p| p.into_inner()).remove(&label);
                 continue;
@@ -326,3 +403,15 @@ pub fn tray_supported() -> bool {
 pub fn click_through_by_region() -> bool {
     false
 }
+
+/// Linux only (see the Linux version). WebView2 has no related views: its
+/// browser and GPU processes are shared, and Chromium decides the renderers.
+pub fn share_process<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'a, R, M>,
+    _group: crate::platform::ProcessGroup,
+) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    builder
+}
+
+/// Linux only (see the Linux version).
+pub fn joined(_window: &tauri::WebviewWindow, _group: crate::platform::ProcessGroup) {}

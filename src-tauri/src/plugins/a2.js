@@ -10,10 +10,40 @@
 //                                              when the meter read it (unix ms), or null on meters
 //                                              that don't say
 //   a2.on("character", (c) => ...)             your character (name, serverId, class, level), at start and
-//                                              whenever it changes (meter 2.0.65 on)
+//                                              whenever it changes (meter 2.0.65 on); meter 2.0.78 on
+//                                              also combatPower, gearScore, odyleEnergy ({ basic,
+//                                              charged }) and contentCounts ({ "<entry id>": [first,
+//                                              second] }: 1 Shugo keys, 4 Nightmare, 8 Invasion,
+//                                              101 Daily Dungeon, 60000001 Odyle energy (as in
+//                                              odyleEnergy), 80000001 Ascension Trial; 0 Daily Duty
+//                                              today [completed, taken]; other ids may change meaning
+//                                              or go: don't rely on them), each null until the game has
+//                                              said. A meter started mid-session has only the counts
+//                                              that changed since, until the next login or server
+//                                              transfer. Also shopLimits ({ "<item id>": [bought, next
+//                                              reset ms] }: 100134 Buy Odyle Energy, 100135 Buy Rift
+//                                              Stones; [0, null] once its reset has passed, until the
+//                                              shop opens again) once the shop has opened, crafts ({
+//                                              "<recipe id>": made }: 32070001 Odyle Energy
+//                                              server-wide, 32070002 per character) once the crafting
+//                                              window has opened, kinahToday (Kinah gained today) and
+//                                              abyssPoints ([this week, the week's limit]) from login,
+//                                              0 once the daily reset (07:00 UTC) or the weekly
+//                                              (Wednesday) has passed, and contentTimes ({ "<entry
+//                                              id>": [time, seen at ms] }: 10000001-10000003 the Abyss
+//                                              passages' usage time left (ms), gone once used; the time
+//                                              as the game last sent it)
 //   a2.on("bossMap", ({ map, bosses }) => ...) a map the player just opened, its field bosses as
 //                                              a2.bossTimers gives them (permission
 //                                              "feed:boss-timers", meter 2.0.65 on)
+//   a2.on("deathRecap", (r) => ...)            a player killed you (permission "events:death-recap", meter
+//                                              2.0.81 on): r = { at, killer: { name, serverId, legion,
+//                                              class ("gladiator", ...), level, gearScore, combatPower },
+//                                              damage, hits, durationMs, dps, skills: [{ id, name, damage,
+//                                              hits }], assists: [{ name, legion, serverId, class, level, gearScore,
+//                                              combatPower, damage, hits }] (the others who damaged you
+//                                              in the fight, your party never) }, null where the game
+//                                              did not say. Once each, kept like a decoder's events
 //   a2.on("game", ({ running }) => ...)        whether AION2 is open, at start and on change
 //                                              (meter 2.0.65 on)
 //   a2.on("ping", ({ ms }) => ...)             the ping to the game server in ms (null while not known),
@@ -42,6 +72,18 @@
 //                                              { type: "boss", server, boss, entry } on each change (an
 //                                              entry as a2.bossTimers gives it), or
 //                                              { type: "status", server, connected }; [] stops
+//   await a2.watchFps(true)                    the game's frame rate (permission "fps", meter 2.0.78 on):
+//                                              comes about every second as a2.on("fps", (f) => ...), f
+//                                              being { fps, state }: state "ok" (fps a number), "noGame",
+//                                              "needsAdmin" (Windows: the meter must run as administrator)
+//                                              or "unsupported"; resolves to the reading now; false stops
+//   await a2.fpsAdmin()                        ask the player to run the meter as administrator for the
+//                                              frame rate (permission "fps"): the meter's prompt, then
+//                                              Windows'; yes restarts the meter elevated (and it stays so)
+//   await a2.screenshot({ x, y, width, height })  part of its page (CSS px; none: all of it) to the
+//                                              clipboard and a PNG in the meter's screenshot folder
+//                                              (permission "screenshot", meter 2.0.81 on): { clipboard,
+//                                              file } (file null if not saved)
 //   a2.window.show() / a2.window.hide()        its own window, shown on top without taking focus
 //   a2.window.fit(height) / a2.window.fit()    the window fitted to that much content (an alert),
 //                                              its title bar hidden; then back to its size and
@@ -170,6 +212,10 @@
     // Meter 2.0.72 on: the server's Abyss siege (artifact holders, cores).
     abyssSiege: (server) => call("abyssSiege", [Number(server)]),
     followBosses: (server, bosses) => call("bossTimers.follow", [Number(server), (bosses || []).map(String)]),
+    // Meter 2.0.78 on: the game's frame rate.
+    watchFps: (on) => call("fps.watch", [on !== false]),
+    screenshot: (rect) => call("screenshot", [rect || {}]),
+    fpsAdmin: () => call("fps.admin", []),
     window: Object.freeze({
       show: () => call("window.show", []),
       hide: () => call("window.hide", []),

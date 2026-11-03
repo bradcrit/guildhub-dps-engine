@@ -37,6 +37,7 @@ The **[AION 2 DPS Meter website, a2tools.app](https://a2tools.app)** has the dow
 - Ten languages: English, Korean, Chinese (Traditional and Simplified), Japanese, German, French, Spanish, Portuguese and Russian
 - Always-on-top transparent overlay
 - Themes and customization
+- Meter anchor setting (Top, Centre, Bottom)
 - Stream overlay for OBS on another PC: add the meter as a Browser Source, and choose the name shown for you
 - Fight uploads to [a2tools.app](https://a2tools.app/logs): a link to share, leaderboards and class stats
 - Windows and Linux ([Linux guide](docs/linux.md))

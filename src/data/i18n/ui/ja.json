@@ -4,20 +4,43 @@
     "display": {
       "dps": "DPS",
       "total": "ダメージ",
+      "damageReceived": "被ダメ",
       "ariaDps": "DPSを表示中",
       "ariaDamage": "総ダメージを表示中",
-      "both": "両方",
-      "ariaBoth": "DPSと総ダメージを表示中",
+      "ariaDamageReceived": "被ダメージを表示中",
       "hps": "HPS",
       "totalHeal": "HEAL",
       "stagger": "スタン",
       "ariaHps": "秒間回復量を表示中",
       "ariaHeal": "総回復量を表示中",
-      "ariaStagger": "ボスのスタンゲージに与えた量を表示"
+      "ariaStagger": "ボスのスタンゲージに与えた量を表示",
+      "names": {
+        "dps": "秒間ダメージ",
+        "totalDamage": "総ダメージ",
+        "damageReceived": "被ダメージ",
+        "hps": "秒間回復量",
+        "totalHeal": "総回復量",
+        "stagger": "スタン",
+        "bossStagger": "ボスのスタン %",
+        "statColours": "項目の色分け",
+        "deaths": "死亡回数"
+      },
+      "sortBy": "この項目で並べ替え",
+      "menuTip": "行に表示する項目を選びます。ホイールまたは右クリック：次の項目",
+      "bossStaggerTip": "ボスのスタンゲージの減り具合をHPバーに表示します",
+      "sortCol": "並べ替え",
+      "showCol": "表示",
+      "statColoursTip": "各項目を行・メニュー・ボタンでそれぞれの色で表示します"
     },
     "updates": {
       "meter": "A2Tools DPS Meter {version} にアップデートできます",
       "plugins": "プラグインのアップデート: {list}"
+    },
+    "targetMode": {
+      "lastHitByMe": "最後に攻撃した敵",
+      "bossTargets": "ボスのみ",
+      "trainTargets": "訓練用カカシ",
+      "allTargets": "すべての敵の合計"
     }
   },
   "details": {
@@ -229,7 +252,12 @@
     },
     "hpsChart": "秒間回復量",
     "sectionChart": "グラフ",
-    "showSections": "表示する項目"
+    "showSections": "表示する項目",
+    "hoverTooltip": {
+      "loading": "読み込み中...",
+      "empty": "この戦闘のスキルデータはありません",
+      "error": "スキルを読み込めませんでした"
+    }
   },
   "history": {
     "title": "戦闘履歴",
@@ -248,12 +276,62 @@
     "viewDungeon": "ダンジョン別",
     "viewGrouped": "ボスごとにまとめる",
     "fightCount": "{n} 戦",
+    "best": "最速 {time}",
+    "top": "最大 {damage}",
+    "showAll": "全{n}件を表示",
+    "showFewer": "折りたたむ",
+    "expandAll": "すべて展開",
+    "collapseAll": "すべて折りたたむ",
+    "training": "訓練",
     "fightCountOne": "1 戦",
     "previewUpload": "アップロードのプレビュー",
     "previewUploadTip": "この戦闘を共有した場合に送信される内容を書き出します。送信はされません。",
     "previewWorking": "プレビューを作成中…",
     "previewDone": "{slice} KB を書き出しました（圧縮後 {sent} KB — 実際に送信されるサイズ）。{seen} 個中 {kept} 個のパケットを保持し、{blinded} 件の名前を伏せました。何もアップロードされていません。保存先: {dir}",
-    "openWorld": "フィールド"
+    "openWorld": "フィールド",
+    "tabFights": "戦闘",
+    "tabBests": "自己ベスト",
+    "search": "ボスまたはダンジョン…",
+    "allCharacters": "すべてのキャラクター",
+    "allDifficulties": "すべての難易度",
+    "periodAll": "全期間",
+    "periodToday": "直近24時間",
+    "period7": "直近7日",
+    "period30": "直近30日",
+    "sort": "並べ替え",
+    "sortNewest": "新しい順",
+    "sortFastest": "最速討伐",
+    "sortPartyDps": "パーティーDPS",
+    "sortMyDps": "自分のDPS",
+    "sortRecent": "新しい順",
+    "sortTier": "ダンジョン階層順",
+    "killsOnly": "討伐のみ",
+    "wipe": "全滅",
+    "pb": "ベスト",
+    "pbTip": "自己ベストのひとつ",
+    "party": "パーティー",
+    "you": "自分",
+    "totalDamage": "総ダメージ",
+    "finalBoss": "最終ボス",
+    "fightGone": "この戦闘はもう保存されていませんが、記録は残っています。",
+    "unconfirmedTip": "討伐が記録されていません（2.0.87より前の戦闘）。与えたダメージから判断しています。",
+    "openBest": "この戦闘を開く",
+    "killOne": "討伐 1回",
+    "wipeOne": "全滅 1回",
+    "kills": "討伐 {n}回",
+    "wipes": "全滅 {n}回",
+    "otherBosses": "ほかのボス（{n}）",
+    "otherLevels": "ほかのレベル（{n}）",
+    "noBests": "まだダンジョンの討伐はありません。",
+    "encounter": "対象",
+    "fastestKill": "最速討伐",
+    "yourBest": "自分のベストDPS",
+    "partyBest": "パーティーのベスト",
+    "uploadTip": "この戦闘を a2tools.app にアップロードして共有リンクを取得",
+    "uploadOpen": "この戦闘のログを a2tools.app で開く",
+    "uploadWorking": "アップロード中…",
+    "uploadDonePublic": "アップロードしました。リンクをコピーしました: {url}",
+    "uploadDonePrivate": "非公開でアップロードしました。リンクをコピーしました: {url}"
   },
   "settings": {
     "title": "設定",
@@ -302,22 +380,23 @@
     "showOdyle": "オードエネルギーを表示",
     "odyleEnergy": "オードエネルギー",
     "showTtk": "撃破時間の予測を表示",
-    "showHealModes": "DPS/DMGボタンに回復量を含める",
-    "showStaggerMode": "DPS/DMGボタンにスタン値を含める",
     "showTotalDps": "パーティ合計を表示",
     "roundDps": "DPSを千単位で表示 (13k)",
     "showDpsSuffix": "DPSに /s を付ける",
     "autoHideMeter": "AION2が非アクティブのとき隠す",
     "hideWhenGameClosed": "AION2が閉じているときは隠す",
     "hideWhenSolo": "パーティー中のみ表示",
+    "hideOutOfCombat": {
+      "label": "戦闘外で隠す",
+      "off": "オフ",
+      "seconds": "{seconds}秒後"
+    },
     "showSuspendBtn": "キャプチャ一時停止ボタンを表示",
     "showLockBtn": "クリック透過ロックボタンを表示",
     "playerLimit": {
       "label": "表示する最大プレイヤー数"
     },
     "partyPresence": "パーティーのA2Tools利用者を表示",
-    "shareBossTimers": "フィールドボスのタイマーを共有",
-    "shareSupplyRequests": "補給依頼を共有",
     "debugLogging": "デバッグログ",
     "quit": "終了",
     "discord": {
@@ -529,15 +608,25 @@
       "codeHint": "ページはすでに開いているはずです。コードは10分で期限切れになります。",
       "working": "承認を待っています…",
       "failed": "サインインに失敗しました: {error}",
-      "supporter": "サポーター"
+      "supporter": "サポーター",
+      "guestUpload": "アカウントなしでボス戦をアップロード",
+      "guestUploadHint": "ボス戦が終わると、アカウントなしで公開としてa2tools.appにアップロードされます。他のプレイヤーは伏せられます。あとでログインすると、このPCからアップロードした戦闘はあなたのものになります。",
+      "guestClaimHint": "このPCからアップロードした戦闘は保管されています。ここでログインして自分のものにするか、コードを取得して別の端末から引き継げます。",
+      "guestClaimButton": "引き継ぎコードを取得",
+      "guestClaimCode": "ログインした状態で {url} に {code} を入力してください。コードは15分で無効になります。",
+      "claimed": "このPCからアップロードした {count} 件の戦闘があなたのものになりました。",
+      "autoUpload": "ボス戦を自動でアップロード",
+      "autoUploadHint": "ボス戦が終わると、a2tools.app で選んだ公開範囲でアカウントにアップロードされます。他のプレイヤーは伏せられます。訓練用人形との戦闘はアップロードされません。"
     },
     "sendLogs": {
-      "hint": "不具合報告のため、最新のパケットログ3件を開発者に送ります。",
+      "hint": "デバッグログと最新のパケットログ（合計3ファイル）を、不具合報告として開発者に送信します。",
       "button": "開発者にログを送る",
-      "confirm": "最新のパケットログ3件を A2 Tools の開発者に送りますか？\n\nパケットログは、パケット記録をオンにしていた間のゲーム通信そのもので、キャラクター名が含まれます。開くことができるのは開発者だけで、30日後に削除されます。",
+      "confirm": "デバッグログと最新のパケットログをA2 Toolsの開発者に送信しますか？\n\nデバッグログにはメーターの動作が記録されています。パケットログは、パケットログがオンの間に記録されたゲームの生の通信です。どちらにもキャラクター名が含まれる場合があります。開けるのは開発者だけで、30日後に削除されます。",
       "sending": "送信中...",
       "sent": "送信しました。報告コードは {code} です。Discord で開発者に伝えてください。",
-      "failed": "送信できませんでした: {error}"
+      "failed": "送信できませんでした: {error}",
+      "files": "送信されるファイル：",
+      "contents": "パケットログにはチャットや他のプレイヤーの名前が含まれることがあります。"
     },
     "barGap": {
       "label": "バーの間隔"
@@ -554,8 +643,6 @@
       "autoHideMeter": "別のウィンドウがゲームの前にあるとメーターが消え、ゲームに戻ると再び表示されます。",
       "detailsMonitor": "選んだディスプレイで詳細ウィンドウを開き、そこに表示し続けます。",
       "showTtk": "戦闘タイマーの横に、ボス戦全体にかかる時間の予測を表示します。",
-      "showHealModes": "メーターのDPS/DMGボタンで、秒間回復量と総回復量にも切り替えられます。",
-      "showStaggerMode": "メーターのDPS/DMGボタンで、各プレイヤーがボスのスタンゲージを削った量も表示できます。",
       "showTotalDps": "行の下に、パーティ全体のDPSとダメージを示すバーを表示します。",
       "roundDps": "13,412 は 13k と表示されます。",
       "showSuspendBtn": "押すとゲーム通信の読み取りを止め、もう一度押すと再開するボタンをメーターに表示します。",
@@ -572,8 +659,6 @@
       "allTargetsWindow": "全ターゲットモードで、最後のヒットからこの時間内に攻撃したすべての対象を合計します。",
       "updateRate": "メーターの数値を更新する間隔です。速いほどダメージが早く表示されますが、CPU 使用量が増えます。",
       "partyPresence": "A2Toolsを使うパーティーメンバーにはあなたの名前の横に小さなA2タグが見え、あなたにも相手のタグが見えます。A2Toolsを使うパーティーメンバーなら誰でも見えるため、外部メーターを使っていることが分かります。送るのはキャラクター名とサーバーのハッシュだけです。",
-      "shareBossTimers": "a2tools.app（と提携サイト Aion 2 Timers）を通じてフィールドボスのタイマーを他のプレイヤーと共有します：マップを開いたときのボスと、討伐を見たフィールドボスと、戦闘中のボスのHP。送信するのはサーバー、ボス、時刻、HPだけです。",
-      "shareSupplyRequests": "サーバーの補給依頼の掲示板が変わったとき（リセット後）、a2tools.app の Profiteer と共有します。送るのはサーバー、掲示板と依頼だけで、キャラクターや進行状況は送りません。",
       "debugLogging": "開発者が問題を調べるための診断ログを書き出します。",
       "saveRawPackets": "バグ報告用にゲームの生の通信を記録します。デバッグログも一緒にオンになります。",
       "globalHotkeys": "下のキーはゲームが前面にあるときも使えます。オフにすると、ほかのプログラムがこれらのキーを使えます。Linux ではデスクトップがキーを登録し、承認を求めることがあります。",
@@ -581,7 +666,12 @@
       "showMeter": "オフ：プラグインだけが表示されます。メーターはバックグラウンドで戦闘の記録とアップロードを続けます。ここ、表示/非表示のホットキー、またはプラグインウィンドウのメーターボタンで元に戻せます。",
       "clearOnZone": "ゾーンが変わったあと、最後の戦闘をメーターから消すタイミング。どの戦闘も履歴には残ります。",
       "hideWhenGameClosed": "ゲームが起動していない間はメーターを隠し、起動すると再び表示します。",
-      "hideWhenSolo": "パーティーに入っていない間はメーターを隠し、パーティーに参加すると再び表示します。表示/非表示のキー設定でいつでも表示できます。"
+      "hideWhenSolo": "パーティーに入っていない間はメーターを隠し、パーティーに参加すると再び表示します。表示/非表示のキー設定でいつでも表示できます。",
+      "hideOutOfCombat": "戦闘が終わってこの時間が経つとメーターを隠し、次の攻撃で再び表示します。設定・履歴・詳細ウィンドウが開いている間や、マウスがメーターの上にある間は隠しません。",
+      "runAsAdmin": "ゲームのフレームレートを表示するのに必要です。メーターを起動するたびにWindowsが確認します。",
+      "shareData": "サーバーのフィールドボスのタイマーと補給依頼をa2tools.appと共有し、みんなのA2Toolsを最新に保ちます。マップ上のボス、倒されるのを見たボスとそのHP、リセット後の依頼ボードが送られます。キャラクターの情報は送られません。",
+      "pluginAutoUpdate": "メーターの起動時に、プラグインの更新がバックグラウンドで自動的にインストールされます。新しい権限を求める更新は、引き続き確認を待ちます。",
+      "meterAnchor": "行が増減しても動かないメーターの端です。"
     },
     "globalHotkeys": "キー操作を使う",
     "hotkeyConsent": {
@@ -619,6 +709,7 @@
       "install": "インストール",
       "update": "更新",
       "updateTo": "{version} に更新",
+      "downloading": "ダウンロード中…",
       "installing": "インストール中…",
       "installDone": "{name} {version} をインストールしました。",
       "updatesAvailable": "アップデートがあります: {list}",
@@ -628,6 +719,7 @@
       "consentUpdateTitle": "{name} を更新しますか？",
       "consentIntro": "このプラグインができること:",
       "consentNew": "新しいバージョンは次も求めています:",
+      "consentNetwork": "ウェブページと同じく、プラグインもインターネットに接続できる場合があります。",
       "consentCancel": "キャンセル",
       "permStorage": "このPCに自身のデータを保存する",
       "permNotify": "自身のウィンドウに短いメッセージを表示する",
@@ -635,17 +727,24 @@
       "permWidgets": "移動・固定できる小さな専用ウィンドウを表示",
       "permBossTimers": "a2tools.app でプレイヤーが共有するフィールドボスのタイマーを読む",
       "permCharacter": "キャラクターの名前・サーバー・クラス・レベルを見る",
-      "permDecoder": "自分のゲームデータを読む: {name}",
+      "permDecoder": "選択したゲームデータを読む（他のプレイヤーの情報を含む場合があります）: {name}",
       "permNone": "ウィンドウを表示する以外のことはしません",
       "enabled": "有効",
       "enabledTip": "オン：メーターと一緒に起動します。オフ：インストールされたままですが、動作しません。",
-      "showMeter": "DPSメーターを表示",
+      "showMeter": "メーターを表示",
       "hideClosed": "AION2が閉じているときは隠す",
       "hideUnfocused": "AION2が非アクティブのとき隠す",
       "inDock": "プラグインドックに入れる（オフ：専用ウィンドウ）",
       "search": "検索",
       "noMatch": "一致するプラグインはありません。",
-      "permsTitle": "できること:"
+      "permsTitle": "できること:",
+      "permFps": "ゲームのフレームレートを表示する（Windowsでは、そのためにメーターが管理者としての実行を求めます）",
+      "permDeathRecap": "プレイヤーに倒された後：相手が誰か、あなたに与えたダメージ",
+      "permScreenshot": "自分のウィンドウのスクリーンショットを撮る（クリップボードとスクリーンショットのフォルダーへ）",
+      "testHint": "誰でも試せる初期版で、ほかと同じく署名されています。変更されたり、粗い部分があったりするかもしれません。気づいたことを教えてください。",
+      "testTitle": "テスト用プラグイン",
+      "autoUpdate": "プラグインを自動で更新",
+      "whatsNew": "{version} の新機能"
     },
     "clearOnZone": {
       "label": "メーターをクリア",
@@ -653,6 +752,18 @@
         "instance": "ダンジョンへの出入り時",
         "any": "ゾーンが変わるたび",
         "never": "しない（最後の戦闘を残す）"
+      }
+    },
+    "runAsAdmin": "管理者として実行",
+    "runAsAdminTitle": "A2Tools - 管理者として実行",
+    "runAsAdminAsk": "ゲームのフレームレートを表示するには、メーターを管理者として実行する必要があります。\n\n今すぐメーターを管理者として再起動しますか？ メーターを起動するたびにWindowsが確認します。設定からオフにできます。",
+    "shareData": "役立つデータをA2Toolsと同期",
+    "meterAnchor": {
+      "label": "メーターの固定位置",
+      "options": {
+        "top": "上",
+        "middle": "中央",
+        "bottom": "下"
       }
     }
   },
@@ -680,7 +791,12 @@
       "btc": "BTCアドレスをコピー",
       "eth": "ETHアドレスをコピー",
       "usdc": "USDCアドレスをコピー"
-    }
+    },
+    "sponsorLabel": "広告",
+    "sponsorShort": "ExitLagでPingを下げる",
+    "sponsorCode": "コード",
+    "sponsorDisclosure": "アフィリエイトリンクです。ご登録いただくとA2 Toolsに手数料が入り、ツールの無料提供に役立ちます。",
+    "more": "a2tools.appでほかの寄付方法を見る"
   },
   "battleTime": {
     "analysing": "監視中",
@@ -694,7 +810,8 @@
     "identifyingPlayer": "#{id}",
     "a2toolsUser": "A2Toolsを使用中",
     "dpsSuffix": "/s",
-    "others": "その他"
+    "others": "その他",
+    "deaths": "この戦闘で{count}回死亡"
   },
   "skills": {
     "fallback": "スキル {code}",
@@ -772,7 +889,9 @@
     "hint": "他のプレイヤーの名前は伏せられ、カカシとの戦闘はアップロードされません。設定からいつでも変更できます。",
     "signIn": "ログイン",
     "later": "後で",
-    "close": "閉じる"
+    "close": "閉じる",
+    "guest": "アカウントなしで",
+    "guestHint": "アカウントがなくても戦闘をアップロードできます。あとでログインすると、あなたのものになります。"
   },
   "npcapPrompt": {
     "ask": "A2Tools DPS Meter がゲームの通信を読み取るには Npcap が必要ですが、Npcap が見つからないか動作していません。\n\n今すぐインストールしますか？メーターが npcap.com から Npcap のインストーラーをダウンロードして開きます。Npcap がインストールされると、メーターは自動でキャプチャを始めます。\n\n自分でインストールする場合は「いいえ」を選び、https://npcap.com/#download からインストールしてください。",
@@ -803,5 +922,55 @@
     "settings": "メーターの設定",
     "opacity": "背景の不透明度",
     "failed": "このプラグインを起動できませんでした: {error}"
+  },
+  "sharing": {
+    "title": "ランキング作りに参加しますか？",
+    "sub": "どちらかを選んで始めてください。設定 → プライバシーでいつでも変更できます。",
+    "shareTitle": "匿名で戦闘を共有",
+    "recommended": "おすすめ",
+    "shareText": "ボス戦が、すべての名前を伏せた状態で a2tools.app の公開ログに載ります。アカウントは不要です。",
+    "noTitle": "共有しない",
+    "noText": "戦闘に関する情報はこのPCの外に出ません。",
+    "signInBefore": "自分の名前で戦闘を載せたいですか？",
+    "signIn": "A2 Tools でサインイン",
+    "signInAfter": "それまでに共有した戦闘はアカウントに移ります。",
+    "previewTitle": "共有した戦闘の a2tools.app での見え方",
+    "never": "PCの名前とキャラクターのフルネームは送信されません。",
+    "policy": "プライバシーポリシー",
+    "continue": "続ける"
+  },
+  "sharingNotice": {
+    "title": "あなたの戦闘がランキング作りに役立っています",
+    "text": "終えたボス戦は、あなたの名前も含めすべての名前を伏せて（例：Na***a）a2tools.app に共有されます。アカウントは不要で、設定 → プライバシーでいつでも止められます。",
+    "stop": "共有をやめる",
+    "details": "詳細",
+    "keep": "共有を続ける",
+    "stopped": "共有を停止しました。これまでに共有した戦闘は a2tools.app から削除されています。"
+  },
+  "privacy": {
+    "title": "プライバシー",
+    "intro": "このメーターが a2tools.app と共有するもの。どれも自分で選べます。",
+    "share": "匿名でボス戦を共有",
+    "shareHint": "ボス戦が終わると a2tools.app の公開ログとランキングに載ります。あなたの名前も含め、すべての名前が伏せられます。アカウントは不要です。",
+    "signedIn": "サインイン中：ボス戦は A2 Tools アカウントにアップロードされます（A2 Tools アカウントを参照）。",
+    "never": "送信しないもの：チャット、PCの名前、キャラクターのフルネーム。開発者にログを送信（詳細設定）は押したときだけログを送ります。",
+    "policy": "プライバシーポリシー全文"
+  },
+  "changelog": {
+    "title": "新着情報",
+    "intro": "最新のリリースを新しい順に表示します。",
+    "allReleases": "GitHub ですべてのリリースを見る",
+    "installed": "インストール済み",
+    "available": "アップデートあり",
+    "loading": "リリースノートを読み込み中…",
+    "none": "リリースノートはまだありません。",
+    "failed": "リリースノートを読み込めませんでした。下の GitHub でも見られます。"
+  },
+  "footerMenu": {
+    "tip": "フッターに表示する項目を選びます",
+    "ttk": "撃破時間の予測",
+    "partyTotal": "パーティ合計",
+    "odyle": "オードエネルギー",
+    "ping": "ping"
   }
 }

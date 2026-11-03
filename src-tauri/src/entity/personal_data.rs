@@ -46,9 +46,9 @@ pub struct PersonalData {
     /// rest is overheal.
     #[serde(default)]
     pub effective_heal: f64,
-    /// Damage the player took in the fight's window (the shown targets' fights).
+    /// Damage received during the shown fight, for the meter's Damage taken mode.
     #[serde(default)]
-    pub damage_received: f64,
+    pub damage_received: i64,
     /// Stagger taken off the shown targets' gauges in the fight
     /// (`combat::stagger`), for the meter's Stagger mode.
     #[serde(default)]
@@ -58,6 +58,14 @@ pub struct PersonalData {
     /// out when there is none.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub stagger_skills: HashMap<i32, i64>,
+    /// Times this player died in the fight, a badge after the name when
+    /// above 0. Left out when 0, as nearly every row is.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub deaths: i32,
+}
+
+fn is_zero(n: &i32) -> bool {
+    *n == 0
 }
 
 impl PersonalData {
@@ -77,9 +85,10 @@ impl PersonalData {
             hps: 0.0,
             heal_amount: 0.0,
             effective_heal: 0.0,
-            damage_received: 0.0,
+            damage_received: 0,
             stagger: 0,
             stagger_skills: HashMap::new(),
+            deaths: 0,
         }
     }
 
@@ -99,9 +108,10 @@ impl PersonalData {
             hps: 0.0,
             heal_amount: 0.0,
             effective_heal: 0.0,
-            damage_received: 0.0,
+            damage_received: 0,
             stagger: 0,
             stagger_skills: HashMap::new(),
+            deaths: 0,
         }
     }
 

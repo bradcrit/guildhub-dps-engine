@@ -125,10 +125,23 @@ mod tests {
             .with_writer(move || writer.clone())
             .finish();
         let dir = directory("warning");
-        tracing::subscriber::with_default(subscriber, || {
-            assert!(write(&dir.join("missing/settings.json"), b"private setting value").is_err());
-        });
-        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        // Another test failing a write at the same moment, on a thread with no
+        // subscriber, can cache this warning as unwanted between our asking
+        // again and our write, so it goes unlogged now and then (CI,
+        // 2026-10-26 and 10-28): try again then, a few times.
+        let mut logged = String::new();
+        for _ in 0..5 {
+            output.lock().unwrap().clear();
+            tracing::dispatcher::with_default(&dispatch, || {
+                tracing::callsite::rebuild_interest_cache();
+                assert!(write(&dir.join("missing/settings.json"), b"private setting value").is_err());
+            });
+            logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+            if !logged.is_empty() {
+                break;
+            }
+        }
         assert_eq!(logged.matches("Could not atomically write").count(), 1);
         assert!(logged.contains("settings.json"));
         assert!(!logged.contains("private setting value"));

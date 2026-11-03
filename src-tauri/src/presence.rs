@@ -151,7 +151,16 @@ fn run(app: tauri::AppHandle) {
 struct Socket {
     path: PathBuf,
     stream: Option<IpcStream>,
+    /// The crate reads a message as an 8-byte header, then as many bytes as
+    /// the header says: this read is the header.
+    header_next: bool,
 }
+
+/// The longest reply taken from a socket. Discord's are a few KB; anything
+/// can make a socket by that name (`/tmp/discord-ipc-1` on Linux, a pipe on
+/// Windows), and the crate allocates whatever length the header claims, up
+/// to 4 GiB (security audit M9).
+const MAX_REPLY: u32 = 1 << 20;
 
 impl DiscordIpc for Socket {
     fn get_client_id(&self) -> &str {
@@ -161,6 +170,7 @@ impl DiscordIpc for Socket {
     fn connect_ipc(&mut self) -> IpcResult<()> {
         let stream = discord_ipc::connect(&self.path).map_err(|_| IpcError::IPCConnectionFailed)?;
         self.stream = Some(stream);
+        self.header_next = true;
         Ok(())
     }
 
@@ -172,7 +182,17 @@ impl DiscordIpc for Socket {
 
     fn read(&mut self, buffer: &mut [u8]) -> IpcResult<()> {
         let stream = self.stream.as_mut().ok_or(IpcError::NotConnected)?;
-        stream.read_exact(buffer).map_err(IpcError::ReadError)
+        stream.read_exact(buffer).map_err(IpcError::ReadError)?;
+        let header = self.header_next;
+        self.header_next = !header;
+        if header && buffer.len() == 8 {
+            let length = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+            if length > MAX_REPLY {
+                self.stream = None;
+                return Err(IpcError::ReadError(std::io::Error::other(format!("a {length}-byte reply"))));
+            }
+        }
+        Ok(())
     }
 
     fn close(&mut self) -> IpcResult<()> {
@@ -229,7 +249,7 @@ impl Discords {
                 continue;
             }
             let tx = self.done_tx.clone();
-            let mut socket = Socket { path: path.clone(), stream: None };
+            let mut socket = Socket { path: path.clone(), stream: None, header_next: true };
             let spawned = std::thread::Builder::new().name("discord-ipc".into()).spawn(move || {
                 let result = socket.connect().map_err(|e| e.to_string());
                 let _ = tx.send((socket, result));

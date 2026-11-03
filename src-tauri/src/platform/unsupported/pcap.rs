@@ -17,6 +17,14 @@ pub fn run_installer(_installer: &std::path::Path) -> Result<(), String> {
     Err("packet capture is not supported on this platform yet".into())
 }
 
+/// Load the capture library `name` the usual way.
+///
+/// # Safety
+/// Loading a library runs its initialisation, as `libloading::Library::new`.
+pub unsafe fn load(name: &str) -> Result<libloading::Library, libloading::Error> {
+    unsafe { libloading::Library::new(name) }
+}
+
 pub fn library_available() -> bool {
     false
 }

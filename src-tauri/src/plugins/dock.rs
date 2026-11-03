@@ -152,6 +152,46 @@ pub fn sync(app: &tauri::AppHandle, focus: Option<&str>) {
     }
 }
 
+/// A plugin that showed itself in the dock (an alert, Hidden Cubes' found
+/// cube): how the dock was before, put back when it hides itself again.
+#[derive(Clone, Copy)]
+pub struct Raised {
+    pub dock_was_up: bool,
+    pub tab_was_shown: bool,
+}
+
+fn raised() -> &'static std::sync::Mutex<std::collections::HashMap<String, Raised>> {
+    static RAISED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Raised>>> = std::sync::OnceLock::new();
+    RAISED.get_or_init(Default::default)
+}
+
+/// `id` shows itself: note how the dock was, unless it already showed
+/// itself since (the first time is what to go back to).
+pub fn note_raised(app: &tauri::AppHandle, id: &str) {
+    let dock_was_up = app
+        .get_webview_window(LABEL)
+        .is_some_and(|w| w.is_visible().unwrap_or(false) && !crate::platform::window::is_hidden_in_place(&w));
+    let tab_was_shown = shown_members(app).iter().any(|m| m == id);
+    raised()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(id.to_string())
+        .or_insert(Raised { dock_was_up, tab_was_shown });
+}
+
+/// How the dock was before `id` showed itself, if it did.
+pub fn take_raised(id: &str) -> Option<Raised> {
+    raised().lock().unwrap_or_else(|p| p.into_inner()).remove(id)
+}
+
+/// The dock out of sight, its tabs as they are (shown again as they were).
+pub fn hide_now(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        crate::platform::window::hide_in_place(&window);
+        crate::app::keep_something_on_screen(app, LABEL);
+    }
+}
+
 /// Build the dock window, shown or hidden, where it was left.
 fn build(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
     if app.get_webview_window(LABEL).is_some() {
@@ -159,7 +199,7 @@ fn build(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
     }
     let (w, h) = super::saved_size(app, PLACE_ID).unwrap_or((380.0, 520.0));
     crate::app::note_window_title(TITLE, LABEL);
-    let window = tauri::WebviewWindowBuilder::new(app, LABEL, tauri::WebviewUrl::App("plugin-dock.html".into()))
+    let window = crate::platform::window::share_process(tauri::WebviewWindowBuilder::new(app, LABEL, tauri::WebviewUrl::App("plugin-dock.html".into())), crate::platform::ProcessGroup::Plugins)
         .title(TITLE)
         .inner_size(w, h)
         .min_inner_size(240.0, 120.0)
@@ -173,6 +213,7 @@ fn build(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
         .shadow(false)
         .build()
         .map_err(|e| e.to_string())?;
+    crate::platform::window::joined(&window, crate::platform::ProcessGroup::Plugins);
     if !visible && crate::platform::window::HIDE_AFTER_BUILD {
         crate::platform::window::hide_without_focus(&window);
     }

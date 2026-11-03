@@ -4,20 +4,43 @@
     "display": {
       "dps": "DPS",
       "total": "DAN",
+      "damageReceived": "RECEB",
       "ariaDps": "Mostrando DPS",
       "ariaDamage": "Mostrando dano total",
-      "both": "AMBOS",
-      "ariaBoth": "Mostrando DPS e dano total",
+      "ariaDamageReceived": "Mostrando dano recebido",
       "hps": "HPS",
       "totalHeal": "HEAL",
       "stagger": "ATORD",
       "ariaHps": "Mostrando cura por segundo",
       "ariaHeal": "Mostrando cura total",
-      "ariaStagger": "Mostrando o atordoamento causado à barra do chefe"
+      "ariaStagger": "Mostrando o atordoamento causado à barra do chefe",
+      "names": {
+        "dps": "Dano por segundo",
+        "totalDamage": "Dano total",
+        "damageReceived": "Dano recebido",
+        "hps": "Cura por segundo",
+        "totalHeal": "Cura total",
+        "stagger": "Atordoamento",
+        "bossStagger": "Atordoamento do chefe %",
+        "statColours": "Cores por estatística",
+        "deaths": "Contador de mortes"
+      },
+      "sortBy": "Ordenar por isto",
+      "menuTip": "Escolha o que as linhas mostram. Roda ou clique direito: próxima métrica",
+      "bossStaggerTip": "Quanto da barra de atordoamento do chefe já foi gasta, na barra de vida dele",
+      "sortCol": "Ordem",
+      "showCol": "Mostrar",
+      "statColoursTip": "Cada estatística na sua cor nas linhas, no menu e no botão"
     },
     "updates": {
       "meter": "A2Tools DPS Meter {version} está disponível",
       "plugins": "Atualizações de plugins: {list}"
+    },
+    "targetMode": {
+      "lastHitByMe": "O último inimigo atingido",
+      "bossTargets": "Só chefes",
+      "trainTargets": "Bonecos de treino",
+      "allTargets": "Todos os inimigos, somados"
     }
   },
   "details": {
@@ -229,7 +252,12 @@
     },
     "hpsChart": "Cura por segundo",
     "sectionChart": "Gráfico",
-    "showSections": "Seções visíveis"
+    "showSections": "Seções visíveis",
+    "hoverTooltip": {
+      "loading": "Carregando...",
+      "empty": "Sem dados de habilidades desta luta",
+      "error": "Não foi possível carregar as habilidades"
+    }
   },
   "history": {
     "title": "Histórico de combates",
@@ -248,12 +276,62 @@
     "viewDungeon": "Agrupar por masmorra",
     "viewGrouped": "Agrupar por chefe",
     "fightCount": "{n} combates",
+    "best": "Melhor {time}",
+    "top": "Máx. {damage}",
+    "showAll": "Mostrar todos os {n}",
+    "showFewer": "Mostrar menos",
+    "expandAll": "Expandir tudo",
+    "collapseAll": "Recolher tudo",
+    "training": "Treino",
     "fightCountOne": "1 combate",
     "previewUpload": "Pré-visualizar envio",
     "previewUploadTip": "Escreve o que o compartilhamento deste combate enviaria. Nada é enviado.",
     "previewWorking": "Criando a pré-visualização…",
     "previewDone": "{slice} KB gravados ({sent} KB compactados — o que um envio transmitiria). {kept} de {seen} pacotes mantidos, {blinded} nomes ocultados. Nada foi enviado. Salvo em {dir}",
-    "openWorld": "Mundo aberto"
+    "openWorld": "Mundo aberto",
+    "tabFights": "Combates",
+    "tabBests": "Recordes pessoais",
+    "search": "Chefe ou masmorra…",
+    "allCharacters": "Todos os personagens",
+    "allDifficulties": "Todas as dificuldades",
+    "periodAll": "Todo o período",
+    "periodToday": "Últimas 24 horas",
+    "period7": "Últimos 7 dias",
+    "period30": "Últimos 30 dias",
+    "sort": "Ordenar",
+    "sortNewest": "Mais recentes",
+    "sortFastest": "Vitória mais rápida",
+    "sortPartyDps": "DPS do grupo",
+    "sortMyDps": "Seu DPS",
+    "sortRecent": "Mais recentes",
+    "sortTier": "Nível da masmorra",
+    "killsOnly": "Só vitórias",
+    "wipe": "Derrota",
+    "pb": "Recorde",
+    "pbTip": "Um dos seus recordes pessoais",
+    "party": "Grupo",
+    "you": "Você",
+    "totalDamage": "Dano total",
+    "finalBoss": "Chefe final",
+    "fightGone": "Esse combate não está mais salvo; o recorde é mantido.",
+    "unconfirmedTip": "A vitória não foi registrada (combate anterior à 2.0.87): avaliada pelo dano causado.",
+    "openBest": "Abrir este combate",
+    "killOne": "1 vitória",
+    "wipeOne": "1 derrota",
+    "kills": "{n} vitórias",
+    "wipes": "{n} derrotas",
+    "otherBosses": "Outros chefes ({n})",
+    "otherLevels": "Outros níveis ({n})",
+    "noBests": "Ainda não há vitórias em masmorras.",
+    "encounter": "Encontro",
+    "fastestKill": "Vitória mais rápida",
+    "yourBest": "Seu melhor DPS",
+    "partyBest": "Melhor do grupo",
+    "uploadTip": "Envie esta luta para a2tools.app e receba um link para compartilhar",
+    "uploadOpen": "Abrir o registro desta luta em a2tools.app",
+    "uploadWorking": "Enviando…",
+    "uploadDonePublic": "Enviado. Link copiado: {url}",
+    "uploadDonePrivate": "Enviado como privado. Link copiado: {url}"
   },
   "settings": {
     "title": "Configurações",
@@ -302,22 +380,23 @@
     "showOdyle": "Mostrar energia de Odyle",
     "odyleEnergy": "Energia de Odyle",
     "showTtk": "Mostrar tempo estimado para matar",
-    "showHealModes": "Mostrar cura no botão DPS/DMG",
-    "showStaggerMode": "Mostrar atordoamento no botão DPS/DMG",
     "showTotalDps": "Mostrar total do grupo",
     "roundDps": "Abreviar DPS em milhares (13k)",
     "showDpsSuffix": "Adicionar /s ao DPS",
     "autoHideMeter": "Ocultar quando o AION2 não estiver em foco",
     "hideWhenGameClosed": "Ocultar enquanto o AION2 estiver fechado",
     "hideWhenSolo": "Mostrar só em grupo",
+    "hideOutOfCombat": {
+      "label": "Ocultar fora de combate",
+      "off": "Desligado",
+      "seconds": "Após {seconds} s"
+    },
     "showSuspendBtn": "Mostrar botão de pausar captura",
     "showLockBtn": "Mostrar botão de bloqueio (clique através)",
     "playerLimit": {
       "label": "Máx. de jogadores exibidos"
     },
     "partyPresence": "Mostrar usuários do A2Tools no meu grupo",
-    "shareBossTimers": "Compartilhar timers de chefes de campo",
-    "shareSupplyRequests": "Compartilhar pedidos de suprimentos",
     "debugLogging": "Registro de depuração",
     "quit": "Sair",
     "discord": {
@@ -529,15 +608,25 @@
       "codeHint": "A página já deve ter aberto. O código expira em 10 minutos.",
       "working": "Aguardando aprovação…",
       "failed": "Falha ao entrar: {error}",
-      "supporter": "Apoiador"
+      "supporter": "Apoiador",
+      "guestUpload": "Enviar lutas contra chefes sem conta",
+      "guestUploadHint": "Quando uma luta contra chefe termina, ela é enviada ao a2tools.app, pública, sem conta. Os outros jogadores continuam ocultos. Se você entrar depois, as lutas enviadas deste PC passam a ser suas.",
+      "guestClaimHint": "As lutas enviadas deste PC ficam guardadas para você. Entre aqui para torná-las suas ou pegue um código para reivindicá-las de outro dispositivo.",
+      "guestClaimButton": "Obter um código",
+      "guestClaimCode": "Digite {code} em {url} com a sessão iniciada. O código expira em 15 minutos.",
+      "claimed": "{count} lutas enviadas deste PC agora são suas.",
+      "autoUpload": "Enviar lutas contra chefes automaticamente",
+      "autoUploadHint": "Quando uma luta contra chefe termina, ela é enviada para sua conta com a visibilidade escolhida em a2tools.app. Os outros jogadores ficam mascarados. Bonecos de treino nunca são enviados."
     },
     "sendLogs": {
-      "hint": "Envia seus 3 logs de pacotes mais recentes ao desenvolvedor, para um relatório de bug.",
+      "hint": "Envia seu log de depuração e seus logs de pacotes mais recentes (3 arquivos no total) ao desenvolvedor, para um relatório de bug.",
       "button": "Enviar logs ao dev",
-      "confirm": "Enviar seus 3 logs de pacotes mais recentes ao desenvolvedor do A2 Tools?\n\nLogs de pacotes são o tráfego bruto do jogo gravado enquanto o registro de pacotes estava ligado, incluindo nomes de personagens. Só o desenvolvedor pode abri-los, e eles são apagados após 30 dias.",
+      "confirm": "Enviar seu log de depuração e seus logs de pacotes mais recentes ao desenvolvedor do A2 Tools?\n\nO log de depuração registra o que o medidor fez. Logs de pacotes são o tráfego bruto do jogo gravado enquanto o registro de pacotes estava ligado. Ambos podem incluir nomes de personagens. Só o desenvolvedor pode abri-los, e eles são apagados após 30 dias.",
       "sending": "Enviando...",
       "sent": "Enviado. Seu código de relatório é {code}: passe para o desenvolvedor no Discord.",
-      "failed": "Não foi possível enviar: {error}"
+      "failed": "Não foi possível enviar: {error}",
+      "files": "Estes arquivos serão enviados:",
+      "contents": "Os registros de pacotes podem incluir o chat e nomes de outros jogadores."
     },
     "barGap": {
       "label": "Espaçamento das barras"
@@ -554,8 +643,6 @@
       "autoHideMeter": "O medidor some enquanto outra janela está na frente do jogo e volta com ele.",
       "detailsMonitor": "Abre a janela de detalhes na tela escolhida e a mantém lá.",
       "showTtk": "Ao lado do cronômetro, uma estimativa de quanto durará toda a luta contra o chefe.",
-      "showHealModes": "O botão DPS/DMG do medidor também alterna para cura por segundo e cura total.",
-      "showStaggerMode": "O botão DPS/DMG do medidor também mostra quanto cada jogador reduziu a barra de atordoamento do chefe.",
       "showTotalDps": "Uma barra sob as linhas com o DPS e o dano de todo o grupo.",
       "roundDps": "13.412 aparece como 13k.",
       "showSuspendBtn": "Um botão no medidor que para de ler o tráfego do jogo até você apertar de novo.",
@@ -572,8 +659,6 @@
       "allTargetsWindow": "No modo Todos os alvos, o medidor soma cada alvo atingido dentro deste tempo antes do último golpe.",
       "updateRate": "Com que frequência os números do medidor atualizam. Mais rápido mostra os golpes antes, mas usa mais CPU.",
       "partyPresence": "Membros do grupo que também usam o A2Tools veem uma pequena etiqueta A2 ao lado do seu nome, e você vê a deles. Qualquer pessoa do grupo usando o A2Tools pode vê-la e saberá que você usa um medidor de terceiros. Só são enviados hashes de nomes de personagem e servidores.",
-      "shareBossTimers": "Compartilha os timers de chefes de campo com outros jogadores pelo a2tools.app (e seu parceiro Aion 2 Timers): os chefes do seu mapa ao abri-lo e os chefes de campo que você vê morrer, e o PV deles enquanto você luta contra eles. Só o servidor, os chefes, os horários e o PV são enviados.",
-      "shareSupplyRequests": "Compartilha os quadros de pedidos de suprimentos do seu servidor com o Profiteer do a2tools.app quando mudam (após cada reset): o servidor, os quadros e seus pedidos. Nada sobre seu personagem ou progresso é enviado.",
       "debugLogging": "Grava um registro de diagnóstico que o desenvolvedor pode usar para encontrar problemas.",
       "saveRawPackets": "Grava o tráfego bruto do jogo para relatórios de erro. O registro de depuração liga junto.",
       "globalHotkeys": "As teclas abaixo funcionam em qualquer lugar, mesmo com o jogo em primeiro plano. Desligado, ficam livres para outros programas. No Linux, o ambiente de trabalho as registra e pode pedir que você as aprove.",
@@ -581,7 +666,12 @@
       "showMeter": "Desligado: só os seus plugins aparecem. O medidor continua registrando combates e enviando em segundo plano. Mostre-o de novo aqui, com o atalho de mostrar/ocultar ou com o botão do medidor numa janela de plugin.",
       "clearOnZone": "Quando o último combate sai do medidor após a mudança de zona. Todo combate fica no Histórico de qualquer forma.",
       "hideWhenGameClosed": "O medidor se oculta enquanto o jogo não está aberto e volta quando ele inicia.",
-      "hideWhenSolo": "O medidor se oculta enquanto você não está em um grupo e volta quando você entra em um. O atalho de mostrar/ocultar ainda o exibe."
+      "hideWhenSolo": "O medidor se oculta enquanto você não está em um grupo e volta quando você entra em um. O atalho de mostrar/ocultar ainda o exibe.",
+      "hideOutOfCombat": "O medidor se oculta após esse tempo fora de combate e volta no próximo golpe. Ele continua visível enquanto Configurações, Histórico ou Detalhes estiverem abertos, ou com o mouse sobre ele.",
+      "runAsAdmin": "Necessário para mostrar o FPS do jogo. O Windows pergunta toda vez que o medidor inicia.",
+      "shareData": "Compartilha os timers de chefes de campo e os Pedidos de suprimentos do seu servidor com o a2tools.app, para manter o A2Tools atualizado para todos: os chefes no seu mapa, os que você vê serem derrotados e o HP deles, e os quadros de pedidos após cada reinício. Nada sobre o seu personagem é enviado.",
+      "pluginAutoUpdate": "Ao iniciar o medidor, as atualizações de plugins se instalam sozinhas, em segundo plano. Uma atualização que pede algo novo continua esperando sua confirmação.",
+      "meterAnchor": "A borda do medidor que fica parada quando linhas entram ou saem."
     },
     "globalHotkeys": "Usar atalhos de teclado",
     "hotkeyConsent": {
@@ -619,6 +709,7 @@
       "install": "Instalar",
       "update": "Atualizar",
       "updateTo": "Atualizar para {version}",
+      "downloading": "Baixando…",
       "installing": "Instalando…",
       "installDone": "{name} {version} está instalado.",
       "updatesAvailable": "Atualizações disponíveis: {list}",
@@ -628,6 +719,7 @@
       "consentUpdateTitle": "Atualizar {name}?",
       "consentIntro": "Ele poderá:",
       "consentNew": "A nova versão também pede:",
+      "consentNetwork": "Como qualquer página da web, um plugin pode conseguir acessar a internet.",
       "consentCancel": "Cancelar",
       "permStorage": "Salvar os próprios dados neste computador",
       "permNotify": "Mostrar mensagens curtas na sua janela",
@@ -635,17 +727,24 @@
       "permWidgets": "Mostrar janelas pequenas próprias, que você pode mover para qualquer lugar e travar",
       "permBossTimers": "Ler os timers de chefes de campo que os jogadores compartilham pelo a2tools.app",
       "permCharacter": "Ver nome, servidor, classe e nível do seu personagem",
-      "permDecoder": "Ler seus próprios dados do jogo: {name}",
+      "permDecoder": "Ler dados selecionados do jogo (podem incluir outros jogadores): {name}",
       "permNone": "Nada além de mostrar sua janela",
       "enabled": "Ativado",
       "enabledTip": "Ligado: inicia com o medidor. Desligado: continua instalado, mas não é executado.",
-      "showMeter": "Mostrar o medidor de DPS",
+      "showMeter": "Mostrar o medidor",
       "hideClosed": "Ocultar enquanto o AION2 estiver fechado",
       "hideUnfocused": "Ocultar quando o AION2 não estiver em foco",
       "inDock": "No dock de plugins (desligado: janela própria)",
       "search": "Pesquisar",
       "noMatch": "Nenhum plugin corresponde.",
-      "permsTitle": "Ele pode:"
+      "permsTitle": "Ele pode:",
+      "permFps": "Mostrar o FPS do jogo (no Windows, o medidor pede para ser executado como administrador para isso)",
+      "permDeathRecap": "Depois que um jogador te mata: quem era e o dano que te causou",
+      "permScreenshot": "Tirar capturas da própria janela, para a área de transferência e sua pasta de capturas",
+      "testHint": "Versões iniciais para qualquer um experimentar, assinadas como as outras. Podem mudar ou ter arestas: conte o que encontrar.",
+      "testTitle": "Plugins de teste",
+      "autoUpdate": "Autoatualizar plugins",
+      "whatsNew": "Novidades da {version}"
     },
     "clearOnZone": {
       "label": "Limpar o medidor",
@@ -653,6 +752,18 @@
         "instance": "Ao entrar ou sair de uma masmorra",
         "any": "Em qualquer mudança de zona",
         "never": "Nunca (manter o último combate)"
+      }
+    },
+    "runAsAdmin": "Executar como administrador",
+    "runAsAdminTitle": "A2Tools - Executar como administrador",
+    "runAsAdminAsk": "Para mostrar o FPS do jogo, o medidor precisa ser executado como administrador.\n\nReiniciar o medidor como administrador agora? O Windows vai perguntar toda vez que o medidor iniciar. Você pode desativar isso nas Configurações.",
+    "shareData": "Sincronizar dados úteis com o A2Tools",
+    "meterAnchor": {
+      "label": "O medidor fica fixo em",
+      "options": {
+        "top": "Topo",
+        "middle": "Centro",
+        "bottom": "Base"
       }
     }
   },
@@ -680,7 +791,12 @@
       "btc": "Copiar o endereço BTC",
       "eth": "Copiar o endereço ETH",
       "usdc": "Copiar o endereço USDC"
-    }
+    },
+    "sponsorLabel": "Patrocinado",
+    "sponsorShort": "Reduza seu ping com o ExitLag",
+    "sponsorCode": "Código",
+    "sponsorDisclosure": "Link de afiliado. A A2 Tools recebe uma comissão se você assinar, o que ajuda a manter estas ferramentas gratuitas.",
+    "more": "Mais formas de doar no a2tools.app"
   },
   "battleTime": {
     "analysing": "Monitorando",
@@ -694,7 +810,8 @@
     "identifyingPlayer": "#{id}",
     "a2toolsUser": "Usa o A2Tools",
     "dpsSuffix": "/s",
-    "others": "Outros"
+    "others": "Outros",
+    "deaths": "Morreu {count} vezes nesta luta"
   },
   "skills": {
     "fallback": "Habilidade {code}",
@@ -772,7 +889,9 @@
     "hint": "Os nomes de outros jogadores ficam ocultos e bonecos de treino nunca são enviados. Você pode mudar isso a qualquer momento nas Configurações.",
     "signIn": "Entrar",
     "later": "Agora não",
-    "close": "Fechar"
+    "close": "Fechar",
+    "guest": "Sem conta",
+    "guestHint": "Sem conta? Suas lutas ainda podem ser enviadas e passam a ser suas se você entrar depois."
   },
   "npcapPrompt": {
     "ask": "O A2Tools DPS Meter precisa do Npcap para ler o tráfego de rede do jogo, e o Npcap está ausente ou não funciona.\n\nInstalar agora? O medidor baixa o instalador do Npcap em npcap.com e o abre. Quando o Npcap estiver instalado, o medidor começa a capturar sozinho.\n\nEscolha Não para instalá-lo você mesmo em https://npcap.com/#download",
@@ -803,5 +922,55 @@
     "settings": "Configurações do medidor",
     "opacity": "Opacidade do fundo",
     "failed": "Este plugin não pôde iniciar: {error}"
+  },
+  "sharing": {
+    "title": "Ajudar a montar os rankings?",
+    "sub": "Escolha uma para começar. Dá para mudar quando quiser em Configurações → Privacidade.",
+    "shareTitle": "Compartilhar lutas anonimamente",
+    "recommended": "Recomendado",
+    "shareText": "Suas lutas contra chefes entram nos registros públicos do a2tools.app com todos os nomes ocultos. Não precisa de conta.",
+    "noTitle": "Não compartilhar",
+    "noText": "Nada das suas lutas sai deste PC.",
+    "signInBefore": "Quer suas lutas com o seu nome?",
+    "signIn": "Entrar com A2 Tools",
+    "signInAfter": "As lutas compartilhadas antes passam para a sua conta.",
+    "previewTitle": "Como uma luta compartilhada aparece no a2tools.app",
+    "never": "O nome do seu PC e o nome completo do seu personagem nunca são enviados.",
+    "policy": "Política de privacidade",
+    "continue": "Continuar"
+  },
+  "sharingNotice": {
+    "title": "Suas lutas ajudam a montar os rankings",
+    "text": "As lutas contra chefes que você termina são compartilhadas com o a2tools.app com todos os nomes ocultos, inclusive o seu (ex.: Na***a). Não precisa de conta, e você pode parar quando quiser em Configurações → Privacidade.",
+    "stop": "Parar de compartilhar",
+    "details": "Detalhes",
+    "keep": "Continuar compartilhando",
+    "stopped": "Compartilhamento parado. As lutas que você compartilhou antes estão sendo removidas do a2tools.app."
+  },
+  "privacy": {
+    "title": "Privacidade",
+    "intro": "O que este medidor compartilha com o a2tools.app. Cada item é escolha sua.",
+    "share": "Compartilhar lutas contra chefes anonimamente",
+    "shareHint": "Ao fim de uma luta contra chefe, ela entra nos registros públicos e rankings do a2tools.app. Todos os nomes ficam ocultos, inclusive o seu. Não precisa de conta.",
+    "signedIn": "Conectado: suas lutas contra chefes vão para a sua conta A2 Tools (veja Conta A2 Tools).",
+    "never": "Nunca enviado: o chat, o nome do seu PC, o nome completo do seu personagem. Enviar registros ao dev (Avançado) só envia quando você aperta.",
+    "policy": "Política de privacidade completa"
+  },
+  "changelog": {
+    "title": "Novidades",
+    "intro": "As últimas versões, da mais recente para a mais antiga.",
+    "allReleases": "Todas as versões no GitHub",
+    "installed": "Instalada",
+    "available": "Atualização disponível",
+    "loading": "Carregando as notas da versão…",
+    "none": "Ainda não há notas de versão.",
+    "failed": "Não foi possível carregar as notas da versão. Elas também estão no GitHub, abaixo."
+  },
+  "footerMenu": {
+    "tip": "Escolha o que o rodapé mostra",
+    "ttk": "Tempo estimado para matar",
+    "partyTotal": "Total do grupo",
+    "odyle": "Energia de Odyle",
+    "ping": "Ping"
   }
 }

@@ -89,6 +89,11 @@ pub struct AppState {
     /// The LAN stream overlay for OBS on another PC; off unless enabled.
     #[cfg(feature = "online")]
     pub stream_overlay: crate::stream_overlay::Manager,
+    /// The overlay's height when it was last anchored (Settings → Meter stays
+    /// fixed at), which the next anchored resize goes from: not its height
+    /// now, which a tooltip, the details panel or the promo can have grown
+    /// for a moment. Starts as the saved `window.h`.
+    pub anchored_height: std::sync::atomic::AtomicI32,
 }
 
 /// The overlay's click-through lock: while locked, clicks go through the meter
@@ -197,21 +202,24 @@ fn show_meter_again(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
     let _ = window.emit("force-resize", ());
 }
 
-/// The windows that hide with the meter when AION2 isn't in front ("Hide
-/// when AION2 isn't focused"): Settings, Battle History and Details, and the
-/// windows and icons of plugins set to (Settings → Plugins; an alert's icon
-/// is often wanted most then). Only the meter hid, and the rest stayed over
-/// the browser (Hirai, 2026-10-19).
-fn hides_with_meter(app: &tauri::AppHandle, label: &str) -> bool {
-    TOOL_WINDOWS.contains(&label) || label.starts_with("details-") || crate::plugins::hides_unfocused(app, label)
+/// The windows that hide when AION2 isn't in front: with the meter's "Hide
+/// when AION2 isn't focused" (`meter`), Settings, Battle History and Details
+/// (only the meter hid, and the rest stayed over the browser: Hirai,
+/// 2026-10-19); and, whether or not that is on, the windows and icons of
+/// plugins set to (Settings → Plugins). A plugin's own option did nothing
+/// while the meter's was off (2026-10-27).
+fn hides_with_meter(app: &tauri::AppHandle, label: &str, meter: bool) -> bool {
+    (meter && (TOOL_WINDOWS.contains(&label) || label.starts_with("details-"))) || crate::plugins::hides_unfocused(app, label)
 }
 
 /// Hide those of `hides_with_meter` that are up, noting each.
-fn hide_with_meter(app: &tauri::AppHandle, hidden: &mut std::collections::HashSet<String>) {
+fn hide_with_meter(app: &tauri::AppHandle, meter: bool, hidden: &mut std::collections::HashSet<String>) {
     for (label, window) in app.webview_windows() {
-        if !hides_with_meter(app, &label) || hidden.contains(&label) {
+        if !hides_with_meter(app, &label, meter) {
             continue;
         }
+        // A plugin update can reopen a window whose label is already recorded.
+        // Check its current visibility so the next focus tick hides it again.
         if window.is_visible().unwrap_or(false) && !platform::window::is_hidden_in_place(&window) {
             platform::window::hide_in_place(&window);
             hidden.insert(label);
@@ -264,7 +272,9 @@ fn save_window_place(app: &tauri::AppHandle, title: &str, (x, y, w, h): (i32, i3
 }
 
 /// Where a window belongs, for the window manager to put it (#76). The
-/// overlay sizes itself to its content, so it gets its place only.
+/// overlay sizes itself to its content, so it gets its place, and its height
+/// there only for the edge it keeps (Settings → Meter stays fixed at): with
+/// Bottom, its bottom goes back where it was.
 fn load_window_place(app: &tauri::AppHandle, title: &str) -> Option<(i32, i32, i32, i32)> {
     let label = window_titled(app, title)?;
     // On X11 the meter places its windows itself; KWin puts back only a
@@ -282,7 +292,7 @@ fn load_window_place(app: &tauri::AppHandle, title: &str) -> Option<(i32, i32, i
         Some((x, y, w, h))
     };
     match placed(&label) {
-        Some((x, y, w, h)) => Some(if label == "main" { (x, y, 0, 0) } else { (x, y, w, h) }),
+        Some((x, y, w, h)) => Some(if label == "main" { (x, y, 0, h) } else { (x, y, w, h) }),
         // A plugin's widget never moved: beside its others, not mid-screen.
         None => crate::plugins::widgets::place_beside_others(app, &label, placed).map(|(x, y)| (x, y, 0, 0)),
     }
@@ -297,6 +307,11 @@ fn auto_hide_now(app: &tauri::AppHandle) {
     if state.settings.get("dpsMeter.autoHideMeter").unwrap_or_default() != "true" || !meter_wanted(app) {
         return;
     }
+    // Hidden by a rule of its own (AION2 closed, solo, out of combat): the
+    // game coming to the front doesn't bring it back.
+    if HIDDEN_BY_RULE.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let Some(window) = app.get_webview_window("main") else { return };
     let front = platform::window_detector::is_aion2_foreground() || window.is_focused().unwrap_or(false);
     let hidden = !window.is_visible().unwrap_or(true)
@@ -307,6 +322,45 @@ fn auto_hide_now(app: &tauri::AppHandle) {
     } else if !front && !hidden {
         platform::window::minimize_off_top(&window);
     }
+}
+
+/// The meter hidden by the 500 ms check's own rules: AION2 closed, solo, or
+/// out of combat. Not the player hiding it (`meter_wanted`): it comes back
+/// by itself when the rule no longer holds.
+static HIDDEN_BY_RULE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// "Hide out of combat" (#106): seconds without combat before the meter
+/// hides; 0 is off.
+const HIDE_OUT_OF_COMBAT_KEY: &str = "dpsMeter.hideOutOfCombat";
+
+fn hide_out_of_combat_secs(settings: &Settings) -> u64 {
+    settings.get(HIDE_OUT_OF_COMBAT_KEY).and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Whether `secs` seconds without combat have passed by `now_ms`, timed from
+/// `last_combat_ms` (clock ms): the later of the last damage the meter
+/// counted and when the wait began. 0 seconds is off.
+fn out_of_combat(last_combat_ms: i64, now_ms: i64, secs: u64) -> bool {
+    secs > 0 && now_ms.saturating_sub(last_combat_ms) >= i64::try_from(secs).unwrap_or(i64::MAX).saturating_mul(1000)
+}
+
+/// What keeps the meter up out of combat: Settings, History or a fight's
+/// Details open, or (`pointer` true) the mouse over the meter. The pointer
+/// isn't asked while the meter is hidden: on Linux it stays mapped where it
+/// was, and passing over the empty spot would bring it back.
+fn keeps_meter_up(app: &tauri::AppHandle, main: &tauri::WebviewWindow, pointer: bool) -> bool {
+    let tool_open = app.webview_windows().into_iter().any(|(label, w)| {
+        (TOOL_WINDOWS.contains(&label.as_str()) || label.starts_with("details-"))
+            && w.is_visible().unwrap_or(false)
+            && !platform::window::is_hidden_in_place(&w)
+    });
+    tool_open || (pointer && pointer_over_window(main))
+}
+
+fn pointer_over_window(window: &tauri::WebviewWindow) -> bool {
+    let Some((px, py)) = platform::window::cursor_position() else { return false };
+    let (Ok(at), Ok(size)) = (window.inner_position(), window.inner_size()) else { return false };
+    px >= at.x && px < at.x + size.width as i32 && py >= at.y && py < at.y + size.height as i32
 }
 
 /// Tell the main window whether to ignore the mouse: when locked, unless the
@@ -471,6 +525,15 @@ async fn get_fight_history(app: tauri::AppHandle) -> Result<Vec<FightSummary>, S
     }).await
 }
 
+/// Every personal best (`history::personal_bests`), off the main thread as
+/// `get_fight_history` is.
+#[tauri::command]
+async fn get_personal_bests(app: tauri::AppHandle) -> Result<Vec<crate::history::personal_bests::Encounter>, String> {
+    crate::blocking::HISTORY.run(move || {
+        app.state::<AppState>().fight_history.personal_bests()
+    }).await
+}
+
 #[tauri::command]
 async fn save_fight(app: tauri::AppHandle, record: FightRecord) -> Result<(), String> {
     crate::blocking::HISTORY.run(move || {
@@ -583,7 +646,7 @@ fn save_fight_records(app: &tauri::AppHandle, state: &AppState, records: Vec<Fig
         share::prune_slices(&state.app_data_dir);
     }
     #[cfg(feature = "online")]
-    if state.settings.get(share::AUTO_UPLOAD_KEY).as_deref() == Some("true") {
+    if share::auto_uploads(&state.settings) {
         let now = crate::clock::now_ms();
         for record in records.into_iter()
             .filter(|r| share::wants_auto_upload(&state.app_data_dir, r, now))
@@ -733,8 +796,61 @@ async fn account_status(
         crate::account::AccountState::SignedOut => None,
         crate::account::AccountState::Unavailable(why) => return Err(why),
     };
+    // Signed in with fights still uploaded as a guest on this PC (the claim
+    // at sign-in didn't get through): claimed now.
+    if who.is_some() && crate::account::guest::has_guest(&state.app_data_dir) {
+        crate::account::guest::merge_into_account(&state.http, &state.app_data_dir).await;
+    }
     *state.account_seen.lock() = Some(who.clone());
     Ok(who)
+}
+
+#[cfg(feature = "online")]
+/// "Stop sharing" (the sharing notice, 2.0.80 on): no more uploads without an
+/// account, and the fights this PC already uploaded that way deleted from
+/// a2tools.app, in the background.
+#[tauri::command]
+fn guest_stop_sharing(app: tauri::AppHandle, state: tauri::State<'_, AppState>) {
+    state.settings.set(crate::account::guest::GUEST_UPLOAD_KEY, "false");
+    state.settings.set(crate::account::guest::DELETE_PENDING_KEY, "true");
+    spawn_guest_delete(app);
+}
+
+#[cfg(feature = "online")]
+/// Delete this PC's guest uploads while that is pending: at once, then less
+/// and less often (up to every 30 minutes) until the site answers; a meter
+/// closed meanwhile tries again at its next start.
+fn spawn_guest_delete(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut wait = Duration::from_secs(30);
+        loop {
+            let Some(state) = app.try_state::<AppState>() else { return };
+            if state.settings.get(crate::account::guest::DELETE_PENDING_KEY).as_deref() != Some("true") {
+                return;
+            }
+            if crate::account::guest::delete_uploads(&state.http, &state.app_data_dir).await.is_some() {
+                state.settings.set(crate::account::guest::DELETE_PENDING_KEY, "false");
+                return;
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(Duration::from_secs(30 * 60));
+        }
+    });
+}
+
+#[cfg(feature = "online")]
+/// Whether this PC has fights uploaded without an account, not claimed yet.
+#[tauri::command]
+fn guest_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
+    serde_json::json!({ "hasGuest": crate::account::guest::has_guest(&state.app_data_dir) })
+}
+
+#[cfg(feature = "online")]
+/// A code that claims this PC's guest fights at a2tools.app/claim.
+#[tauri::command]
+async fn guest_claim_code(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let (code, expires_at) = crate::account::guest::claim_code(&state.http, &state.app_data_dir).await?;
+    Ok(serde_json::json!({ "code": code, "expiresAt": expires_at, "url": format!("{}/claim", crate::account::base_url()) }))
 }
 
 #[cfg(feature = "online")]
@@ -782,8 +898,14 @@ async fn account_begin_link(
     let app_data_dir = state.app_data_dir.clone();
     tauri::async_runtime::spawn(async move {
         let outcome = crate::account::poll_until_decided(&http, &grant, &app_data_dir).await;
+        // Fights uploaded without an account on this PC become the account's.
+        let claimed = if outcome.is_ok() && crate::account::guest::has_guest(&app_data_dir) {
+            crate::account::guest::merge_into_account(&http, &app_data_dir).await.unwrap_or(0)
+        } else {
+            0
+        };
         let payload = match &outcome {
-            Ok(()) => serde_json::json!({ "connected": true }),
+            Ok(()) => serde_json::json!({ "connected": true, "claimed": claimed }),
             Err(why) => serde_json::json!({ "connected": false, "error": why }),
         };
         if let Err(e) = app.emit("account-changed", payload) {
@@ -873,6 +995,8 @@ fn dps_rate_ms(settings: &Settings) -> u64 {
 
 /// The All Targets time range (Settings), in milliseconds.
 const ALL_TARGETS_WINDOW_KEY: &str = "dpsMeter.allTargetsWindowMs";
+const METER_ANCHOR_KEY: &str = "dpsMeter.meterAnchor";
+const WINDOW_HEIGHT_KEY: &str = "window.h";
 
 fn apply_all_targets_window(state: &AppState, value: &str) {
     if let Ok(ms) = value.trim().parse::<i64>() {
@@ -1048,9 +1172,16 @@ fn update_settings(
     key: String,
     value: String,
 ) {
+    // Kept by the meter from the folder dialog, not by the page.
+    if key == PICKED_SCREENSHOT_FOLDER_KEY {
+        return;
+    }
     if state.settings.set(&key, &value) {
         if key == ALL_TARGETS_WINDOW_KEY {
             apply_all_targets_window(&state, &value);
+        }
+        if key == METER_ANCHOR_KEY {
+            platform::window::set_main_anchor(platform::meter_anchor::Anchor::from_setting(Some(&value)));
         }
         if key == GLOBAL_HOTKEYS_KEY {
             apply_global_hotkeys(&app);
@@ -1239,10 +1370,38 @@ fn set_debug_logging(state: tauri::State<'_, AppState>, enabled: bool) {
     state.settings.set("dpsMeter.debugLoggingEnabled", if enabled { "true" } else { "false" });
 }
 
+/// Settings' "Run as administrator": on restarts the meter elevated (false
+/// when Windows' prompt was refused); off takes effect at the next start.
+#[tauri::command]
+async fn set_run_as_admin(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    if !enabled {
+        if let Some(state) = app.try_state::<AppState>() {
+            state.settings.set("dpsMeter.runAsAdmin", "false");
+        }
+        return Ok(true);
+    }
+    tokio::task::spawn_blocking(move || restart_as_admin(&app)).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn set_packet_logging(state: tauri::State<'_, AppState>, enabled: bool) {
     logging::logger::set_packet_log_enabled(enabled, &state.app_data_dir);
     state.settings.set("dpsMeter.saveRawPackets", if enabled { "true" } else { "false" });
+}
+
+#[cfg(feature = "online")]
+/// What Send Logs to Dev would send, for the page to show before it does
+/// (security audit M10): each file's name and size.
+#[tauri::command]
+fn dev_logs_preview(state: tauri::State<'_, AppState>) -> Vec<serde_json::Value> {
+    crate::share::dev_logs::files_to_send(&state.app_data_dir)
+        .iter()
+        .map(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            serde_json::json!({ "name": name, "bytes": bytes })
+        })
+        .collect()
 }
 
 #[cfg(feature = "online")]
@@ -1382,7 +1541,9 @@ fn is_capture_suspended(state: tauri::State<'_, AppState>) -> bool {
 fn log_from_ui(message: String) {
     // A problem only the webview can see (an icon the CDN would not serve, say),
     // for debug.log. The UI keeps these few; this keeps each one short.
-    let message: String = message.chars().take(300).collect();
+    // One line: a newline let the page write lines that read as the
+    // meter's own (security audit I1).
+    let message: String = message.chars().take(300).map(|c| if c.is_control() { ' ' } else { c }).collect();
     tracing::warn!("UI: {message}");
 }
 
@@ -1405,7 +1566,57 @@ async fn write_cached_icon(app: tauri::AppHandle, key: String, data: String) -> 
 
 
 #[cfg(feature = "online")]
+/// Look for an update (2.0.80 on): the meter fetches and checks the manifest
+/// itself (`update_check`: signature, newer than this version) and offers
+/// what it names. `ask` false: only whether there is one to offer (the green
+/// button in the title, which asks when clicked). Answers { state, latest }:
+/// "current", "offer" (ask false), "installing" (accepted) or "update" (one
+/// is out: declined, or this install's package manager updates it).
 #[tauri::command]
+async fn check_for_update(app: tauri::AppHandle, state: tauri::State<'_, AppState>, ask: Option<bool>) -> Result<serde_json::Value, String> {
+    let manifest = crate::update_check::fetch(&state.http).await?;
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = manifest.version.trim_start_matches(['v', 'V']).to_string();
+    if !crate::update_check::newer(&latest, current) {
+        return Ok(serde_json::json!({ "state": "current", "latest": latest }));
+    }
+    let some = |s: String| Some(s).filter(|s| !s.is_empty());
+    let yes = show_update_window(
+        app,
+        current.to_string(),
+        latest.clone(),
+        manifest.msi_url,
+        some(manifest.arch_url),
+        some(manifest.deb_url),
+        some(manifest.rpm_url),
+        some(manifest.msi_sha256),
+        some(manifest.arch_sha256),
+        some(manifest.deb_sha256),
+        some(manifest.rpm_sha256),
+        ask,
+    )
+    .await?;
+    let state = match (ask, yes) {
+        (Some(false), true) => "offer",
+        (Some(false), false) => "update",
+        (_, true) => "installing",
+        (_, false) => "update",
+    };
+    Ok(serde_json::json!({ "state": state, "latest": latest }))
+}
+
+#[cfg(feature = "online")]
+/// The last releases' notes, for Settings → What's new (#127): fetched and
+/// signature-checked like the update manifest (`update_check`).
+#[tauri::command]
+async fn release_notes(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    crate::update_check::fetch_changelog(&state.http).await
+}
+
+#[cfg(feature = "online")]
+/// Offer the update `check_for_update` found. Not a command any more: the
+/// page used to call it with a URL and hash of its own (security audit H1).
+#[allow(clippy::too_many_arguments)]
 async fn show_update_window(
     app: tauri::AppHandle,
     current: String,
@@ -1438,6 +1649,20 @@ async fn show_update_window(
         rpm: rpm_sha256.as_deref().unwrap_or(""),
     };
     let package_sha256 = platform::updater::package_url(&hashes).to_string();
+    // The page hands these over from the manifest it read: only a package on
+    // our CDN, and only version-shaped text in the dialog (security audit H1,
+    // in part; a signed manifest checked here is the rest).
+    if !package_url.is_empty() && !update_url_allowed(&package_url) {
+        tracing::warn!("Update: refused a package that isn't on cdn.a2tools.app");
+        return Ok(false);
+    }
+    // The running version is the app's own, not what the page says.
+    drop(current);
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    if !version_shaped(&latest) {
+        tracing::warn!("Update: refused a latest version that isn't one");
+        return Ok(false);
+    }
     if !platform::updater::supported() || package_url.is_empty() {
         tracing::info!("Update {} available (running {}); this install updates through its package manager", latest, current);
         return Ok(false);
@@ -1477,6 +1702,37 @@ async fn show_update_window(
 #[cfg(feature = "online")]
 /// Whether a downloaded package is the one the manifest names: its SHA-256,
 /// in hex, equals the manifest's. A manifest without a hash matches nothing.
+/// An update package on our CDN, over https, with a plain path.
+#[cfg_attr(not(feature = "online"), allow(dead_code))]
+fn update_url_allowed(url: &str) -> bool {
+    url.strip_prefix("https://cdn.a2tools.app/").is_some_and(|path| {
+        !path.is_empty() && !path.contains("..") && path.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c))
+    })
+}
+
+/// "2.0.80": digits and dots, short.
+#[cfg_attr(not(feature = "online"), allow(dead_code))]
+fn version_shaped(v: &str) -> bool {
+    (1..=20).contains(&v.len()) && v.chars().all(|c| c.is_ascii_digit() || c == '.') && v.contains('.')
+}
+
+/// Where the downloaded package goes: a name of our own (the URL's last part
+/// could carry a backslash path on Windows, audit L9), random so it can't be
+/// guessed beforehand, with the package's own extension, which the installer
+/// and package managers go by.
+#[cfg(feature = "online")]
+fn update_download_path(url: &str) -> Result<std::path::PathBuf, String> {
+    let ext = [".msi", ".pkg.tar.zst", ".deb", ".rpm"]
+        .into_iter()
+        .find(|e| url.ends_with(e))
+        .ok_or("not a package the meter installs")?;
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).map_err(|e| format!("no random name: {e}"))?;
+    let tag: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(std::env::temp_dir().join(format!("a2tools-update-{tag}{ext}")))
+}
+
+#[cfg_attr(not(feature = "online"), allow(dead_code))]
 fn package_hash_matches(expected: &str, actual_hex: &str) -> bool {
     let expected = expected.trim();
     expected.len() == 64
@@ -1511,9 +1767,16 @@ async fn download_and_install_update(app: &tauri::AppHandle, url: &str, expected
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }
+    // At most MAX_PACKAGE (packages are under 24 MB), counted as it comes,
+    // since a server may give no length; and a download that fails leaves no
+    // partial file (talyaseen, #140).
+    const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
+    let too_big = || format!("the update package is larger than {MAX_PACKAGE} bytes");
     let total_size = response.content_length().unwrap_or(0);
-    let file_name = url_owned.rsplit('/').next().unwrap_or("update");
-    let msi_path = std::env::temp_dir().join(file_name);
+    if total_size > MAX_PACKAGE {
+        return Err(too_big());
+    }
+    let msi_path = update_download_path(&url_owned)?;
 
     let mut file = tokio::fs::File::create(&msi_path).await.map_err(|e| e.to_string())?;
     let mut downloaded: u64 = 0;
@@ -1521,22 +1784,32 @@ async fn download_and_install_update(app: &tauri::AppHandle, url: &str, expected
     let mut last_pct: u64 = 0;
     let mut hasher = Sha256::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| e.to_string())?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        downloaded += chunk.len() as u64;
-        if total_size > 0 {
-            let pct = (downloaded * 100 / total_size).min(100);
-            if pct != last_pct {
-                last_pct = pct;
-                let _ = app_clone.emit("download-progress", pct);
-                tracing::info!("Download: {}%", pct);
+    let saved: Result<(), String> = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            if downloaded + chunk.len() as u64 > MAX_PACKAGE {
+                return Err(too_big());
+            }
+            hasher.update(&chunk);
+            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+            downloaded += chunk.len() as u64;
+            if total_size > 0 {
+                let pct = (downloaded * 100 / total_size).min(100);
+                if pct != last_pct {
+                    last_pct = pct;
+                    let _ = app_clone.emit("download-progress", pct);
+                    tracing::info!("Download: {}%", pct);
+                }
             }
         }
+        file.flush().await.map_err(|e| e.to_string())
     }
-    file.flush().await.map_err(|e| e.to_string())?;
+    .await;
     drop(file);
+    if let Err(e) = saved {
+        let _ = tokio::fs::remove_file(&msi_path).await;
+        return Err(e);
+    }
 
     let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
     if !package_hash_matches(expected_sha256, &actual) {
@@ -1558,28 +1831,13 @@ async fn download_and_install_update(app: &tauri::AppHandle, url: &str, expected
 
     // Launch the installer (msiexec on Windows; see platform::updater).
     flush_settings_before_exit(app);
-    platform::updater::run_installer(&msi_path, &install_dir)?;
+    platform::updater::run_installer(&msi_path, expected_sha256.trim(), &install_dir)?;
 
     // Give installer time to start, then exit
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     flush_settings_before_exit(&app_clone);
     app_clone.exit(0);
     Ok(())
-}
-
-#[cfg(feature = "online")]
-#[tauri::command]
-async fn fetch_url(state: tauri::State<'_, AppState>, url: String) -> Result<String, String> {
-    state
-        .http
-        .get(&url)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())
 }
 
 #[cfg(feature = "online")]
@@ -1678,14 +1936,11 @@ async fn fetch_supporter_roster(client: &reqwest::Client, etag: Option<&str>) ->
         .get(reqwest::header::ETAG)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let Ok(bytes) = response.bytes().await else {
-        return RosterFetch::Failed;
-    };
     // A roster for ten thousand supporters is about 80 KB; anything far past
     // that is not one of ours.
-    if bytes.len() > 8 * 1024 * 1024 {
+    let Ok(bytes) = crate::update_check::read_capped(response, 8 * 1024 * 1024).await else {
         return RosterFetch::Failed;
-    }
+    };
     match crate::supporters::Roster::parse(&bytes) {
         Some(roster) => RosterFetch::Fresh(roster, tag),
         None => RosterFetch::Failed,
@@ -1740,6 +1995,18 @@ fn account_sign_out() {}
 
 #[cfg(not(feature = "online"))]
 #[tauri::command]
+fn guest_status() -> serde_json::Value {
+    serde_json::json!({ "hasGuest": false })
+}
+
+#[cfg(not(feature = "online"))]
+#[tauri::command]
+async fn guest_claim_code() -> Result<serde_json::Value, String> {
+    Err(NOT_IN_THIS_BUILD.into())
+}
+
+#[cfg(not(feature = "online"))]
+#[tauri::command]
 fn stream_overlay_status() -> Result<serde_json::Value, String> {
     Err(NOT_IN_THIS_BUILD.into())
 }
@@ -1759,36 +2026,32 @@ async fn stream_overlay_new_key() -> Result<serde_json::Value, String> {
 
 #[cfg(not(feature = "online"))]
 #[tauri::command]
+fn dev_logs_preview() -> Vec<serde_json::Value> {
+    Vec::new()
+}
+
+#[cfg(not(feature = "online"))]
+#[tauri::command]
 async fn send_logs_to_dev() -> Result<serde_json::Value, String> {
     Err(NOT_IN_THIS_BUILD.into())
 }
 
 #[cfg(not(feature = "online"))]
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-async fn show_update_window(
-    current: String,
-    latest: String,
-    msi_url: String,
-    arch_url: Option<String>,
-    deb_url: Option<String>,
-    rpm_url: Option<String>,
-    msi_sha256: Option<String>,
-    arch_sha256: Option<String>,
-    deb_sha256: Option<String>,
-    rpm_sha256: Option<String>,
-    ask: Option<bool>,
-) -> Result<bool, String> {
-    let _ = (current, latest, msi_url, arch_url, deb_url, rpm_url, msi_sha256, arch_sha256, deb_sha256, rpm_sha256, ask);
-    Ok(false)
+async fn check_for_update(ask: Option<bool>) -> Result<serde_json::Value, String> {
+    let _ = ask;
+    Err(NOT_IN_THIS_BUILD.into())
 }
 
 #[cfg(not(feature = "online"))]
 #[tauri::command]
-async fn fetch_url(url: String) -> Result<String, String> {
-    let _ = url;
+async fn release_notes() -> Result<serde_json::Value, String> {
     Err(NOT_IN_THIS_BUILD.into())
 }
+
+#[cfg(not(feature = "online"))]
+#[tauri::command]
+fn guest_stop_sharing() {}
 
 /// Which optional parts this build has. `online` is false in the private
 /// build: the pages hide the account, uploads, Streaming, Discord activity,
@@ -1799,19 +2062,80 @@ fn build_features() -> serde_json::Value {
     // supporter's account (bar textures), to test those without one. A
     // release build ignores it.
     let dev_supporter = cfg!(debug_assertions) && std::env::var_os("A2_DEV_SUPPORTER").is_some();
-    serde_json::json!({ "online": cfg!(feature = "online"), "devSupporter": dev_supporter })
+    serde_json::json!({
+        "online": cfg!(feature = "online"),
+        "devSupporter": dev_supporter,
+        "meterAnchor": platform::window::meter_anchor_available(),
+        "meterAnchorDefault": platform::meter_anchor::Anchor::platform_default().name(),
+    })
 }
 
+/// Open a link in the browser. Web and mail links only: the shell hands
+/// whatever it is given to its handler, so a path, a network share or another
+/// program's link would have run as the meter (security audit M1, 2026-10-26).
 #[tauri::command]
 fn open_url(url: String) {
-    platform::shell::open_url(&url);
+    if openable_url(&url) {
+        platform::shell::open_url(&url);
+    } else {
+        tracing::warn!("open_url: refused a link that isn't http(s) or mailto");
+    }
 }
 
+/// An http(s) link with a host and no credentials, or a mailto link: no
+/// spaces, control characters or backslashes, at most 2048 characters.
+fn openable_url(url: &str) -> bool {
+    if url.len() > 2048 || url.chars().any(|c| c.is_control() || c.is_whitespace() || c == '\\') {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("https://").or_else(|| lower.strip_prefix("http://")) {
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        return !host.is_empty() && !host.contains('@');
+    }
+    lower.len() > "mailto:".len() && lower.starts_with("mailto:")
+}
+
+fn meter_anchor(state: &tauri::State<'_, AppState>) -> platform::meter_anchor::Anchor {
+    platform::meter_anchor::Anchor::from_setting(state.settings.get(METER_ANCHOR_KEY).as_deref())
+}
+
+/// `async`: on KDE Wayland it waits for the KWin script to hear whether the
+/// resize keeps the edge (`anchor_next_resize`, a round trip), which must not
+/// hold the main thread. The resize itself is still made there, and the
+/// command answers once it is made, so the page's sizes keep their order.
 #[tauri::command]
-fn resize_window(app: tauri::AppHandle, width: f64, height: f64, scale: Option<f64>) {
+async fn resize_window(
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+    scale: Option<f64>,
+    preserve_anchor: Option<bool>,
+    player_resize: Option<bool>,
+) {
+    // A resize keeps the edge only when it says so (the page fitting the
+    // window to the meter): a tooltip, the details panel, the promo or the
+    // resize handle grows it for a moment without moving it.
+    let anchored = preserve_anchor.unwrap_or(false);
+    // Where the meter does not place its own windows, the KWin script keeps
+    // the edge (KDE Wayland), told first whether this resize keeps it.
+    if !platform::window::places_own_windows() {
+        platform::window::anchor_next_resize(anchored).await;
+    }
+    let (done, resized) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        resize_overlay(&handle, width, height, scale, anchored, player_resize == Some(true));
+        let _ = done.send(());
+    });
+    let _ = resized.await;
+}
+
+fn resize_overlay(app: &tauri::AppHandle, width: f64, height: f64, scale: Option<f64>, anchored: bool, player_resize: bool) {
     // Only the overlay auto-sizes itself. The details window is sized to a
     // whole monitor by open_details_window and must never be resized from JS.
     let Some(window) = app.get_webview_window("main") else { return };
+    let state = app.state::<AppState>();
     // `width`/`height` are the page's CSS pixels and `scale` its
     // devicePixelRatio. WebView2 draws a CSS pixel at the display scale TIMES
     // Windows' Accessibility "Text size", while a logical size here covers the
@@ -1824,7 +2148,23 @@ fn resize_window(app: tauri::AppHandle, width: f64, height: f64, scale: Option<f
         }),
         None => tauri::Size::Logical(tauri::LogicalSize { width, height }),
     };
-    platform::window::set_size(&window, size);
+    // The player grabbed the resize handle: the edge is kept from wherever
+    // they leave the meter. The next anchored resize, fitting the window to
+    // it, keeps its top and goes from its new height (`meter_anchor::resize`).
+    if player_resize {
+        state.anchored_height.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    if !anchored || !platform::window::places_own_windows() {
+        platform::window::set_size(&window, size);
+        return;
+    }
+    // From the height the meter last had when anchored, not its current one:
+    // a tooltip closing would otherwise move it by the tooltip's height. At
+    // start, the saved height: the window opens at tauri.conf's height.
+    let last = state.anchored_height.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(height) = platform::meter_anchor::resize(&window, size, meter_anchor(&state), (last > 0).then_some(last)) {
+        state.anchored_height.store(height, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Linux can load a hidden WebKit window. Map it only after restoring its
@@ -1976,11 +2316,11 @@ fn open_details_on_monitor_inner(
     // hidden window and calling maximize() put it on whichever monitor Windows
     // still considered current, which is how Details kept opening on the same
     // screen as the overlay.
-    let window = tauri::WebviewWindowBuilder::new(
+    let window = platform::window::share_process(tauri::WebviewWindowBuilder::new(
         app,
         "details",
         tauri::WebviewUrl::App("index.html".into()),
-    )
+    ), platform::ProcessGroup::Meter)
     .initialization_script("window.__A2_VIEW__ = 'details';")
     .title("A2Tools DPS Meter — Details")
     .decorations(false)
@@ -1999,6 +2339,7 @@ fn open_details_on_monitor_inner(
     .background_color(tauri::window::Color(10, 14, 22, 255))
     .build()
     .map_err(|e| e.to_string())?;
+    platform::window::joined(&window, platform::ProcessGroup::Meter);
     platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: lw, height: lh }));
 
     // An explicit monitor pick always wins; otherwise fall back to wherever the
@@ -2093,6 +2434,39 @@ fn keep_on_top_while_ours(app: &tauri::AppHandle, label: &str, focused: bool) {
                 let _ = window.set_always_on_top(false);
             }
         });
+    });
+}
+
+/// A tool window `bring_forward` raised, without focus, stays on top only
+/// while the meter or the game is in front, as `keep_on_top_while_ours` keeps
+/// a focused one: that one is unpinned when it loses focus, which a window
+/// raised without it never does, so it floated over the app clicked next.
+/// Watched until another app takes the front (unpinned then), the window
+/// takes focus (its own handler from then), it closes, or 30 minutes pass.
+fn unpin_when_left(app: &tauri::AppHandle, label: &str) {
+    let app = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        let mut ours = platform::window::front_is_ours_or_game();
+        for _ in 0..(30 * 60 * 4) {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let Some(window) = app.get_webview_window(&label) else { return };
+            if window.is_focused().unwrap_or(false) {
+                return;
+            }
+            let now = platform::window::front_is_ours_or_game();
+            if ours && !now {
+                let handle = app.clone();
+                let label = label.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(window) = handle.get_webview_window(&label) {
+                        let _ = window.set_always_on_top(false);
+                    }
+                });
+                return;
+            }
+            ours = now;
+        }
     });
 }
 
@@ -2326,9 +2700,10 @@ pub(crate) async fn open_settings_window(app: tauri::AppHandle) -> Result<(), St
         if !ready {
             return Ok(());
         }
-        let _ = existing.show();
-        let _ = existing.unminimize();
-        let _ = existing.set_always_on_top(true);
+        // In front of everything, even where focus is refused (Windows, from
+        // the overlay), then asked for the keyboard for its fields.
+        platform::window::bring_forward(&existing);
+        unpin_when_left(&app, "settings");
         let _ = existing.set_focus();
         // Already open (perhaps behind the game): check the account again.
         // A hidden one also resumes its form, without repeating page startup.
@@ -2370,11 +2745,11 @@ window.__A2_VIEW__ = 'settings';
 fn build_settings_window(app: &tauri::AppHandle) -> Result<(), String> {
     platform::window_startup::begin_settings_load();
     let (x, y, _, _) = birth_place(app, Some("settings"), (760.0, 820.0), false);
-    let window = tauri::WebviewWindowBuilder::new(
+    let window = platform::window::share_process(tauri::WebviewWindowBuilder::new(
         app,
         "settings",
         tauri::WebviewUrl::App("index.html".into()),
-    )
+    ), platform::ProcessGroup::Meter)
     // Injected before any page script. WebviewUrl::App is a path, so a ?query
     // gets percent-encoded — this is the one channel that is reliable.
     .initialization_script(SETTINGS_WINDOW_SCRIPT)
@@ -2398,6 +2773,7 @@ fn build_settings_window(app: &tauri::AppHandle) -> Result<(), String> {
     .visible(!platform::window_startup::loads_hidden())
     .build()
     .map_err(|e| e.to_string())?;
+    platform::window::joined(&window, platform::ProcessGroup::Meter);
     platform::window_startup::prepare_settings(&window);
     platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: 760.0, height: 820.0 }));
 
@@ -2434,6 +2810,14 @@ fn tool_window_ready(app: tauri::AppHandle, label: String) -> bool {
     let Some(window) = app.get_webview_window(&label) else { return false };
     let _ = window.show();
     let _ = window.set_focus();
+    // Resizable from the outer edge too (Linux), from the first time it shows.
+    static EDGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut hooked = EDGES.lock().unwrap_or_else(|p| p.into_inner());
+    if !hooked.contains(&label) {
+        hooked.push(label.clone());
+        let min = if label == "settings" { (520.0, 420.0) } else if label == "history" { (480.0, 360.0) } else { (520.0, 360.0) };
+        platform::window::resizable_edges(&window, tauri::LogicalSize::new(min.0, min.1));
+    }
     true
 }
 
@@ -2562,19 +2946,20 @@ async fn request_details_view(
         if let Ok(mut pending) = PENDING_DETAILS_REQUEST.lock() {
             pending.remove(&label);
         }
-        // Raise it if it was put away, but do not steal focus from a window
-        // that is already on screen — the click came from an overlay sitting
-        // on top of a full-screen game, and pulling focus would tab out of it.
+        // Raise it if it was put away. One already on screen but behind
+        // other windows is brought in front without taking focus: the click
+        // came from an overlay on top of a full-screen game, and pulling focus
+        // would tab out of it (and Windows refuses it anyway: the overlay is
+        // never the program in front).
         let hidden = !window.is_visible().unwrap_or(true)
             || window.is_minimized().unwrap_or(false);
         if hidden {
             let _ = window.unminimize();
             let _ = window.show();
             let _ = window.set_focus();
-        } else if kind == "fight" {
-            // Re-asking for a fight that is already open means "show me that
-            // one", so bring it forward even though it was never hidden.
-            let _ = window.set_focus();
+        } else {
+            platform::window::bring_forward(&window);
+            unpin_when_left(&app, &label);
         }
         app.emit_to(&label, "details-request", payload)
             .map_err(|e| e.to_string())?;
@@ -2623,11 +3008,11 @@ fn open_fight_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
     let offset = (step % 6.0) * 34.0;
     let (x, y, w, h) = birth_place(app, Some(FIGHT_WINDOW_KEY), (1180.0, 760.0), true);
 
-    let window = tauri::WebviewWindowBuilder::new(
+    let window = platform::window::share_process(tauri::WebviewWindowBuilder::new(
         app,
         label,
         tauri::WebviewUrl::App("index.html".into()),
-    )
+    ), platform::ProcessGroup::Meter)
     .initialization_script("window.__A2_VIEW__ = 'details';")
     .title("A2Tools DPS Meter — Fight")
     .decorations(false)
@@ -2641,6 +3026,7 @@ fn open_fight_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
     .background_color(tauri::window::Color(10, 14, 22, 255))
     .build()
     .map_err(|e| e.to_string())?;
+    platform::window::joined(&window, platform::ProcessGroup::Meter);
     platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
     Ok(())
 }
@@ -2649,11 +3035,11 @@ fn open_fight_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
 /// from, and it stays put while those fights open in windows of their own.
 fn open_history_window_inner(app: &tauri::AppHandle) -> Result<(), String> {
     let (x, y, w, h) = birth_place(app, Some("history"), (1100.0, 720.0), true);
-    let window = tauri::WebviewWindowBuilder::new(
+    let window = platform::window::share_process(tauri::WebviewWindowBuilder::new(
         app,
         "history",
         tauri::WebviewUrl::App("index.html".into()),
-    )
+    ), platform::ProcessGroup::Meter)
     .initialization_script("window.__A2_VIEW__ = 'history';")
     .title("A2Tools DPS Meter — Battle History")
     .decorations(false)
@@ -2667,6 +3053,7 @@ fn open_history_window_inner(app: &tauri::AppHandle) -> Result<(), String> {
     .background_color(tauri::window::Color(10, 14, 22, 255))
     .build()
     .map_err(|e| e.to_string())?;
+    platform::window::joined(&window, platform::ProcessGroup::Meter);
     platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
 
     if !restore_window_geometry(app, &window, "history") {
@@ -2689,11 +3076,11 @@ fn close_tool_window(window: tauri::Window) {
 fn open_details_windowed(app: &tauri::AppHandle) -> Result<(), String> {
     let placed = details_geometry_is_user_placed(app).then_some("details");
     let (x, y, w, h) = birth_place(app, placed, (1180.0, 760.0), true);
-    let window = tauri::WebviewWindowBuilder::new(
+    let window = platform::window::share_process(tauri::WebviewWindowBuilder::new(
         app,
         "details",
         tauri::WebviewUrl::App("index.html".into()),
-    )
+    ), platform::ProcessGroup::Meter)
     .initialization_script("window.__A2_VIEW__ = 'details';")
     .title("A2Tools DPS Meter — Details")
     .decorations(false)
@@ -2709,6 +3096,7 @@ fn open_details_windowed(app: &tauri::AppHandle) -> Result<(), String> {
     .background_color(tauri::window::Color(10, 14, 22, 255))
     .build()
     .map_err(|e| e.to_string())?;
+    platform::window::joined(&window, platform::ProcessGroup::Meter);
     platform::window::set_size(&window, tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
 
     // A remembered position still wins, but only one the user actually chose.
@@ -2767,13 +3155,18 @@ async fn capture_screenshot(
         .flatten()
         .filter(|main| main.label() != webview_window.label());
     let path = save_file.unwrap_or(false).then(|| {
+        // Only a folder the player picked in the folder dialog, else the
+        // default: the page's word alone could have written anywhere
+        // (security audit M7).
+        let picked = picked_screenshot_folder(&app);
         let dir = folder
-            .filter(|f| !f.trim().is_empty())
+            .filter(|f| !f.trim().is_empty() && picked.as_deref() == Some(f.as_str()))
             .map(std::path::PathBuf::from)
             .or_else(platform::screenshot::default_folder)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let name = filename
-            .filter(|n| !n.trim().is_empty() && !n.contains(['/', '\\']))
+            .filter(|n| !n.trim().is_empty() && !n.contains(['/', '\\', ':']) && crate::history::fight_history::is_plain_name(n))
+            .map(|n| if n.to_ascii_lowercase().ends_with(".png") { n } else { format!("{n}.png") })
             .unwrap_or_else(|| format!("AION2_DPS_{}.png", chrono::Local::now().format("%Y%m%d_%H%M%S")));
         dir.join(name)
     });
@@ -2793,6 +3186,14 @@ async fn capture_screenshot(
     .unwrap_or(ScreenshotResult { clipboard: false, file: None })
 }
 
+/// Where screenshots go: the folder the player picked, else the default.
+pub(crate) fn screenshot_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    picked_screenshot_folder(app)
+        .map(std::path::PathBuf::from)
+        .or_else(platform::screenshot::default_folder)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 /// Where screenshots go when no folder has been chosen.
 #[tauri::command]
 fn default_screenshot_folder() -> String {
@@ -2801,13 +3202,34 @@ fn default_screenshot_folder() -> String {
         .unwrap_or_default()
 }
 
+/// The screenshot folder the player picked in the folder dialog, kept by the
+/// meter itself (`update_settings` won't write it). A folder chosen before
+/// 2.0.80 was kept only by the page: taken over once, the first time.
+const PICKED_SCREENSHOT_FOLDER_KEY: &str = "dpsMeter.screenshotFolderPicked";
+const PAGE_SCREENSHOT_FOLDER_KEY: &str = "dpsMeter.detailsScreenshotFolder";
+
+fn picked_screenshot_folder(app: &tauri::AppHandle) -> Option<String> {
+    let state = app.try_state::<AppState>()?;
+    if let Some(picked) = state.settings.get(PICKED_SCREENSHOT_FOLDER_KEY) {
+        return Some(picked).filter(|p| !p.is_empty());
+    }
+    let earlier = state.settings.get(PAGE_SCREENSHOT_FOLDER_KEY).unwrap_or_default();
+    state.settings.set(PICKED_SCREENSHOT_FOLDER_KEY, &earlier);
+    Some(earlier).filter(|p| !p.is_empty())
+}
+
 /// Let the player pick the screenshot folder. `None` if they cancel.
 #[tauri::command]
 async fn choose_screenshot_folder(
+    app: tauri::AppHandle,
     webview_window: tauri::WebviewWindow,
     current: Option<String>,
 ) -> Option<String> {
-    platform::screenshot::pick_folder(&webview_window, current.as_deref())
+    let picked = platform::screenshot::pick_folder(&webview_window, current.as_deref())?;
+    if let Some(state) = app.try_state::<AppState>() {
+        state.settings.set(PICKED_SCREENSHOT_FOLDER_KEY, &picked);
+    }
+    Some(picked)
 }
 
 #[tauri::command]
@@ -2861,13 +3283,18 @@ async fn begin_window_resize(
 }
 
 #[tauri::command]
-fn finish_window_resize(window: tauri::WebviewWindow, cancel: bool) -> Result<bool, String> {
+fn finish_window_resize(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>, cancel: bool) -> Result<bool, String> {
     if platform::window::compositor_resize_supported(&window) {
         if !cancel && platform::window::resize_pointer_down(&window) != Some(false) {
             return Ok(false);
         }
         let size = window.inner_size().map_err(|e| e.to_string())?;
         platform::window::set_size(&window, tauri::Size::Physical(size));
+        // The player sized the overlay: its edge is kept from this height, not
+        // the one it had before.
+        if window.label() == "main" {
+            state.anchored_height.store(size.height as i32, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     Ok(true)
 }
@@ -2940,6 +3367,11 @@ fn debug_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
 
 #[tauri::command]
 async fn replay_file(state: tauri::State<'_, AppState>, file_path: String) -> Result<String, String> {
+    // A developer's tool that reads any file it is named: nothing in the app
+    // calls it, and release builds refuse it (security audit M7).
+    if !cfg!(debug_assertions) {
+        return Err("replay is for development builds".into());
+    }
     // Reset existing data before replay
     state.dps_calculator.lock().restart_target_selection(true);
     state.data_storage.reset_nicknames();
@@ -3126,6 +3558,59 @@ fn decode_replay_hex(hex: &str) -> Option<Vec<u8>> {
 // ===== APP SETUP =====
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The identifier the settings live under (tauri.conf.json), for reading
+/// `dpsMeter.runAsAdmin` before Tauri starts.
+const IDENTIFIER: &str = "com.a2tools.dps-meter";
+/// The argument a meter restarting itself as administrator passes: its own
+/// process id, to wait for (it holds the one-meter lock until it has closed).
+const AFTER_ARG: &str = "--after";
+
+/// Before anything starts: a meter started by one restarting itself as
+/// administrator waits for that one to close; one set to run as
+/// administrator (for the game's frame rate) and not yet starts itself again
+/// elevated and ends. Refused, it runs on as it is.
+fn elevate_at_start() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pid) = args.iter().position(|a| a == AFTER_ARG).and_then(|i| args.get(i + 1)?.parse::<u32>().ok()) {
+        tracing::info!("Started as administrator: waiting for the meter before to close");
+        platform::admin::wait_for_exit(pid, std::time::Duration::from_secs(20));
+        return;
+    }
+    if !platform::admin::wants_admin(IDENTIFIER) || platform::admin::is_admin() {
+        return;
+    }
+    match platform::admin::relaunch_elevated(&[]) {
+        Ok(true) => {
+            tracing::info!("Set to run as administrator: started again elevated");
+            std::process::exit(0);
+        }
+        Ok(false) => tracing::info!("Set to run as administrator, but the prompt was refused: running as is"),
+        Err(e) => tracing::info!("Set to run as administrator, but could not start elevated: {e}"),
+    }
+}
+
+/// Run as administrator from now on (`dpsMeter.runAsAdmin`), and restart so
+/// now: the new meter is started elevated, then this one closes. Ok(false)
+/// when Windows' prompt was refused (nothing changes then).
+pub(crate) fn restart_as_admin(app: &tauri::AppHandle) -> Result<bool, String> {
+    if platform::admin::is_admin() {
+        if let Some(state) = app.try_state::<AppState>() {
+            state.settings.set("dpsMeter.runAsAdmin", "true");
+        }
+        return Ok(true);
+    }
+    let pid = std::process::id().to_string();
+    if !platform::admin::relaunch_elevated(&[AFTER_ARG.to_string(), pid])? {
+        return Ok(false);
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        state.settings.set("dpsMeter.runAsAdmin", "true");
+    }
+    tracing::info!("Restarting as administrator");
+    app.exit(0);
+    Ok(true)
+}
+
 pub fn run() {
     // Before anything starts a thread: it may set environment variables.
     let process_note = platform::process::prepare();
@@ -3133,6 +3618,7 @@ pub fn run() {
     if let Some(note) = process_note {
         tracing::info!("{note}");
     }
+    elevate_at_start();
 
     let mut context = tauri::generate_context!();
     if platform::window_startup::loads_hidden()
@@ -3214,6 +3700,7 @@ pub fn run() {
                 for id in crate::plugins::dock::members(window.app_handle()) {
                     crate::plugins::widgets::close_all(window.app_handle(), &id);
                     crate::plugins::boss_live::forget_plugin(window.app_handle(), &id);
+                    crate::plugins::fps::forget_plugin(&id);
                 }
             }
             if let tauri::WindowEvent::Destroyed = event
@@ -3226,6 +3713,7 @@ pub fn run() {
                 if !crate::plugins::dock::members(window.app_handle()).iter().any(|m| m == id) {
                     crate::plugins::widgets::close_all(window.app_handle(), id);
                     crate::plugins::boss_live::forget_plugin(window.app_handle(), id);
+                    crate::plugins::fps::forget_plugin(id);
                 }
                 // The meter hidden and its last plugin window closed: nothing
                 // would be left on screen, so the meter comes back.
@@ -3244,10 +3732,34 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            if let Some(main) = app.get_webview_window("main") {
+                platform::window::joined(&main, platform::ProcessGroup::Meter);
+            }
             // Resolve data directory
             let app_data_dir = app.path().app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             let _ = std::fs::create_dir_all(&app_data_dir);
+
+            // Dev builds quit when a `dev-quit` file appears in the data
+            // folder (`npm run dev:stop`): run as administrator, the meter
+            // can't be stopped from an ordinary shell.
+            #[cfg(debug_assertions)]
+            {
+                let flag = app_data_dir.join("dev-quit");
+                let _ = std::fs::remove_file(&flag);
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_millis(500));
+                    if flag.exists() {
+                        let _ = std::fs::remove_file(&flag);
+                        tracing::info!("dev-quit: quitting");
+                        quit_app(handle.clone());
+                        // Still here a few seconds on: stop outright.
+                        std::thread::sleep(Duration::from_secs(5));
+                        std::process::exit(0);
+                    }
+                });
+            }
 
             // Load resources — try multiple paths (dev vs production)
             let skill_lookup = SkillLookup::new();
@@ -3310,7 +3822,24 @@ pub fn run() {
                 ping_tracker.clone(),
             );
 
+            // A new install (no settings yet): the page asks about sharing
+            // before anything uploads (2.0.80 on; it used to switch guest
+            // uploads on by itself, audit H3).
+            let new_install = !app_data_dir.join("settings.json").exists();
             let settings = Settings::new(app_data_dir.clone());
+            platform::window::set_main_anchor(platform::meter_anchor::Anchor::from_setting(
+                settings.get(METER_ANCHOR_KEY).as_deref(),
+            ));
+            let startup_height = settings
+                .get(WINDOW_HEIGHT_KEY)
+                .and_then(|v| v.trim().parse::<i32>().ok())
+                .unwrap_or(0);
+            #[cfg(feature = "online")]
+            if new_install {
+                settings.set("dpsMeter.newInstall", "true");
+            }
+            #[cfg(not(feature = "online"))]
+            let _ = new_install;
             if let Some(ms) = settings.get(ALL_TARGETS_WINDOW_KEY).and_then(|v| v.trim().parse::<i64>().ok()) {
                 dps_calculator.set_all_targets_window_ms(ms);
             }
@@ -3357,6 +3886,7 @@ pub fn run() {
                 account_seen: Mutex::new(None),
                 #[cfg(feature = "online")]
                 stream_overlay: crate::stream_overlay::Manager::default(),
+                anchored_height: std::sync::atomic::AtomicI32::new(startup_height),
             };
             let capture_suspended = state.capture_suspended.clone();
 
@@ -3420,6 +3950,10 @@ pub fn run() {
             crate::supply_report::spawn(app.handle().clone());
             #[cfg(feature = "online")]
             crate::party_presence::spawn(app.handle().clone());
+            // A deletion of guest uploads the player asked for that hasn't
+            // gone through yet: tried again.
+            #[cfg(feature = "online")]
+            spawn_guest_delete(app.handle().clone());
             #[cfg(feature = "online")]
             crate::stream_overlay::sync(app.handle());
 
@@ -3600,9 +4134,20 @@ pub fn run() {
                 let mut last_ping: Option<u64> = None;
                 // The meter hidden because AION2 is closed (Settings).
                 let mut hidden_closed = false;
+                // Hide while AION2 is closed or while solo, as last checked.
+                let mut closed_or_solo = false;
+                // Out of combat (#106): the setting last seen, and when the
+                // wait began (the meter started, the setting changed, the
+                // player showed the meter, or a Settings/History/Details
+                // window or the mouse kept it up).
+                let mut combat_secs: u64 = 0;
+                let mut combat_wait_from = crate::clock::now_ms();
+                let mut was_wanted = true;
                 // The other windows hidden with the meter (auto-hide), and how
                 // many ticks nothing of ours or the game has been in front.
                 let mut hidden_with_meter: std::collections::HashSet<String> = Default::default();
+                // The plugin dock's always-on-top as last set (see below).
+                let mut dock_on_top: Option<bool> = None;
                 let mut others_delay: u32 = 0;
                 let mut last_odyle: Option<((u32, u32), Option<String>)> = None;
                 loop {
@@ -3636,33 +4181,78 @@ pub fn run() {
                         }
 
                         // --- Hide while AION2 is closed, or while solo (every 2 s) ---
+                        // --- or out of combat (every tick) ---
                         // Hidden as the game closes or the party breaks up (or
                         // the option is turned on then), shown as it opens or a
                         // party forms: in between, the keybind can still bring
                         // the meter back. Solo is fewer than two in the party,
                         // as the game last told (Hirai, 2026-10-22).
+                        // Out of combat: hidden that many seconds after the
+                        // last damage the meter counted, back with the next
+                        // hit; no keybind needed (#106, a headless stream).
+                        let on = |key: &str| state.settings.get(key).as_deref() == Some("true");
                         if tick_count % 4 == 0 {
-                            let on = |key: &str| state.settings.get(key).as_deref() == Some("true");
                             let closed = on("dpsMeter.hideWhenGameClosed") && !platform::window_detector::find_aion2_window();
                             let solo = on("dpsMeter.hideWhenSolo") && state.data_storage.get_party_members().len() < 2;
-                            let want = meter_wanted(&handle) && (closed || solo);
-                            if want != hidden_closed {
-                                if let Some(window) = handle.get_webview_window("main") {
-                                    if want {
-                                        platform::window::minimize_off_top(&window);
-                                    } else {
-                                        show_meter_again(&handle, &window);
-                                    }
+                            closed_or_solo = closed || solo;
+                        }
+                        let now_ms = crate::clock::now_ms();
+                        let secs = hide_out_of_combat_secs(&state.settings);
+                        if secs != combat_secs {
+                            combat_secs = secs;
+                            combat_wait_from = now_ms;
+                        }
+                        let wanted = meter_wanted(&handle);
+                        if wanted && !was_wanted {
+                            // Shown by the player out of combat: not hidden
+                            // again at once.
+                            combat_wait_from = now_ms;
+                        }
+                        was_wanted = wanted;
+                        let main = handle.get_webview_window("main");
+                        if combat_secs > 0
+                            && let Some(window) = &main
+                            && keeps_meter_up(&handle, window, !hidden_closed)
+                        {
+                            combat_wait_from = now_ms;
+                        }
+                        let last_combat = state.data_storage.last_damage_ms().unwrap_or(i64::MIN).max(combat_wait_from);
+                        let idle = tick_count > 20 && out_of_combat(last_combat, now_ms, combat_secs);
+                        let want = wanted && (closed_or_solo || idle);
+                        if want != hidden_closed {
+                            if let Some(window) = &main {
+                                if want {
+                                    platform::window::minimize_off_top(window);
+                                } else if wanted
+                                    && !(on("dpsMeter.autoHideMeter")
+                                        && !platform::window_detector::is_aion2_foreground()
+                                        && !window.is_focused().unwrap_or(false))
+                                {
+                                    // Hidden by the player meanwhile, it stays
+                                    // so; with another program in front and
+                                    // "Hide when AION2 isn't focused" on, the
+                                    // check below brings it back with the game.
+                                    show_meter_again(&handle, window);
                                 }
-                                hidden_closed = want;
                             }
+                            hidden_closed = want;
+                            HIDDEN_BY_RULE.store(want, std::sync::atomic::Ordering::Relaxed);
                         }
 
                         // --- Auto-hide when AION2 loses focus (every tick) ---
-                        let auto_hide = tick_count > 20
-                            && !hidden_closed
+                        // The meter's own hiding waits while it is hidden
+                        // anyway (by the player, AION2 closed, solo, or out
+                        // of combat); the rest below doesn't: Ping's icon
+                        // stayed over the browser with the meter hidden while
+                        // solo (Hirai).
+                        let meter_auto_hide = tick_count > 20
                             && state.settings.get("dpsMeter.autoHideMeter")
-                                .unwrap_or_default() == "true"
+                                .unwrap_or_default() == "true";
+                        // Plugins set to hide go too, with or without the meter.
+                        let others_auto_hide = meter_auto_hide
+                            || (tick_count > 20 && crate::plugins::any_hide_unfocused(&handle));
+                        let auto_hide = meter_auto_hide
+                            && !hidden_closed
                             && meter_wanted(&handle);
                         if auto_hide {
                             if let Some(window) = handle.get_webview_window("main") {
@@ -3678,10 +4268,14 @@ pub fn run() {
                                 let hidden = !is_visible || is_minimized
                                     || platform::window::is_hidden_in_place(&window);
                                 if aion_fg || is_self_fg {
-                                    hide_delay = 0;
-                                    if hidden {
+                                    // Minimised off the top (hide_delay reached 3) and
+                                    // restored by Windows itself, it can be visible but
+                                    // below the game: raised again then too (talyaseen,
+                                    // #148). Not after a quick switch that never hid it.
+                                    if hidden || hide_delay >= 3 {
                                         show_meter_again(&handle, &window);
                                     }
+                                    hide_delay = 0;
                                 } else if !hidden {
                                     // Wait 3 ticks (1.5s) before hiding to avoid
                                     // flickering during alt-tab transitions
@@ -3691,6 +4285,8 @@ pub fn run() {
                                     }
                                 }
                             }
+                        }
+                        if others_auto_hide {
                             // The rest go and come back with it: gone while
                             // another program is in front, back with the game
                             // or any of the meter's windows (Settings in use
@@ -3701,14 +4297,33 @@ pub fn run() {
                                     show_with_meter(&handle, &mut hidden_with_meter);
                                 }
                             } else {
+                                // Plugins' windows and icons at the first look
+                                // (0.5-1 s); Settings, History and Details
+                                // after three (1.5 s), as the meter does, so a
+                                // quick alt-tab doesn't take a form in use away.
                                 others_delay += 1;
-                                if others_delay >= 3 {
-                                    hide_with_meter(&handle, &mut hidden_with_meter);
-                                }
+                                hide_with_meter(&handle, meter_auto_hide && others_delay >= 3, &mut hidden_with_meter);
                             }
                         } else if !hidden_with_meter.is_empty() {
                             // Auto-hide turned off meanwhile: back.
                             show_with_meter(&handle, &mut hidden_with_meter);
+                        }
+
+                        // The plugin dock is on top only while the game or
+                        // one of the meter's windows is in front: with a
+                        // plugin in it that stays shown, it went on covering
+                        // the browser (2026-10-31). It stays where it is, and
+                        // comes back on top with the game. (On KDE a KWin rule
+                        // keeps plugin windows above, over fullscreen games,
+                        // whatever is asked here.)
+                        if tick_count > 20 {
+                            let front = platform::window::front_is_ours_or_game();
+                            if dock_on_top != Some(front) {
+                                if let Some(dock) = handle.get_webview_window(crate::plugins::dock::LABEL) {
+                                    let _ = dock.set_always_on_top(front);
+                                    dock_on_top = Some(front);
+                                }
+                            }
                         }
 
                         // --- Save window position every ~5 seconds (every 10 ticks) ---
@@ -3717,8 +4332,18 @@ pub fn run() {
                                 if let Ok(pos) = window.outer_position() {
                                     // Don't save minimized/hidden positions
                                     if pos.x > -10000 && pos.y > -10000 {
-                                        state.settings.set("window.x", &pos.x.to_string());
-                                        state.settings.set("window.y", &pos.y.to_string());
+                                        let moved_x = state.settings.set("window.x", &pos.x.to_string());
+                                        let moved_y = state.settings.set("window.y", &pos.y.to_string());
+                                        // The anchored height, not the window's: a tooltip
+                                        // open at the save would be taken for the meter's.
+                                        // Only with a moved position, which it goes with
+                                        // (the edge Settings → "Meter stays fixed at" keeps):
+                                        // the height follows the rows, and saving each
+                                        // change rewrote settings.json all fight long.
+                                        let height = state.anchored_height.load(std::sync::atomic::Ordering::Relaxed);
+                                        if height > 0 && (moved_x || moved_y) {
+                                            state.settings.set(WINDOW_HEIGHT_KEY, &height.to_string());
+                                        }
                                     }
                                 }
                             }
@@ -3759,7 +4384,7 @@ pub fn run() {
                         // fighting or not: a meter left open after the
                         // connection came back catches up on its own.
                         #[cfg(feature = "online")]
-                        if state.settings.get(share::AUTO_UPLOAD_KEY).as_deref() == Some("true") {
+                        if share::auto_uploads(&state.settings) {
                             let now = crate::clock::now_ms();
                             for id in share::auto_upload_retries_due(&state.app_data_dir, now) {
                                 if let Ok(record) = state.fight_history.load_fight(&id) {
@@ -3853,7 +4478,8 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             get_app_version,
             get_hotkey_status,
             open_desktop_shortcuts,
@@ -3891,6 +4517,10 @@ pub fn run() {
             crate::plugins::widgets::plugin_widget_post,
             crate::plugins::widgets::plugin_widget_drag,
             crate::plugins::boss_live::plugin_boss_follow,
+            crate::plugins::fps::plugin_fps_watch,
+            set_run_as_admin,
+            crate::plugins::fps::plugin_fps_admin,
+            crate::plugins::plugin_screenshot,
             crate::plugins::widgets::plugin_widget_area,
             crate::plugins::widgets::plugin_widget_where,
             crate::plugins::widgets::plugin_widget_place,
@@ -3905,6 +4535,7 @@ pub fn run() {
             get_details_context,
             get_fight_buffs,
             get_fight_history,
+            get_personal_bests,
             save_fight,
             load_fight,
             delete_fight,
@@ -3920,6 +4551,8 @@ pub fn run() {
             stream_overlay_new_key,
             account_begin_link,
             account_sign_out,
+            guest_status,
+            guest_claim_code,
             get_settings,
             update_settings,
             get_ping,
@@ -3976,18 +4609,94 @@ pub fn run() {
             set_manual_device,
             replay_file,
             test_auto_hide,
-            fetch_url,
-            show_update_window,
+            check_for_update,
+            release_notes,
             build_features,
-        ])
+            dev_logs_preview,
+            guest_stop_sharing,
+        ];
+            // A plugin's window, the dock and widgets reach only the commands
+            // their pages use (`plugins::allowed_from`, security audit H2).
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                let label = invoke.message.webview_ref().label().to_string();
+                let command = invoke.message.command().to_string();
+                if !crate::plugins::allowed_from(&label, &command) {
+                    tracing::warn!("Refused {command} from plugin window {label}");
+                    invoke.resolver.reject(format!("{command} isn't available to plugin windows"));
+                    return true;
+                }
+                handler(invoke)
+            }
+        })
         .run(context)
         .expect("error while running tauri application");
 }
 
 #[cfg(test)]
 mod tests {
+    // Updates are an online build's: the offline one has no updater.
+    #[cfg(feature = "online")]
+    #[test]
+    fn updates_come_only_from_the_cdn() {
+        use super::{update_url_allowed as ok, version_shaped};
+        assert!(ok("https://cdn.a2tools.app/A2Tools-DPS-Meter_2.0.80_x64_en-US.msi"));
+        assert!(ok("https://cdn.a2tools.app/linux/a2tools-dps-meter-2.0.80-1-x86_64.pkg.tar.zst"));
+        for bad in [
+            "http://cdn.a2tools.app/x.msi",
+            "https://cdn.a2tools.app.evil.example/x.msi",
+            "https://evil.example/x.msi",
+            "https://cdn.a2tools.app/../x.msi",
+            "https://cdn.a2tools.app/",
+            r"https://cdn.a2tools.app/a\..\x.msi",
+        ] {
+            assert!(!ok(bad), "{bad}");
+        }
+        assert!(version_shaped("2.0.80"));
+        assert!(!version_shaped("2.0.80\n\nClick Yes"));
+        assert!(!version_shaped("latest"));
+    }
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        use super::openable_url as ok;
+        assert!(ok("https://a2tools.app/logs/1"));
+        assert!(ok("http://example.com"));
+        assert!(ok("HTTPS://Discord.gg/Aion2Global"));
+        assert!(ok("mailto:help@a2tools.app"));
+        for bad in [
+            "file:///C:/Windows/System32/calc.exe",
+            r"C:\Windows\System32\calc.exe",
+            r"\\server\share\x.exe",
+            "ms-settings:privacy",
+            "https://",
+            "https://user:pass@evil.example/",
+            "https://a2tools.app/ x",
+            r"http:\\evil.example",
+            "mailto:",
+            "javascript:alert(1)",
+        ] {
+            assert!(!ok(bad), "{bad}");
+        }
+        assert!(!ok(&format!("https://a2tools.app/{}", "a".repeat(2100))));
+    }
+
     #[cfg_attr(not(feature = "online"), allow(unused_imports))]
     use super::*;
+
+    /// "Hide out of combat" (#106): hidden once the seconds have passed since
+    /// the last hit (or the wait began), never while off.
+    #[test]
+    fn the_meter_hides_after_the_seconds_out_of_combat() {
+        assert!(!out_of_combat(10_000, 19_999, 10));
+        assert!(out_of_combat(10_000, 20_000, 10));
+        assert!(out_of_combat(10_000, 200_000, 120));
+        assert!(!out_of_combat(10_000, 129_999, 120));
+        // Off.
+        assert!(!out_of_combat(0, i64::MAX, 0));
+        // No damage yet and no wait begun: no overflow.
+        assert!(out_of_combat(i64::MIN, 0, 30));
+        assert!(!out_of_combat(0, 0, u64::MAX));
+    }
 
     /// Locked, the window ignores the mouse except over the lock button, and
     /// while a card is open: a one-time popup at start under a lock left on

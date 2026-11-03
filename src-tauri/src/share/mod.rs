@@ -483,6 +483,9 @@ mod tests {
             run_at: 0,
             buffs: None,
             stagger: None,
+            local_actor_id: None,
+            killed: None,
+            max_hp_from_spawn: None,
         }
     }
 
@@ -594,6 +597,38 @@ pub struct SliceMeta {
     /// retry cannot fix, or the retries ran out. The History button still works.
     #[serde(default)]
     pub gave_up: bool,
+}
+
+/// The real uploader name of each fight this PC uploaded, for a guest's
+/// fights to be named again when the player signs in here: a guest uploads
+/// them masked (`upload_detailed`), and only this PC still knows the names.
+/// `{log, actorId, name}` each, at most `max`; the site applies only those
+/// that were the merged guest's.
+pub fn uploaded_names(app_data_dir: &Path, max: usize) -> Vec<serde_json::Value> {
+    let Ok(dir) = std::fs::read_dir(slices_dir(app_data_dir)) else { return Vec::new() };
+    let history = crate::history::fight_history::FightHistoryManager::new(app_data_dir.to_path_buf());
+    let mut out = Vec::new();
+    for entry in dir.flatten() {
+        if out.len() >= max {
+            break;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let meta = read_meta(app_data_dir, id);
+        let (Some(url), Some(actor)) = (meta.url, meta.uploader_actor_id) else { continue };
+        let Some(log) = url.split_once("/logs/").and_then(|(_, rest)| rest.split(['?', '#', '/']).next()).filter(|l| !l.is_empty()) else {
+            continue;
+        };
+        let Ok(record) = history.load_fight(id) else { continue };
+        let Some(name) = record.actors.iter().find(|a| a.actor_id == actor).map(|a| a.nickname.trim().to_string()).filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        out.push(serde_json::json!({ "log": log, "actorId": actor, "name": name.chars().take(32).collect::<String>() }));
+    }
+    out
 }
 
 fn read_meta(app_data_dir: &Path, id: &str) -> SliceMeta {
@@ -736,6 +771,15 @@ pub fn prune_slices(app_data_dir: &Path) {
 pub const AUTO_UPLOAD_KEY: &str = "dpsMeter.autoUpload";
 
 #[cfg(feature = "online")]
+/// Whether finished fights upload by themselves: the account's switch, or
+/// uploading without an account (`account::guest`); `upload_detailed` picks
+/// the key.
+pub fn auto_uploads(settings: &crate::config::settings::Settings) -> bool {
+    settings.get(AUTO_UPLOAD_KEY).as_deref() == Some("true")
+        || crate::account::guest::uploads(settings)
+}
+
+#[cfg(feature = "online")]
 /// How long after the last hit a fight counts as over. The same rule the
 /// snapshot uses to stop re-saving a boss.
 const ENDED_AFTER_MS: i64 = 10_000;
@@ -749,6 +793,7 @@ const ENDED_AFTER_MS: i64 = 10_000;
 pub fn wants_auto_upload(app_data_dir: &Path, record: &FightRecord, now_ms: i64) -> bool {
     let meta = read_meta(app_data_dir, &record.id);
     !record.is_train
+        && is_instanced(record)
         && now_ms - (record.start_time_ms + record.duration_ms) >= ENDED_AFTER_MS
         && slice_path(app_data_dir, &record.id).exists()
         && meta.url.is_none()
@@ -893,6 +938,14 @@ impl UploadFailure {
     }
 }
 
+/// Whether a fight is shared as a log: one in a dungeon or other instance
+/// (the meter saw its dungeon id). Open-world fights, field and world bosses,
+/// stay in the player's own history: they were 3% of logs and players come
+/// for dungeon bosses (2026-10-29).
+pub fn is_instanced(record: &FightRecord) -> bool {
+    record.dungeon_id != 0
+}
+
 #[cfg(feature = "online")]
 /// `upload`, saying whether a failure is worth retrying.
 pub async fn upload_detailed(
@@ -901,12 +954,28 @@ pub async fn upload_detailed(
     record: &FightRecord,
     settings: &crate::config::settings::Settings,
 ) -> Result<UploadResult, UploadFailure> {
+    if !is_instanced(record) {
+        return Err(UploadFailure::fatal("Only dungeon fights are shared as logs."));
+    }
+    let mut as_guest = false;
     let token = match crate::account::secret::load_stored(app_data_dir) {
         crate::account::secret::Stored::Token(token) => token,
         crate::account::secret::Stored::Locked => {
             return Err(UploadFailure::locked(
                 "The desktop keyring is locked. Unlock the keyring to upload fights.",
             ))
+        }
+        // Not signed in: as a guest, when the player chose to upload without
+        // an account (account::guest), claimable once they sign in.
+        crate::account::secret::Stored::Missing
+            if crate::account::guest::uploads(settings) =>
+        {
+            as_guest = true;
+            crate::account::guest::token(client, app_data_dir).await.map_err(|e| UploadFailure {
+                message: e.message,
+                retryable: e.retryable,
+                keyring_locked: false,
+            })?
         }
         crate::account::secret::Stored::Missing => {
             return Err(UploadFailure::fatal("Sign in under Settings → A2 Tools Account to upload fights."))
@@ -930,10 +999,17 @@ pub async fn upload_detailed(
     };
 
     let meta = read_meta(app_data_dir, &record.id);
+    // A guest's upload names nobody, its uploader included: every name goes
+    // masked as the site shows them (Na***a), so a full name never leaves
+    // this PC without an account. Signed in, the account's fights carry the
+    // names (the site masks the party's).
     let names: HashMap<String, String> = record
         .actors
         .iter()
-        .map(|a| (a.actor_id.to_string(), a.nickname.clone()))
+        .map(|a| {
+            let name = if as_guest { crate::entity::fight_record::obscure_nickname(&a.nickname) } else { a.nickname.clone() };
+            (a.actor_id.to_string(), name)
+        })
         .collect();
     let body = serde_json::json!({
         "slice": base64(&compressed),
@@ -972,6 +1048,15 @@ pub async fn upload_detailed(
         return Ok(result);
     }
     let code = status.as_u16();
+    // The guest key no longer works: its fights were claimed by an account
+    // (from another device, with a claim code). Forgotten; the next upload
+    // goes as a new guest.
+    if code == 401 && as_guest {
+        crate::account::secret::clear_guest(app_data_dir);
+        return Err(UploadFailure::retry(
+            "This PC's earlier fights were claimed by an account. The next upload starts afresh without an account.",
+        ));
+    }
     let message = match (code, reply.get("error").and_then(|e| e.as_str())) {
         (401, _) => "Your sign-in has expired. Connect your account again in Settings.".into(),
         (403, Some("insufficient_scope")) => {
@@ -1030,6 +1115,8 @@ mod upload_tests {
         }))
         .unwrap();
         r.is_train = is_train;
+        // A dungeon's: only those are logs (is_instanced).
+        r.dungeon_id = 600101;
         r
     }
 
@@ -1172,6 +1259,8 @@ mod upload_tests {
         assert!(wants_auto_upload(&dir, &boss, ended));
         assert!(!wants_auto_upload(&dir, &fight("auto_9_1000", 1_000, 60_000, true), ended),
                 "a training dummy is never a log");
+        let open_world = FightRecord { dungeon_id: 0, ..boss.clone() };
+        assert!(!wants_auto_upload(&dir, &open_world, ended), "an open-world boss is never a log");
         write_meta(&dir, &boss.id, &SliceMeta { uploader_actor_id: None,
                    url: Some("https://a2tools.app/logs/x".into()), visibility: None, ..Default::default() });
         assert!(!wants_auto_upload(&dir, &boss, ended), "already uploaded");

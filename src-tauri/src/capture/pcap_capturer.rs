@@ -136,7 +136,7 @@ impl PcapLib {
         let mut loaded = None;
         for name in crate::platform::pcap::LIBRARIES {
             // SAFETY: loading libpcap runs no initialisation we depend on not running.
-            match unsafe { Library::new(name) } {
+            match unsafe { crate::platform::pcap::load(name) } {
                 Ok(lib) => {
                     loaded = Some(lib);
                     break;
@@ -318,13 +318,23 @@ impl SafetyNet {
 /// traffic reaches the dispatcher again and its stale check (which runs only
 /// when a packet comes) can clear the lock: a relay that reconnected on a new
 /// local port would otherwise leave every device filtered for the old one,
-/// with nothing ever arriving to notice. Where a filter change empties the
-/// kernel's queue (Npcap), the filter is never narrowed at all.
-fn filter_port(detector: &CombatPortDetector, now: i64) -> Option<u16> {
-    if !crate::platform::pcap::FILTER_CHANGE_KEEPS_QUEUE {
+/// with nothing ever arriving to notice.
+///
+/// Where a filter change empties the kernel's queue (Npcap), the device the
+/// game is locked on keeps the wide filter (its queue holds the game's
+/// packets), and only the others narrow: none of the game's packets wait on
+/// them, so emptying their queue loses nothing. They still see the game's
+/// port, so a relay taking it over or the game moving to them is noticed. Left
+/// wide, every device read all TCP but the web's for the whole session:
+/// Npcap's loopback, every program on the PC talking to another, read at
+/// 7.8 MB/s against 0.5 MB/s off the network (2026-10-29).
+fn filter_port(detector: &CombatPortDetector, now: i64, device: &str) -> Option<u16> {
+    let port = detector.locked_port_now()?;
+    if !crate::platform::pcap::FILTER_CHANGE_KEEPS_QUEUE
+        && detector.current_device().map_or(true, |locked| locked.trim() == device.trim())
+    {
         return None;
     }
-    let port = detector.locked_port_now()?;
     let last = detector.last_parsed_at_ms();
     let stale = last > 0 && now - last > crate::combat::capture_dispatcher::STALE_CONNECTION_MS;
     // The locked port gone quiet: the game may be on a new connection (a
@@ -636,7 +646,7 @@ fn start_capture_thread(
                     }
                 }
             }
-            let port = filter_port(&shared.port_detector, now);
+            let port = filter_port(&shared.port_detector, now, &label);
             if !shared.unfiltered.load(Ordering::Relaxed) && filtered_for != Some(port) && !filter_failed {
                 filtered_for = Some(port);
                 let [full, plain] = capture_filters(port);
@@ -872,7 +882,7 @@ mod tests {
     /// files only). Skipped where no libpcap is installed.
     #[test]
     fn the_capture_filter_passes_the_game_and_nothing_else() {
-        let Some(lib) = crate::platform::pcap::LIBRARIES.iter().find_map(|n| unsafe { Library::new(n) }.ok()) else {
+        let Some(lib) = crate::platform::pcap::LIBRARIES.iter().find_map(|n| unsafe { crate::platform::pcap::load(n) }.ok()) else {
             eprintln!("no libpcap: skipped");
             return;
         };
@@ -944,18 +954,23 @@ mod tests {
     #[test]
     fn the_filter_narrows_to_a_live_lock_and_widens_once_it_goes_quiet() {
         let detector = CombatPortDetector::new();
-        assert_eq!(filter_port(&detector, now_ms()), None, "nothing locked");
+        assert_eq!(filter_port(&detector, now_ms(), "NPF_Loopback"), None, "nothing locked");
         let loopback = Some("NPF_Loopback");
         detector.register_candidate(13328, (13328, 50000), loopback);
         detector.confirm_candidate(13328, 50000, loopback);
         detector.mark_packet_parsed();
         let now = now_ms();
+        // The locked device narrows only where that keeps its queue; any
+        // other device narrows everywhere (none of the game's packets wait
+        // there).
         let live = if crate::platform::pcap::FILTER_CHANGE_KEEPS_QUEUE { Some(13328) } else { None };
-        assert_eq!(filter_port(&detector, now), live);
+        assert_eq!(filter_port(&detector, now, "NPF_Loopback"), live);
+        assert_eq!(filter_port(&detector, now, "Wi-Fi"), Some(13328));
         // A relay that reconnected elsewhere: nothing parsed for the stale
         // time, so the filter lets other traffic through to notice it.
         let quiet = now + crate::combat::capture_dispatcher::STALE_CONNECTION_MS + 1;
-        assert_eq!(filter_port(&detector, quiet), None);
+        assert_eq!(filter_port(&detector, quiet, "NPF_Loopback"), None);
+        assert_eq!(filter_port(&detector, quiet, "Wi-Fi"), None);
     }
 
     #[test]

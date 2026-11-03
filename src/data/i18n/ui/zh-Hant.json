@@ -4,20 +4,43 @@
     "display": {
       "dps": "DPS",
       "total": "DMG",
+      "damageReceived": "承傷",
       "ariaDps": "顯示 DPS",
       "ariaDamage": "顯示總傷害",
-      "both": "兩者",
-      "ariaBoth": "顯示 DPS 和總傷害",
+      "ariaDamageReceived": "顯示承受傷害",
       "hps": "HPS",
       "totalHeal": "HEAL",
       "stagger": "破防",
       "ariaHps": "顯示每秒治療量",
       "ariaHeal": "顯示總治療量",
-      "ariaStagger": "顯示對首領破防條造成的削減"
+      "ariaStagger": "顯示對首領破防條造成的削減",
+      "names": {
+        "dps": "每秒傷害",
+        "totalDamage": "總傷害",
+        "damageReceived": "承受傷害",
+        "hps": "每秒治療",
+        "totalHeal": "總治療",
+        "stagger": "破防",
+        "bossStagger": "首領破防 %",
+        "statColours": "數值配色",
+        "deaths": "死亡次數"
+      },
+      "sortBy": "依此排序",
+      "menuTip": "選擇各列顯示的項目。滾輪或右鍵：下一個項目",
+      "bossStaggerTip": "在首領的 HP 條上顯示破防量表已削減多少",
+      "sortCol": "排序",
+      "showCol": "顯示",
+      "statColoursTip": "每項數值在列、選單和按鈕上以各自的顏色顯示"
     },
     "updates": {
       "meter": "A2Tools DPS Meter {version} 可更新",
       "plugins": "外掛更新：{list}"
+    },
+    "targetMode": {
+      "lastHitByMe": "最後攻擊的敵人",
+      "bossTargets": "僅首領",
+      "trainTargets": "訓練木樁",
+      "allTargets": "所有敵人合計"
     }
   },
   "details": {
@@ -229,7 +252,12 @@
     },
     "hpsChart": "每秒治療",
     "sectionChart": "圖表",
-    "showSections": "顯示的部分"
+    "showSections": "顯示的部分",
+    "hoverTooltip": {
+      "loading": "載入中...",
+      "empty": "此戰鬥沒有技能資料",
+      "error": "無法載入技能"
+    }
   },
   "history": {
     "title": "戰鬥歷史",
@@ -248,6 +276,13 @@
     "viewDungeon": "依副本分組",
     "viewGrouped": "依王分組",
     "fightCount": "{n} 場",
+    "best": "最快 {time}",
+    "top": "最高 {damage}",
+    "showAll": "顯示全部 {n} 場",
+    "showFewer": "收合",
+    "expandAll": "全部展開",
+    "collapseAll": "全部收合",
+    "training": "訓練",
     "fightCountOne": "1 場",
     "previewUpload": "預覽上傳內容",
     "previewUploadTip": "把分享這場戰鬥時會上傳的內容寫成檔案。不會傳送。",
@@ -258,7 +293,45 @@
     "uploadWorking": "上傳中…",
     "uploadDonePublic": "已上傳。連結已複製：{url}",
     "uploadDonePrivate": "已以私人方式上傳。連結已複製：{url}",
-    "openWorld": "野外"
+    "openWorld": "野外",
+    "tabFights": "戰鬥",
+    "tabBests": "個人最佳",
+    "search": "首領或副本…",
+    "allCharacters": "所有角色",
+    "allDifficulties": "所有難度",
+    "periodAll": "全部時間",
+    "periodToday": "最近 24 小時",
+    "period7": "最近 7 天",
+    "period30": "最近 30 天",
+    "sort": "排序",
+    "sortNewest": "最新",
+    "sortFastest": "最快擊殺",
+    "sortPartyDps": "隊伍 DPS",
+    "sortMyDps": "你的 DPS",
+    "sortRecent": "最新",
+    "sortTier": "副本階級",
+    "killsOnly": "僅擊殺",
+    "wipe": "團滅",
+    "pb": "最佳",
+    "pbTip": "你的個人最佳之一",
+    "party": "隊伍",
+    "you": "你",
+    "totalDamage": "總傷害",
+    "finalBoss": "最終首領",
+    "fightGone": "該戰鬥已不再儲存，但紀錄保留。",
+    "unconfirmedTip": "未記錄擊殺（2.0.87 之前的戰鬥）：依造成的傷害判斷。",
+    "openBest": "開啟此戰鬥",
+    "killOne": "擊殺 1 次",
+    "wipeOne": "團滅 1 次",
+    "kills": "擊殺 {n} 次",
+    "wipes": "團滅 {n} 次",
+    "otherBosses": "其他首領（{n}）",
+    "otherLevels": "其他等級（{n}）",
+    "noBests": "尚無副本擊殺。",
+    "encounter": "對象",
+    "fastestKill": "最快擊殺",
+    "yourBest": "你的最佳 DPS",
+    "partyBest": "隊伍最佳"
   },
   "settings": {
     "title": "設定",
@@ -307,22 +380,23 @@
     "showOdyle": "顯示奧德能量",
     "odyleEnergy": "奧德能量",
     "showTtk": "顯示預估擊殺時間",
-    "showHealModes": "在 DPS/DMG 按鈕中顯示治療",
-    "showStaggerMode": "在 DPS/DMG 按鈕中顯示破防",
     "showTotalDps": "顯示隊伍總計",
     "roundDps": "DPS 以千為單位顯示 (13k)",
     "showDpsSuffix": "DPS 後顯示 /s",
     "autoHideMeter": "AION2 不在前景時隱藏",
     "hideWhenGameClosed": "AION2 關閉時隱藏",
     "hideWhenSolo": "僅在隊伍中顯示",
+    "hideOutOfCombat": {
+      "label": "脫離戰鬥時隱藏",
+      "off": "關閉",
+      "seconds": "{seconds} 秒後"
+    },
     "showSuspendBtn": "顯示暫停擷取按鈕",
     "showLockBtn": "顯示點擊穿透鎖定按鈕",
     "playerLimit": {
       "label": "最大顯示人數"
     },
     "partyPresence": "顯示隊伍中的 A2Tools 使用者",
-    "shareBossTimers": "分享野外首領計時",
-    "shareSupplyRequests": "分享補給委託",
     "debugLogging": "除錯記錄",
     "quit": "結束",
     "discord": {
@@ -536,15 +610,23 @@
       "failed": "登入失敗：{error}",
       "supporter": "贊助者",
       "autoUpload": "自動上傳首領戰",
-      "autoUploadHint": "首領戰結束時會以你在 a2tools.app 選擇的公開設定上傳到你的帳號。其他玩家的名稱會被遮蔽。木樁戰鬥不會上傳。"
+      "autoUploadHint": "首領戰結束時會以你在 a2tools.app 選擇的公開設定上傳到你的帳號。其他玩家的名稱會被遮蔽。木樁戰鬥不會上傳。",
+      "guestUpload": "無需帳號上傳首領戰",
+      "guestUploadHint": "首領戰結束後，會以公開形式上傳到 a2tools.app，無需帳號。其他玩家仍會被隱藏。之後登入時，從這台電腦上傳的戰鬥會歸你所有。",
+      "guestClaimHint": "從這台電腦上傳的戰鬥會為你保留。在這裡登入即可歸你所有，或取得代碼在其他裝置上認領。",
+      "guestClaimButton": "取得認領代碼",
+      "guestClaimCode": "登入後在 {url} 輸入 {code}。代碼 15 分鐘後失效。",
+      "claimed": "從這台電腦上傳的 {count} 場戰鬥現在歸你了。"
     },
     "sendLogs": {
-      "hint": "將最新的 3 個封包紀錄傳送給開發者，用於回報問題。",
+      "hint": "將你的除錯日誌和最近的封包日誌（共 3 個檔案）傳送給開發者，用於錯誤回報。",
       "button": "傳送紀錄給開發者",
-      "confirm": "要將最新的 3 個封包紀錄傳送給 A2 Tools 開發者嗎？\n\n封包紀錄是開啟封包紀錄期間錄下的原始遊戲通訊，包含角色名稱。只有開發者能開啟，並會在 30 天後刪除。",
+      "confirm": "要將你的除錯日誌和最近的封包日誌傳送給 A2 Tools 開發者嗎？\n\n除錯日誌記錄了計量器的運作情況。封包日誌是開啟封包記錄期間錄下的原始遊戲流量。兩者都可能包含角色名稱。只有開發者能開啟它們，30 天後會被刪除。",
       "sending": "傳送中...",
       "sent": "已傳送。你的回報代碼是 {code}，請在 Discord 上告訴開發者。",
-      "failed": "無法傳送：{error}"
+      "failed": "無法傳送：{error}",
+      "files": "將傳送以下檔案：",
+      "contents": "封包日誌可能包含聊天內容和其他玩家的名字。"
     },
     "barGap": {
       "label": "條形間距"
@@ -561,8 +643,6 @@
       "autoHideMeter": "其他視窗位於遊戲前方時計量器會隱藏，回到遊戲後再出現。",
       "detailsMonitor": "在所選螢幕上開啟詳細資料視窗並保持在那裡。",
       "showTtk": "在戰鬥計時器旁顯示整場首領戰的預估時長。",
-      "showHealModes": "計量器上的 DPS/DMG 按鈕也會切換到每秒治療量與總治療量。",
-      "showStaggerMode": "計量器上的 DPS/DMG 按鈕也會顯示每位玩家削減首領破防條的數值。",
       "showTotalDps": "在各列下方顯示隊伍總 DPS 和總傷害的條。",
       "roundDps": "13,412 顯示為 13k。",
       "showSuspendBtn": "在計量器上顯示一個按鈕，按下後停止讀取遊戲流量，再按一次恢復。",
@@ -579,8 +659,6 @@
       "allTargetsWindow": "全部目標模式下，計量器彙總最後一次命中前這段時間內命中的所有目標。",
       "updateRate": "統計數字多久刷新一次。越快越早顯示傷害，但佔用更多 CPU。",
       "partyPresence": "同樣使用 A2Tools 的隊友會在你的名字旁看到小小的 A2 標記，你也會看到他們的。隊伍中任何使用 A2Tools 的人都看得到，因此會知道你使用第三方計量器。只會傳送角色名稱與伺服器的雜湊值。",
-      "shareBossTimers": "透過 a2tools.app（及合作夥伴 Aion 2 Timers）與其他玩家分享野外首領計時：開啟地圖時圖上的首領，以及你看到被擊殺的野外首領，以及戰鬥中首領的 HP。只會傳送伺服器、首領、時間與 HP。",
-      "shareSupplyRequests": "當伺服器的補給委託看板變更時（每次重置後），與 a2tools.app 的 Profiteer 分享：只傳送伺服器、看板與委託內容，不傳送你的角色或進度。",
       "debugLogging": "寫入開發者用於排查問題的診斷記錄。",
       "saveRawPackets": "記錄原始遊戲流量以便回報錯誤。除錯記錄會隨之開啟。",
       "globalHotkeys": "下面的按鍵在遊戲位於前景時也能使用。關閉後，這些按鍵會釋放給其他程式。在 Linux 上由桌面註冊這些按鍵，桌面可能會請你核准。",
@@ -588,7 +666,12 @@
       "showMeter": "關閉：只顯示外掛。統計仍在背景記錄戰鬥並上傳。可在此處、用顯示/隱藏快速鍵，或外掛視窗上的統計按鈕重新顯示。",
       "clearOnZone": "切換區域後，何時從統計中清除上一場戰鬥。所有戰鬥都會保留在歷史紀錄中。",
       "hideWhenGameClosed": "遊戲未執行時隱藏計量器，遊戲啟動後再次顯示。",
-      "hideWhenSolo": "不在隊伍中時隱藏計量器，加入隊伍後再次顯示。顯示/隱藏快捷鍵仍可隨時開啟它。"
+      "hideWhenSolo": "不在隊伍中時隱藏計量器，加入隊伍後再次顯示。顯示/隱藏快捷鍵仍可隨時開啟它。",
+      "hideOutOfCombat": "脫離戰鬥達到該時長後隱藏計量器，下一次命中時再次顯示。設定、歷史紀錄或詳情視窗開啟時，或滑鼠停在計量器上時不會隱藏。",
+      "runAsAdmin": "顯示遊戲幀率需要此項。每次啟動計量器時 Windows 都會詢問。",
+      "shareData": "將你所在伺服器的野外首領計時和補給委託分享給 a2tools.app，讓大家的 A2Tools 保持同步：你地圖上的首領、你看到被擊殺的首領及其血量，以及每次重置後的委託板。不會傳送任何關於你角色的資訊。",
+      "pluginAutoUpdate": "計量器啟動時，外掛更新會在背景自動安裝。要求新權限的更新仍會等待你的同意。",
+      "meterAnchor": "行增減時保持不動的計量器邊緣。"
     },
     "globalHotkeys": "使用快捷鍵",
     "hotkeyConsent": {
@@ -626,6 +709,7 @@
       "install": "安裝",
       "update": "更新",
       "updateTo": "更新至 {version}",
+      "downloading": "正在下載…",
       "installing": "正在安裝…",
       "installDone": "{name} {version} 已安裝。",
       "updatesAvailable": "有可用更新：{list}",
@@ -635,6 +719,7 @@
       "consentUpdateTitle": "更新 {name}？",
       "consentIntro": "它將能夠：",
       "consentNew": "新版本還要求：",
+      "consentNetwork": "與任何網頁一樣，外掛可能可以連上網際網路。",
       "consentCancel": "取消",
       "permStorage": "在此電腦上儲存自己的資料",
       "permNotify": "在自己的視窗中顯示簡短訊息",
@@ -642,17 +727,24 @@
       "permWidgets": "顯示可隨意移動並鎖定位置的小視窗",
       "permBossTimers": "讀取玩家透過 a2tools.app 分享的野外首領計時",
       "permCharacter": "查看你角色的名稱、伺服器、職業和等級",
-      "permDecoder": "讀取你自己的遊戲資料：{name}",
+      "permDecoder": "讀取選定的遊戲資料（可能包含其他玩家的資訊）：{name}",
       "permNone": "除顯示視窗外不做其他事",
       "enabled": "啟用",
       "enabledTip": "開啟：隨計量器啟動。關閉：保持安裝，但不執行。",
-      "showMeter": "顯示 DPS 統計",
+      "showMeter": "顯示統計",
       "hideClosed": "AION2 關閉時隱藏",
       "hideUnfocused": "AION2 不在前景時隱藏",
       "inDock": "放入外掛停靠欄（關閉：獨立視窗）",
       "search": "搜尋",
       "noMatch": "沒有符合的外掛。",
-      "permsTitle": "可以:"
+      "permsTitle": "可以:",
+      "permFps": "顯示遊戲幀率（在 Windows 上，計量器會為此要求以系統管理員身分執行）",
+      "permDeathRecap": "被玩家擊殺後：對方是誰，以及對你造成的傷害",
+      "permScreenshot": "擷取自身視窗的截圖，到剪貼簿與你的截圖資料夾",
+      "testHint": "任何人都可以試用的早期版本，和其他外掛一樣經過簽署。它們可能會變動或尚不完善：發現問題請告訴我們。",
+      "testTitle": "測試外掛",
+      "autoUpdate": "自動更新外掛",
+      "whatsNew": "{version} 的新內容"
     },
     "clearOnZone": {
       "label": "清空統計",
@@ -660,6 +752,18 @@
         "instance": "進出副本時",
         "any": "每次切換區域時",
         "never": "從不（保留上一場戰鬥）"
+      }
+    },
+    "runAsAdmin": "以系統管理員身分執行",
+    "runAsAdminTitle": "A2Tools - 以系統管理員身分執行",
+    "runAsAdminAsk": "顯示遊戲幀率需要計量器以系統管理員身分執行。\n\n現在以系統管理員身分重新啟動計量器嗎？每次啟動計量器時 Windows 都會詢問。你可以在設定中關閉此項。",
+    "shareData": "將有用的資料同步到 A2Tools",
+    "meterAnchor": {
+      "label": "計量器固定在",
+      "options": {
+        "top": "頂部",
+        "middle": "中間",
+        "bottom": "底部"
       }
     }
   },
@@ -687,7 +791,12 @@
       "btc": "複製 BTC 地址",
       "eth": "複製 ETH 地址",
       "usdc": "複製 USDC 地址"
-    }
+    },
+    "sponsorLabel": "贊助",
+    "sponsorShort": "用 ExitLag 降低延遲",
+    "sponsorCode": "使用代碼",
+    "sponsorDisclosure": "聯盟連結。若你訂閱，A2 Tools 會獲得佣金，這有助於讓這些工具保持免費。",
+    "more": "在 a2tools.app 查看更多贊助方式"
   },
   "battleTime": {
     "analysing": "監控中",
@@ -701,7 +810,8 @@
     "identifyingPlayer": "#{id}",
     "a2toolsUser": "使用 A2Tools",
     "dpsSuffix": "/秒",
-    "others": "其他"
+    "others": "其他",
+    "deaths": "本場戰鬥中死亡 {count} 次"
   },
   "skills": {
     "fallback": "技能 {code}",
@@ -779,7 +889,9 @@
     "hint": "其他玩家的名稱會被遮蔽，訓練假人的戰鬥不會上傳。可隨時在設定中變更。",
     "signIn": "登入",
     "later": "稍後再說",
-    "close": "關閉"
+    "close": "關閉",
+    "guest": "不使用帳號",
+    "guestHint": "沒有帳號？戰鬥仍可上傳，之後登入即歸你所有。"
   },
   "npcapPrompt": {
     "ask": "A2Tools DPS Meter 需要 Npcap 來讀取遊戲的網路流量，但 Npcap 未安裝或無法使用。\n\n現在安裝嗎？本工具會從 npcap.com 下載 Npcap 安裝程式並開啟它。Npcap 安裝完成後，本工具會自動開始擷取。\n\n選擇「否」可自行從 https://npcap.com/#download 安裝。",
@@ -810,5 +922,55 @@
     "settings": "計量器設定",
     "opacity": "背景不透明度",
     "failed": "此外掛無法啟動：{error}"
+  },
+  "sharing": {
+    "title": "幫忙建立排行榜嗎？",
+    "sub": "選一項開始。隨時可在 設定 → 隱私 中變更。",
+    "shareTitle": "匿名分享戰鬥",
+    "recommended": "推薦",
+    "shareText": "你的首領戰會加入 a2tools.app 的公開紀錄，所有名字都會隱藏。無需帳號。",
+    "noTitle": "不分享",
+    "noText": "你的戰鬥資訊不會離開這台電腦。",
+    "signInBefore": "想用自己的名字上傳戰鬥？",
+    "signIn": "登入 A2 Tools",
+    "signInAfter": "之前分享的戰鬥會轉入你的帳號。",
+    "previewTitle": "分享的戰鬥在 a2tools.app 上的樣子",
+    "never": "絕不會傳送電腦名稱和角色的完整名字。",
+    "policy": "隱私權政策",
+    "continue": "繼續"
+  },
+  "sharingNotice": {
+    "title": "你的戰鬥正在幫忙建立排行榜",
+    "text": "你完成的首領戰會分享到 a2tools.app，所有名字都會隱藏，包括你的（例如 Na***a）。無需帳號，隨時可在 設定 → 隱私 中停止。",
+    "stop": "停止分享",
+    "details": "詳情",
+    "keep": "繼續分享",
+    "stopped": "已停止分享。先前分享的戰鬥正在從 a2tools.app 刪除。"
+  },
+  "privacy": {
+    "title": "隱私",
+    "intro": "本計量器與 a2tools.app 分享的內容。每一項都由你決定。",
+    "share": "匿名分享首領戰",
+    "shareHint": "首領戰結束後會加入 a2tools.app 的公開紀錄和排行榜。所有名字都會隱藏，包括你的。無需帳號。",
+    "signedIn": "已登入：首領戰會上傳到你的 A2 Tools 帳號（見 A2 Tools 帳號）。",
+    "never": "絕不傳送：聊天、電腦名稱、角色的完整名字。「傳送紀錄給開發者」（進階）只在你按下時才傳送。",
+    "policy": "完整隱私權政策"
+  },
+  "changelog": {
+    "title": "新功能",
+    "intro": "最近的版本，最新的在前。",
+    "allReleases": "在 GitHub 查看所有版本",
+    "installed": "已安裝",
+    "available": "有可用更新",
+    "loading": "正在載入更新說明…",
+    "none": "尚無更新說明。",
+    "failed": "無法載入更新說明。也可以在下方的 GitHub 查看。"
+  },
+  "footerMenu": {
+    "tip": "選擇底列顯示的項目",
+    "ttk": "預估擊殺時間",
+    "partyTotal": "隊伍總計",
+    "odyle": "奧德能量",
+    "ping": "延遲"
   }
 }

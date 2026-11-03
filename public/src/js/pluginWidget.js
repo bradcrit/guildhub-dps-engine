@@ -68,6 +68,9 @@
     deliver("locked", !!hello.locked);
     frame = document.createElement("iframe");
     frame.setAttribute("sandbox", "allow-scripts");
+    // Copying text on a click (Event Timers' double right-click on an icon);
+    // the browser allows it only during one, so no widget fills it unasked.
+    frame.setAttribute("allow", "clipboard-write");
     frame.setAttribute("referrerpolicy", "no-referrer");
     frame.setAttribute("allowtransparency", "true");
     const base = convertFileSrc("", "a2plugin").replace(/\/*$/, "/");

@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use super::personal_data::PersonalData;
 
+fn no_stagger() -> f64 {
+    -1.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DpsData {
@@ -24,6 +28,11 @@ pub struct DpsData {
     /// Live current HP of the current target from the in-place HP feed, or -1 if
     /// none has been observed. When >= 0 the bar uses this real value directly.
     pub target_current_hp: i64,
+    /// How far the current target's stagger gauge is worn down (0-100), or -1
+    /// when it has none or none has been seen: shown on the boss bar while
+    /// the meter shows stagger.
+    #[serde(default = "no_stagger")]
+    pub target_stagger_pct: f64,
     /// The current target is a boss (not a training dummy): the page shows the
     /// time-to-kill estimate only then.
     #[serde(default)]
@@ -60,6 +69,7 @@ impl DpsData {
             target_max_hp: 0,
             target_total_damage: 0,
             target_current_hp: -1,
+            target_stagger_pct: -1.0,
             target_is_boss: false,
             target_mob_code: 0,
             dungeon_id: 0,

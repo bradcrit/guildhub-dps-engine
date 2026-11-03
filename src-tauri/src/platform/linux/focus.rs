@@ -6,10 +6,15 @@
 //! On Wayland it also keeps the meter's windows where they were left (#76):
 //! no application may place its own windows there, but a KWin script may.
 //! The script reports where each of the meter's windows was moved or resized
-//! to, and puts each back there when it appears again.
+//! to, and puts each back there when it appears again. It also keeps the
+//! overlay's top, centre or bottom in place as it fits its rows (Settings →
+//! Meter stays fixed at).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+use crate::platform::kwin_rules::OVERLAY_TITLE;
+use crate::platform::meter_anchor::Anchor;
 
 const SERVICE: &str = "app.a2tools.DpsMeter";
 const PATH: &str = "/Focus";
@@ -20,7 +25,8 @@ const PLUGIN: &str = "a2tools-dps-meter-focus";
 /// doubles, which an integer argument would refuse. KWin 6 has
 /// `windowActivated` and `windowAdded`, KWin 5 `clientActivated` and
 /// `clientAdded`. `__PID__` is the meter's process id: only its windows are
-/// placed.
+/// placed. `__OVERLAY_TITLE__` is the overlay's title and `__ANCHOR__` the
+/// edge it keeps (`set_main_anchor`).
 const SCRIPT: &str = r#"// A2Tools DPS Meter: tells the meter which window is active, so it can hide
 // while the game is not in front, and keeps the meter's own windows where
 // they were left. Loaded by the meter at each start.
@@ -67,10 +73,18 @@ function onActivated(w) {
     }
     report(w);
 }
+// The meter's overlay, which sizes itself to its rows.
+function overlay(w) {
+    return String(w.caption) === "__OVERLAY_TITLE__";
+}
+// The height the overlay last kept its edge at (`place`): what it is saved
+// with, so a panel open as it hides does not come back as its height.
+var overlayHeight = 0;
 function remember(w) {
     var g = w.frameGeometry;
+    var h = overlay(w) && overlayHeight > 0 ? overlayHeight : Math.round(g.height);
     callDBus(SERVICE, PATH, IFACE, "Geometry", String(w.caption), String(Math.round(g.x)), String(Math.round(g.y)),
-             String(Math.round(g.width)), String(Math.round(g.height)));
+             String(Math.round(g.width)), String(h));
 }
 function onScreen(r) {
     var area = workspace.virtualScreenGeometry;
@@ -84,27 +98,97 @@ function onScreen(r) {
 // centre where it was, so the overlay, 300 px tall at first, came down
 // 120 px once it shrank to its rows (a CachyOS player, 2026-10-19).
 var HOLD_MS = 4000;
+// The edge the overlay keeps as it fits its rows (Settings → Meter stays
+// fixed at): "top", "middle" or "bottom", written in at load, and whether a
+// panel or the promo has it grown for a moment. The meter answers "Anchor"
+// only once that is not what the script has, so a change is here at once and
+// no resize waits on D-Bus for it.
+var mainAnchor = "__ANCHOR__", mainGrown = false;
+function followAnchor(known) {
+    callDBus(SERVICE, PATH, IFACE, "Anchor", known, function (answer) {
+        var told = String(answer).split(" ");
+        mainAnchor = told[0];
+        mainGrown = told[1] === "grown";
+        followAnchor(String(answer));
+    });
+}
 function place(w) {
     callDBus(SERVICE, PATH, IFACE, "Placement", String(w.caption), function (answer) {
         var p = String(answer).split(",").map(Number);
         if (p.length !== 4 || p.some(isNaN)) return;
         var g = w.frameGeometry;
+        // The overlay sizes itself: its height here is the one it last kept
+        // its edge at (`remember`), not a size to give it.
+        var main = overlay(w);
         // A width or height of 0: the window keeps its own size.
-        var r = { x: p[0], y: p[1], width: p[2] > 0 ? p[2] : g.width, height: p[3] > 0 ? p[3] : g.height };
-        if (!onScreen(r)) return;
+        var r = { x: p[0], y: p[1], width: p[2] > 0 ? p[2] : g.width, height: p[3] > 0 && !main ? p[3] : g.height };
+        // The overlay's bottom where it was left. It appears 300 px tall and
+        // then fits its rows, so with Bottom it goes where its bottom was, not
+        // 300 px below its top: each start moved it down by the difference.
+        var seen = Math.round(r.height);
+        var bottom = r.y + (main && p[3] > 0 ? p[3] : seen);
+        if (main && mainAnchor === "bottom" && !mainGrown) r.y = bottom - seen;
+        // Its top, and the height it last kept its edge at: a panel or the
+        // promo grows it for a moment from its top, and it goes back from there.
+        var top = r.y, keptHeight = bottom - r.y;
+        var placed = onScreen(r);
+        if (main) overlayHeight = placed ? keptHeight : 0;
+        if (!placed) return;
         w.frameGeometry = r;
         // Moved by a resize while held: back to its place, at its new size.
         // Never against the player's own move or resize.
         var until = Date.now() + HOLD_MS;
         var held = false;
-        if (w.interactiveMoveResizeStarted) w.interactiveMoveResizeStarted.connect(function () { until = 0; });
-        else if (w.clientStartUserMovedResized) w.clientStartUserMovedResized.connect(function () { until = 0; });
+        var userMove = false;
+        var start = w.interactiveMoveResizeStarted || w.clientStartUserMovedResized;
+        if (start) {
+            start.connect(function () {
+                userMove = true;
+                until = 0;
+            });
+        }
+        var done = w.interactiveMoveResizeFinished || w.clientFinishUserMovedResized;
+        if (done) {
+            done.connect(function () {
+                userMove = false;
+                var now = w.frameGeometry;
+                seen = Math.round(now.height);
+                top = Math.round(now.y);
+                // The player sized it: its edge is kept from this height.
+                if (main && !mainGrown) keptHeight = overlayHeight = seen;
+            });
+        }
         w.frameGeometryChanged.connect(function () {
-            if (held || Date.now() > until || w.move || w.resize) return;
+            if (held || userMove || w.move || w.resize) return;
             var now = w.frameGeometry;
-            if (Math.round(now.x) === r.x && Math.round(now.y) === r.y) return;
+            if (!main) {
+                if (Date.now() > until) return;
+                if (Math.round(now.x) === r.x && Math.round(now.y) === r.y) return;
+                held = true;
+                w.frameGeometry = { x: r.x, y: r.y, width: now.width, height: now.height };
+                held = false;
+                return;
+            }
+            var x = Math.round(now.x), y = Math.round(now.y), h = Math.round(now.height);
+            var holding = Date.now() <= until;
+            var resized = h !== seen;
+            seen = h;
+            // Held, it stays at its place as any window does; after, a move by
+            // KWin is its place now. A resize keeps the top, or with Bottom the
+            // bottom it had at keptHeight; grown for a moment, it grows from
+            // its top. Centre: KWin keeps the centre itself once not held.
+            var wantX = holding ? r.x : x;
+            var wantY = holding ? top : y;
+            if (resized) {
+                if (mainAnchor === "bottom" && !mainGrown) wantY = top + keptHeight - h;
+                else if (mainAnchor !== "middle" || holding) wantY = top;
+                if (!mainGrown) keptHeight = overlayHeight = h;
+            }
+            top = wantY;
+            // Scale rounding can report +/- 1 px between events.
+            if (Math.abs(x - wantX) <= 1 && Math.abs(y - wantY) <= 1) return;
             held = true;
-            w.frameGeometry = { x: r.x, y: r.y, width: now.width, height: now.height };
+            w.frameGeometry = { x: wantX, y: wantY, width: now.width, height: now.height };
             held = false;
         });
     });
@@ -147,6 +231,7 @@ function gone(w) {
 }
 if (workspace.windowRemoved) workspace.windowRemoved.connect(gone);
 else if (workspace.clientRemoved) workspace.clientRemoved.connect(gone);
+followAnchor(mainAnchor);
 if (workspace.windowActivated) {
     workspace.windowActivated.connect(onActivated);
     report(workspace.activeWindow);
@@ -183,22 +268,43 @@ static X11_IN_WAYLAND: AtomicBool = AtomicBool::new(false);
 /// The script is running, so KWin puts each of the meter's windows back where
 /// it was each time it appears (`place` in the script).
 static PLACING: AtomicBool = AtomicBool::new(false);
+/// The edge the overlay keeps as it fits its rows (Settings → Meter stays
+/// fixed at): 0 top, 1 middle, 2 bottom. The script has it from the start and
+/// is told when it changes (`Focus::anchor`).
+static MAIN_ANCHOR: AtomicU8 = AtomicU8::new(1);
+/// Wakes a held `Focus::anchor` when the setting changes.
+static ANCHOR_CHANGED: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
+/// How long `Focus::anchor` holds the script's call before it answers with
+/// the edge unchanged: KWin gives up on a D-Bus call after 25 s and then never
+/// calls the script back, which would not hear of a change again.
+const ANCHOR_HOLD: std::time::Duration = std::time::Duration::from_secs(20);
+/// The overlay is grown for a moment (a panel, the promo): it grows from its
+/// top, and its edge waits for it to shrink back, as where the meter moves it
+/// itself (`meter_anchor::resize`).
+static MAIN_GROWN: AtomicBool = AtomicBool::new(false);
+/// What the script last said it has (`Focus::anchor`), for `tell_grown`.
+static HEARD: std::sync::LazyLock<tokio::sync::watch::Sender<String>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(String::new()));
+/// How long `tell_grown` waits for the script: a D-Bus round trip, a frame or
+/// two of KWin's.
+const HEARD_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Keep the meter's windows where they were left, through KWin (#76). Only
 /// in a Wayland session: under X11 the meter places its own windows, as on
 /// Windows (in a Wayland session too, but for its widgets: X11_IN_WAYLAND).
 pub fn keep_places(places: Places) {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        let x11 = std::env::var("GDK_BACKEND").is_ok_and(|b| b.starts_with("x11"));
-        X11_IN_WAYLAND.store(x11, Ordering::Relaxed);
+        X11_IN_WAYLAND.store(places_own_windows(), Ordering::Relaxed);
         let _ = PLACES.set(places);
     }
 }
 
 /// Whether the meter places and remembers its own windows, KWin placing only
-/// its widgets (see X11_IN_WAYLAND).
+/// its widgets (see X11_IN_WAYLAND). Read from the environment, which is set
+/// before any window opens, so it is right from the start and not only once
+/// `keep_places` has run on its thread.
 pub fn places_own_windows() -> bool {
-    X11_IN_WAYLAND.load(Ordering::Relaxed)
+    std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var("GDK_BACKEND").is_ok_and(|b| b.starts_with("x11"))
 }
 
 /// Whether KWin puts the meter's windows back where they were whenever they
@@ -206,6 +312,58 @@ pub fn places_own_windows() -> bool {
 /// then be hidden for good and shown again at its place.
 pub fn kwin_places_windows() -> bool {
     PLACING.load(Ordering::Relaxed) && PLACES.get().is_some() && !X11_IN_WAYLAND.load(Ordering::Relaxed)
+}
+
+/// The edge the overlay keeps on KDE Wayland, where the script keeps it. A
+/// held `Focus::anchor` answers at once.
+pub fn set_main_anchor(anchor: Anchor) {
+    let v = match anchor {
+        Anchor::Top => 0,
+        Anchor::Middle => 1,
+        Anchor::Bottom => 2,
+    };
+    MAIN_ANCHOR.store(v, Ordering::Relaxed);
+    ANCHOR_CHANGED.notify_waiters();
+}
+
+fn main_anchor() -> Anchor {
+    match MAIN_ANCHOR.load(Ordering::Relaxed) {
+        0 => Anchor::Top,
+        2 => Anchor::Bottom,
+        _ => Anchor::Middle,
+    }
+}
+
+/// What the script is told: the edge, and " grown" while the overlay is.
+fn main_state() -> String {
+    let edge = main_anchor().name();
+    if MAIN_GROWN.load(Ordering::SeqCst) { format!("{edge} grown") } else { edge.to_string() }
+}
+
+/// Whether the overlay's next resize keeps its edge, or grows it for a moment
+/// (a panel, the promo). On KDE Wayland the script is told before the resize.
+pub async fn anchor_next_resize(anchored: bool) {
+    if kwin_places_windows() {
+        tell_grown(!anchored).await;
+    }
+}
+
+/// The script must have it before the resize reaches KWin, or with Bottom a
+/// panel would open upwards and close a round trip late: the meter waits until
+/// the script asks again with it.
+async fn tell_grown(grown: bool) {
+    if MAIN_GROWN.swap(grown, Ordering::SeqCst) == grown {
+        return;
+    }
+    ANCHOR_CHANGED.notify_waiters();
+    // Only Bottom tells them apart: Top keeps the top either way, and KWin
+    // keeps Centre itself.
+    if main_anchor() != Anchor::Bottom {
+        return;
+    }
+    let want = main_state();
+    let mut heard = HEARD.subscribe();
+    let _ = tokio::time::timeout(HEARD_WAIT, heard.wait_for(|heard| *heard == want)).await;
 }
 
 /// 0: not known (no report yet, or not KDE). 1: the game or one of the
@@ -319,13 +477,33 @@ impl Focus {
     }
 
     /// Where one of the meter's windows belongs, `"x,y,width,height"`, or ""
-    /// to leave it where KWin put it.
+    /// to leave it where KWin put it. The overlay's height is the one it had
+    /// there, for the edge it keeps; it sizes itself.
     fn placement(&self, caption: String) -> String {
         PLACES
             .get()
             .and_then(|places| (places.load)(&caption))
             .map(|(x, y, w, h)| format!("{x},{y},{w},{h}"))
             .unwrap_or_default()
+    }
+
+    /// The edge the overlay keeps (Settings → Meter stays fixed at), and
+    /// whether it is grown for a moment, once that is not `known`, what the
+    /// script has: at once, when it changes (`set_main_anchor`,
+    /// `anchor_next_resize`), or unchanged after ANCHOR_HOLD, for the script
+    /// to ask again. So the script hears of a change as it is made, rather
+    /// than asking at each resize.
+    async fn anchor(&self, known: String) -> String {
+        HEARD.send_replace(known.clone());
+        let changed = ANCHOR_CHANGED.notified();
+        if main_state() == known {
+            // zbus runs this on its own executor, which has no timer.
+            let _ = tauri::async_runtime::spawn(async move {
+                let _ = tokio::time::timeout(ANCHOR_HOLD, changed).await;
+            })
+            .await;
+        }
+        main_state()
     }
 }
 
@@ -368,7 +546,10 @@ pub fn watch(on_change: impl Fn() + Send + Sync + 'static) -> Result<(), String>
 
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     let path = dir.join("a2tools-dps-meter-focus.js");
-    let script = SCRIPT.replace("__PID__", &std::process::id().to_string());
+    let script = SCRIPT
+        .replace("__PID__", &std::process::id().to_string())
+        .replace("__OVERLAY_TITLE__", OVERLAY_TITLE)
+        .replace("__ANCHOR__", main_anchor().name());
     std::fs::write(&path, script).map_err(|e| format!("writing the script: {e}"))?;
 
     let kwin = zbus::blocking::Proxy::new(&connection, "org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting")
@@ -406,5 +587,39 @@ mod tests {
         assert_eq!(classify(0, "aion2.exe", ""), Who::Game);
         assert_eq!(classify(std::process::id(), "a2tools-dps-meter", "A2Tools DPS Meter"), Who::Meter);
         assert_eq!(classify(0, "firefox", "Mozilla Firefox"), Who::Other);
+    }
+
+    #[test]
+    fn the_script_hears_of_a_change_at_once() {
+        use tauri::async_runtime::block_on;
+        set_main_anchor(Anchor::Top);
+        MAIN_GROWN.store(false, Ordering::SeqCst);
+        // Not what the script has: answered at once.
+        assert_eq!(block_on(Focus.anchor("middle".into())), "top");
+        // What it has: held until the setting changes.
+        let change = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            set_main_anchor(Anchor::Bottom);
+        });
+        let asked = std::time::Instant::now();
+        assert_eq!(block_on(Focus.anchor("top".into())), "bottom");
+        assert!(asked.elapsed() < ANCHOR_HOLD);
+        change.join().unwrap();
+        // A panel opening with Bottom: the meter goes on once the script asks
+        // again with it, not after the wait, so the resize is taken for one.
+        std::thread::spawn(|| {
+            let mut known = "bottom".to_string();
+            loop {
+                known = block_on(Focus.anchor(known));
+            }
+        });
+        let told = std::time::Instant::now();
+        block_on(tell_grown(true));
+        assert!(told.elapsed() < HEARD_WAIT);
+        assert_eq!(*HEARD.borrow(), "bottom grown");
+        let told = std::time::Instant::now();
+        block_on(tell_grown(false));
+        assert!(told.elapsed() < HEARD_WAIT);
+        assert_eq!(*HEARD.borrow(), "bottom");
     }
 }

@@ -174,6 +174,72 @@ pub fn walk(buffer: &[u8]) -> Framing {
     out
 }
 
+/// Where the first whole frame starts in `buffer`, bytes that came right
+/// after a hole in the stream (`tcp_order`): the hole took the start of the
+/// frame they continue, so the walk must not read them as a length.
+///
+/// A place counts when three frames walk whole from it, or two and then the
+/// buffer's end or a frame still to come, or one bundle so. Its first two
+/// frames must open as nearly every packet does (`COMMON_OPCODE_HIGH`):
+/// lengths alone, a stretch of a frame's middle walked from its third byte to
+/// the end of the stream (a test of the capture of 2026-10-27). Each place is
+/// tried that far only, never to the end of the buffer: walked to the end
+/// from each of 8,192 places, a debug build fell behind the capture, its
+/// dropped packets made more holes, and the meter read nothing for good.
+/// Looked for in the first `RESYNC_SEARCH` bytes. `None`: no such place yet,
+/// wait for more.
+pub fn resync_start(buffer: &[u8]) -> Option<usize> {
+    let starts_here = |from: usize| -> bool {
+        let mut at = from;
+        let mut whole = 0;
+        let mut first_is_bundle = false;
+        loop {
+            while at < buffer.len() && buffer[at] == 0x00 {
+                at += 1;
+            }
+            if at >= buffer.len() {
+                return whole >= 2 || (whole == 1 && first_is_bundle);
+            }
+            let length = read_varint(buffer, at);
+            if length.length <= 0 || length.value <= 0 {
+                return false;
+            }
+            let Some(size) = frame_size(length.value, length.length) else { return false };
+            if size > MAX_PACKET_BYTES {
+                return false;
+            }
+            let payload = at + length.length as usize;
+            let opens_as_packets_do = buffer.get(payload + 1).is_some_and(|b| COMMON_OPCODE_HIGH.contains(b));
+            if whole < 2 && !opens_as_packets_do {
+                return false;
+            }
+            let bundle = bundle_header_at(buffer, payload);
+            if at + size > buffer.len() {
+                let limit = if bundle { MAX_BUNDLE_WAIT_BYTES } else { MAX_FRAGMENT_WAIT_BYTES };
+                return size <= limit && (whole >= 2 || (whole == 1 && bundle));
+            }
+            if whole == 0 {
+                first_is_bundle = bundle;
+            }
+            whole += 1;
+            if whole >= 3 {
+                return true;
+            }
+            at += size;
+        }
+    };
+    (0..buffer.len().min(RESYNC_SEARCH)).find(|&from| buffer[from] != 0x00 && starts_here(from))
+}
+
+/// The second byte of 99.3% of packets' opcodes (55,954 frames of a capture
+/// of 2026-10-27): `xx 36`, `xx 37`, `xx 38`, `00 8D` and a bundle's `FF FF`.
+const COMMON_OPCODE_HIGH: [u8; 5] = [0x36, 0x37, 0x38, 0x8D, 0xFF];
+
+/// How far into the bytes after a hole the next frame is looked for. The
+/// largest packet is 64 KB, but a frame cut by a hole ends within one or two
+/// segments of it.
+pub const RESYNC_SEARCH: usize = 8192;
+
 /// Whether a bundle's header starts at `at`: `FF FF`, then a little-endian
 /// decompressed size that is non-zero and within what decompress_bundle
 /// accepts. Only the header need have arrived.
@@ -283,11 +349,28 @@ pub fn length_value(body_len: usize) -> u32 {
     body_len as u32 + 4
 }
 
+/// What one top-level bundle may decompress to, the bundles nested in it
+/// included: four levels of 1 MB bundles that each hold more of them would
+/// otherwise multiply (#131). Real ones are a few hundred KB at most.
+const MAX_DECOMPRESSED_PER_READ: usize = 8 * MAX_DECOMPRESSED_BYTES;
+
+thread_local! {
+    static READ_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_DECOMPRESSED_PER_READ) };
+}
+
+/// Start a top-level bundle's budget (`MAX_DECOMPRESSED_PER_READ`): every
+/// walk calls it before opening a bundle it found at the top, so the ones
+/// nested in it share what is left.
+pub fn new_read() {
+    READ_BUDGET.with(|b| b.set(MAX_DECOMPRESSED_PER_READ));
+}
+
 /// Decompress a bundle payload (one that starts at its `FF FF`).
 ///
 /// `FF FF (2) + decompressed_size (4 LE) + lz4 block`. Returns `None` for
 /// anything malformed, because a bundle that will not decompress is a resync
-/// artefact rather than an error worth surfacing.
+/// artefact rather than an error worth surfacing, and for one past what is
+/// left of the read's budget (`new_read`).
 pub fn decompress_bundle(payload: &[u8]) -> Option<Vec<u8>> {
     if payload.len() < 7 {
         return None;
@@ -296,6 +379,11 @@ pub fn decompress_bundle(payload: &[u8]) -> Option<Vec<u8>> {
     if size == 0 || size > MAX_DECOMPRESSED_BYTES {
         return None;
     }
+    let left = READ_BUDGET.with(|b| b.get());
+    if size > left {
+        return None;
+    }
+    READ_BUDGET.with(|b| b.set(left - size));
     lz4_flex::decompress(&payload[6..], size).ok()
 }
 
@@ -334,6 +422,33 @@ mod tests {
         let mut b = vec![op, 0x36];
         b.extend((0..len - 2).map(|i| (i % 251) as u8 | 1));
         b
+    }
+
+    /// After a hole (2026-10-27, port 13328, 10:19:42): a segment that is the
+    /// middle of a zone-load message, then the bundle with the zone's spawns.
+    /// Read from its first byte, `B0 0C` made a 1,582-byte frame of it and
+    /// swallowed the bundle; read from where it resyncs, the bundle frames.
+    #[test]
+    fn after_a_hole_reading_starts_at_a_whole_frame() {
+        let text = "B00C3792000087091000114A3C00022D00510000150140E8000402004201000C02120060014E2C960F2F72\
+                    0002670A052700F400080000440E4446AC27B94750FA1647720AF000700A00000A57756E64657277616C64\
+                    A700222A1E9009C0010E0036411F287BA1010000";
+        let middle: Vec<u8> = (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect();
+        let spawns = bundle(&[packet(&body(0x41, 40)), packet(&body(0x45, 30))].concat());
+        let rest = [packet(&body(0x1D, 12)), packet(&body(0x0E, 7))].concat();
+        let stream = [middle.clone(), spawns.clone(), rest.clone()].concat();
+
+        let wrong = walk(&stream);
+        assert!(!wrong.frames.iter().any(|f| f.kind == FrameKind::Bundle), "read from the start, the bundle is swallowed");
+
+        let start = resync_start(&stream).expect("a frame start");
+        let framed = walk(&stream[start..]);
+        let bundle_at = middle.len() - start;
+        assert!(framed.frames.iter().any(|f| f.kind == FrameKind::Bundle && f.start == bundle_at), "{start}");
+        assert_eq!(framed.consumed, stream.len() - start);
+
+        // With only the middle and part of the bundle there yet: wait.
+        assert_eq!(resync_start(&middle[..60]), None);
     }
 
     #[test]
@@ -387,6 +502,17 @@ mod tests {
         let mut bad = varint(40_000);
         bad.extend([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
         assert!(!bundle_header_at(&bad, varint(40_000).len()));
+    }
+
+    #[test]
+    fn a_read_decompresses_no_more_than_its_budget() {
+        let payload = bundle(&vec![7u8; MAX_DECOMPRESSED_BYTES]);
+        let payload = &payload[payload.iter().position(|&b| b == 0xFF).unwrap()..];
+        new_read();
+        let opened = (0..10).filter(|_| decompress_bundle(payload).is_some()).count();
+        assert_eq!(opened, MAX_DECOMPRESSED_PER_READ / MAX_DECOMPRESSED_BYTES);
+        new_read();
+        assert!(decompress_bundle(payload).is_some());
     }
 
     #[test]

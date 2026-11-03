@@ -26,6 +26,11 @@ use super::{host, require, window_plugin};
 const MAX_FOLLOW: usize = 50;
 /// A keep-alive this often; the server answers it without waking.
 const PING_EVERY: Duration = Duration::from_secs(30);
+/// A connection that has said nothing for this long (two keep-alives without
+/// a "pong") is dead, though nothing closed it: dropped and made again.
+/// Sending alone doesn't notice (a send into a dead route still succeeds), so
+/// it would look connected while no update came.
+const SILENT_FOR: Duration = Duration::from_secs(75);
 
 #[derive(Default)]
 struct State {
@@ -137,7 +142,14 @@ async fn run(app: tauri::AppHandle, server: u32, mut rx: watch::Receiver<Vec<Str
         if set.is_empty() {
             return;
         }
-        let connected = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(live_url(server))).await;
+        // A boss update is a few hundred bytes; a message past this is not one (#131).
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(1 << 20),
+            max_frame_size: Some(1 << 20),
+            ..Default::default()
+        };
+        let connect = tokio_tungstenite::connect_async_with_config(live_url(server), Some(config), false);
+        let connected = tokio::time::timeout(Duration::from_secs(15), connect).await;
         let mut ws = match connected {
             Ok(Ok((ws, _))) => ws,
             Ok(Err(e)) => {
@@ -170,10 +182,12 @@ async fn run(app: tauri::AppHandle, server: u32, mut rx: watch::Receiver<Vec<Str
         tell(&app, serde_json::json!({ "type": "status", "server": server, "connected": true }));
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.tick().await;
+        let mut heard = tokio::time::Instant::now();
         let closed = loop {
             tokio::select! {
                 msg = ws.next() => match msg {
                     Some(Ok(Message::Text(text))) => {
+                        heard = tokio::time::Instant::now();
                         if text.as_str() == "pong" {
                             continue;
                         }
@@ -192,7 +206,7 @@ async fn run(app: tauri::AppHandle, server: u32, mut rx: watch::Receiver<Vec<Str
                         }
                         break false;
                     }
-                    Some(Ok(_)) => {}
+                    Some(Ok(_)) => heard = tokio::time::Instant::now(),
                     Some(Err(_)) | None => break false,
                 },
                 changed = rx.changed() => {
@@ -208,6 +222,10 @@ async fn run(app: tauri::AppHandle, server: u32, mut rx: watch::Receiver<Vec<Str
                     }
                 }
                 _ = ping.tick() => {
+                    if heard.elapsed() >= SILENT_FOR {
+                        tracing::info!("Boss live {server}: nothing heard for {} s, reconnecting", heard.elapsed().as_secs());
+                        break false;
+                    }
                     if ws.send(Message::Text("ping".into())).await.is_err() {
                         break false;
                     }

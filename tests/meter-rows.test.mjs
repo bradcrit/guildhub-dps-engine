@@ -39,25 +39,41 @@ test("by name as before, and nobody's without either", () => {
   assert.equal(unknown.some((r) => r.isUser), false);
 });
 
-test("stagger is a mode of the DPS/DMG button, read from each row, unless turned off", () => {
+test("one metric sorts, others ride along as columns; stagger always offered", () => {
   const dps = app("Mine");
   dps.updateDisplayToggleLabel = () => {};
-  // Off by default: only once turned on is Stagger in the cycle.
-  assert.deepEqual(Array.from(dps.displayModes()), ["totalDamage", "both", "hps", "totalHeal"]);
-  dps.showStaggerMode = true;
+  dps.extraMetrics = [];
+  assert.deepEqual(Array.from(dps.displayModes()), ["totalDamage", "damageReceived", "hps", "totalHeal", "stagger"]);
   const rows = dps.buildRowsFromMapObject({ 5: { ...row("Mine", 10), stagger: 35 }, 6: row("Other", 20) });
   assert.deepEqual(Array.from(rows, (r) => r.stagger).sort(), [0, 35]);
   dps.setDisplayMode("stagger");
   assert.equal(dps.displayMode, "stagger");
   const mine = rows.find((r) => r.id === "5");
-  assert.deepEqual({ ...dps.getMetricForRow(mine) }, { value: 35, text: "35" });
-  assert.deepEqual(Array.from(dps.displayModes()), ["totalDamage", "both", "hps", "totalHeal", "stagger"]);
-  dps.showStaggerMode = false;
+  const metric = dps.getMetricForRow(mine);
+  assert.deepEqual([metric.value, metric.text, metric.extras.length], [35, "35", 0]);
+  // Extras keep the menu's order and never repeat the primary.
+  dps.dpsFormatter = new Intl.NumberFormat("en-US");
+  dps.extraMetrics = ["stagger", "totalDamage", "dps"];
   dps.setDisplayMode("stagger");
+  assert.deepEqual(Array.from(dps.extraMetrics), ["dps", "totalDamage"]);
+  assert.equal(dps.getMetricForRow(mine).extras.length, 2);
+  // Healing is always offered (its Settings switch is gone).
+  dps.extraMetrics = ["hps"];
+  dps.setDisplayMode("totalHeal");
+  assert.equal(dps.displayMode, "totalHeal");
+  assert.deepEqual(Array.from(dps.extraMetrics), ["hps"]);
+  // The old "both" no longer exists as a mode.
+  dps.setDisplayMode("both");
   assert.equal(dps.displayMode, "dps");
-  dps.showHealModes = false;
-  dps.showStaggerMode = true;
-  assert.deepEqual(Array.from(dps.displayModes()), ["totalDamage", "both", "stagger"]);
+});
+
+test("damage taken is available as a live row metric", () => {
+  const dps = app("Mine");
+  const [mine] = dps.buildRowsFromMapObject({ 5: { ...row("Mine", 10), damageReceived: 12345 } });
+  assert.equal(mine.damageReceived, 12345);
+  dps.formatAbbreviatedNumber = (value) => String(value);
+  const metric = dps.metricFor(mine, "damageReceived");
+  assert.deepEqual([metric.value, metric.text], [12345, "12345"]);
 });
 
 test("in Stagger mode a row's tooltip lists its stagger by skill, most first", () => {

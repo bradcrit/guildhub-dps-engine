@@ -101,8 +101,8 @@
     plugin.setCompact(panel.compact);
   });
 
-  listen("plugin-event", (event) => {
-    const payload = event.payload || {};
+  const onEvent = (payload) => {
+    payload ||= {};
     if (typeof payload.event !== "string") return;
     // `listen` hears the event whichever window it was sent to, so each plugin
     // window heard every plugin's, and another plugin's decoder of the same
@@ -111,6 +111,12 @@
     if (payload.plugin !== undefined && payload.plugin !== id) return;
     if (payload.event === "theme") applyTheme(payload.data);
     plugin.receive(payload);
+  };
+  listen("plugin-event", (event) => onEvent(event.payload));
+  // The meter's numbered events, several at once (a burst sent one by one
+  // took the page past 1 GB): each as a "plugin-event".
+  listen("plugin-events", (event) => {
+    if (Array.isArray(event.payload)) for (const e of event.payload) onEvent(e);
   });
 
   plugin.start().then((hello) => {

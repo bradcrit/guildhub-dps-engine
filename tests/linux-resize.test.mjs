@@ -101,10 +101,15 @@ test("Windows tool windows drag from the header by the page, not by app-region",
 test("other Linux desktops keep viewport resizing without GNOME styling", async () => {
   const app = setup({ supported: false });
   await tick();
+  // A Wayland window reads its place as 0,0: the room to grow must not be
+  // taken from it (Hyprland moved a window grown to the whole screen, #102).
+  Object.assign(app.context.window, { innerWidth: 420, innerHeight: 180, screenX: 0, screenY: 0, screen: { availWidth: 3440, availHeight: 1440 } });
   const press = pressHandle();
   app.emit("mousedown", press);
   assert.equal(press.stopped, undefined);
   assert.equal(app.calls.at(-1).command, "resize_window");
+  assert.equal(app.calls.at(-1).args.height, 180, "the height stays the meter's");
+  assert.equal(app.calls.at(-1).args.width, 820, "sideways, by a bounded amount");
   assert.equal(app.nativeResizes.length, 0);
   assert.equal(app.classes.has("linuxOverlay"), false);
 });
@@ -131,7 +136,7 @@ test("GNOME uses compositor resizing for the overlay and tool edges", async () =
   overlayApp.emit("mousedown", press);
   await tick();
   assert.equal(press.stopped, true);
-  assert.deepEqual(overlayApp.nativeResizes[0], ["SouthEast", 316, 40]);
+  assert.deepEqual(overlayApp.nativeResizes[0], ["East", 316, 40]);
   assert.equal(overlayApp.classes.has("linuxOverlay"), true);
   assert.equal(overlayApp.calls.some((call) => call.command === "resize_window"), false);
 

@@ -267,6 +267,11 @@ fn canonicalise(record: &mut FightRecord) {
     record.actors.sort_by_key(|a| a.actor_id);
     record.jobs.sort();
     record.job_ids.sort_unstable();
+    // History's own (you, the kill, the HP's source): the log service reports
+    // the kill in its checks, and its records stay as they were.
+    record.local_actor_id = None;
+    record.killed = None;
+    record.max_hp_from_spawn = None;
     // Buffs come from the slice's abnormal records (meter 2.0.56 on). A slice
     // from an older meter has none, so its timeline is empty: say "no buff
     // data" (None) rather than "no buffs were seen". Every real fight has some.
@@ -366,6 +371,27 @@ pub fn derive_fight(
 /// A slice's records and blind map, as `evidence_slice::decode` gives them.
 pub type Decoded = (Vec<(i32, Vec<u8>)>, HashMap<String, u64>);
 
+/// The data tables a derive reads, parsed: the NPC table (762 KB of JSON),
+/// the skill table and the DoT list. Read only while deriving, so the log
+/// service parses them once per isolate (`derive_decoded_with`), not on every
+/// request, twice when the first pass found nothing (~15 ms each).
+pub struct Tables {
+    npcs: Arc<NpcLookup>,
+    skills: Arc<SkillLookup>,
+    dot_ids: Option<std::collections::HashSet<i32>>,
+}
+
+impl Tables {
+    pub fn load(npcs_json: &str, skills_json: &str, dot_ids_json: &str) -> Self {
+        let npcs = Arc::new(NpcLookup::new());
+        npcs.load_from_json(npcs_json);
+        let skills = Arc::new(SkillLookup::new());
+        skills.load_from_json(skills_json);
+        let dot_ids = serde_json::from_str::<Vec<i32>>(dot_ids_json).ok().map(|ids| ids.into_iter().collect());
+        Tables { npcs, skills, dot_ids }
+    }
+}
+
 /// `derive_fight` on a slice already read, for the service, which reads it
 /// as it unpacks (`evidence_slice::decode_from`).
 pub fn derive_decoded(
@@ -374,16 +400,19 @@ pub fn derive_decoded(
     skills_json: &str,
     dot_ids_json: &str,
 ) -> Result<DerivedFight, DeriveError> {
-    match derive_fight_with(decoded, npcs_json, skills_json, dot_ids_json, true, false) {
+    derive_decoded_with(decoded, &Tables::load(npcs_json, skills_json, dot_ids_json))
+}
+
+/// `derive_decoded` with the tables already parsed.
+pub fn derive_decoded_with(decoded: &Decoded, tables: &Tables) -> Result<DerivedFight, DeriveError> {
+    match derive_fight_with(decoded, tables, true, false) {
         // Slices from early meters (2.0.30 to 2.0.37) have no self record and
         // no dungeon, so `is_our_fight` (2026-10-05, #19) takes the uploader's
         // own boss for a stranger's and nothing is derived: 56 logs a re-derive
         // could not update (2026-10-11). A slice is an upload its owner chose
         // to send, so when "ours only" finds nothing, every fight counts. A
         // slice that derives as it is never comes here, so none changes.
-        Err(DeriveError::NothingDerived) => {
-            derive_fight_with(decoded, npcs_json, skills_json, dot_ids_json, true, true)
-        }
+        Err(DeriveError::NothingDerived) => derive_fight_with(decoded, tables, true, true),
         other => other,
     }
     .map(|(fight, _)| fight)
@@ -402,7 +431,7 @@ pub fn derive_fight_unhidden(
     dot_ids_json: &str,
 ) -> Result<(DerivedFight, i64), DeriveError> {
     let decoded = evidence_slice::decode(slice).ok_or(DeriveError::NotASlice)?;
-    derive_fight_with(&decoded, npcs_json, skills_json, dot_ids_json, false, false)
+    derive_fight_with(&decoded, &Tables::load(npcs_json, skills_json, dot_ids_json), false, false)
 }
 
 /// `derive_fight_unhidden` counting every boss fight in the slice, not only
@@ -415,28 +444,19 @@ pub fn derive_fight_unhidden_every(
     dot_ids_json: &str,
 ) -> Result<(DerivedFight, i64), DeriveError> {
     let decoded = evidence_slice::decode(slice).ok_or(DeriveError::NotASlice)?;
-    derive_fight_with(&decoded, npcs_json, skills_json, dot_ids_json, false, true)
+    derive_fight_with(&decoded, &Tables::load(npcs_json, skills_json, dot_ids_json), false, true)
 }
 
 /// The fight, and the damage `hide_unplaced_summons` removes from it (or
 /// would, when `hide` is false and the record is returned whole).
 fn derive_fight_with(
     decoded: &Decoded,
-    npcs_json: &str,
-    skills_json: &str,
-    dot_ids_json: &str,
+    tables: &Tables,
     hide: bool,
     every_fight: bool,
 ) -> Result<(DerivedFight, i64), DeriveError> {
     let (records, blind_map) = (&decoded.0, decoded.1.clone());
-
-    let npcs = Arc::new(NpcLookup::new());
-    npcs.load_from_json(npcs_json);
-    let skills = Arc::new(SkillLookup::new());
-    skills.load_from_json(skills_json);
-
-    let dot_ids: Option<std::collections::HashSet<i32>> =
-        serde_json::from_str::<Vec<i32>>(dot_ids_json).ok().map(|ids| ids.into_iter().collect());
+    let (npcs, skills, dot_ids) = (&tables.npcs, &tables.skills, &tables.dot_ids);
     let replay = |upto: usize| {
         let storage = Arc::new(DataStorage::new());
         let mut processor = StreamProcessor::new(storage.clone(), skills.clone(), npcs.clone());
@@ -491,7 +511,7 @@ fn derive_fight_with(
     let spawned = storage.get_summon_spawn_ids();
     let dead = storage.get_dead_entities();
 
-    let mut calc = DpsCalculator::new(storage, skills, npcs, Arc::new(PingTracker::new()));
+    let mut calc = DpsCalculator::new(storage, skills.clone(), npcs.clone(), Arc::new(PingTracker::new()));
     calc.set_every_fight(every_fight);
     let snapshot = calc.snapshot_boss_fights_force();
     processor.set_override_timestamp(None);

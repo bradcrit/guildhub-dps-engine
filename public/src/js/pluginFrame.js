@@ -40,6 +40,7 @@
       if (event.startsWith("decoded:") && !allowed(`decoder:${event.slice(8)}`)) return;
       if (event === "character" && !allowed("events:character")) return;
       if ((event === "bossMap" || event === "bossLive" || event === "abyss") && !allowed("feed:boss-timers")) return;
+      if (event === "deathRecap" && !allowed("events:death-recap")) return;
       const msg = { event, data, ...extra };
       if (ready) send(msg);
       else queue.push(msg);
@@ -88,6 +89,16 @@
         if (!allowed("feed:boss-timers")) throw new Error('the plugin lacks the "feed:boss-timers" permission');
         return call("plugin_boss_follow", { server: Number(server), bosses: (Array.isArray(bosses) ? bosses : []).map(String) });
       },
+      // The game's frame rate (meter 2.0.78): "fps" events while asked.
+      "fps.watch": ([on]) => {
+        if (!allowed("fps")) throw new Error('the plugin lacks the "fps" permission');
+        return call("plugin_fps_watch", { on: !!on });
+      },
+      // Run the meter as administrator, for the frame rate: the meter asks.
+      "fps.admin": () => {
+        if (!allowed("fps")) throw new Error('the plugin lacks the "fps" permission');
+        return call("plugin_fps_admin");
+      },
       "storage.set": ([key, value]) => call("plugin_storage_set", { key: String(key), value: String(value) }),
       "window.show": () => {
         if (!allowed("window")) throw new Error('the plugin lacks the "window" permission');
@@ -102,6 +113,16 @@
         const fitted = Number.isFinite(h) && h > 0;
         onFit(fitted);
         return call("plugin_window_fit", { height: fitted ? h : null });
+      },
+      // A screenshot of part of the plugin's page (permission "screenshot"):
+      // its rect, from the frame's corner, measured here from the window's.
+      screenshot: ([r]) => {
+        if (!allowed("screenshot")) throw new Error('the plugin lacks the "screenshot" permission');
+        const f = frame?.getBoundingClientRect();
+        if (!f) throw new Error("no frame");
+        const x = Math.max(0, Number(r?.x) || 0), y = Math.max(0, Number(r?.y) || 0);
+        const width = Math.min(Number(r?.width) || f.width, f.width - x), height = Math.min(Number(r?.height) || f.height, f.height - y);
+        return call("plugin_screenshot", { x: f.left + x, y: f.top + y, width, height, scale: window.devicePixelRatio || 1 });
       },
       "window.hide": () => {
         if (!allowed("window")) throw new Error('the plugin lacks the "window" permission');
@@ -198,7 +219,8 @@
     };
 
     const start = () =>
-      call("plugin_hello").then((hello) => {
+      // Fresh: the meter closes widgets an earlier run of the plugin left.
+      call("plugin_hello", { fresh: true }).then((hello) => {
         manifest = hello.manifest;
         for (const [event, data] of startState(hello)) deliver(event, data);
         run = hello.run;

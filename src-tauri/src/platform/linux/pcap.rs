@@ -31,9 +31,18 @@ pub fn run_installer(_installer: &std::path::Path) -> Result<(), String> {
     Err("the meter does not install libpcap; the distribution's packages do".into())
 }
 
+/// Load the capture library `name` the usual way (a setcap binary's loader
+/// ignores LD_LIBRARY_PATH).
+///
+/// # Safety
+/// Loading a library runs its initialisation, as `libloading::Library::new`.
+pub unsafe fn load(name: &str) -> Result<libloading::Library, libloading::Error> {
+    unsafe { libloading::Library::new(name) }
+}
+
 pub fn library_available() -> bool {
     // SAFETY: loading libpcap runs no initialisation we depend on not running.
-    LIBRARIES.iter().any(|name| unsafe { libloading::Library::new(name).is_ok() })
+    LIBRARIES.iter().any(|name| unsafe { load(name).is_ok() })
 }
 
 /// Skip libpcap's pseudo-devices. "any" sees every packet a second time on top

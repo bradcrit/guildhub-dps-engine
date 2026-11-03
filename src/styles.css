@@ -11,6 +11,15 @@
 }
 
 :root {
+  /* Metrics: one colour each, on the rows, the metric menu and its button.
+     Stagger is the game's own aqua. */
+  --metric-dps: #ffd166;
+  --metric-totalDamage: #ff9a76;
+  --metric-damageReceived: #f28b82;
+  --metric-hps: #7ee2a8;
+  --metric-totalHeal: #c3f27a;
+  --metric-stagger: #5ce8ec;
+
   /* Bars */
   --row-fill: #5fbf87;
   --isUser-fill: #6aa6ff;
@@ -451,7 +460,11 @@ html:lang(zh-Hant), html:lang(zh-Hant) body {
   animation: detailsFlash 1s ease-out;
 }
 
-body.linuxOverlay .meter {
+/* No drop shadow on the overlay: its window ends 10px below the meter, so
+   the shadow (28px) was cut into a hard dark band under the footer. The
+   tool windows have room for it. */
+body.linuxOverlay .meter,
+html:not(.detailsWindow):not(.historyWindow):not(.settingsWindow) .meter {
   box-shadow: none;
 }
 
@@ -622,6 +635,19 @@ body.linuxOverlay .meter {
   pointer-events: none;
 }
 .bossHpText .bossHpAmt { color: rgba(255, 255, 255, 0.72); }
+/* Boss stagger %, between the two: amber, a gauge apart from HP. */
+/* On a dark chip in the game's stagger aqua: plain text sat on the red
+   fill and was hard to read. */
+.bossHpText .bossHpStag {
+  padding: 0 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  text-shadow: none;
+  line-height: 1.35;
+}
+body:not(.noStatColours) .bossHpText .bossHpStag { color: var(--metric-stagger); }
+.bossHpText .bossHpStag:empty { display: none; }
 
 /* ---------- player rows ---------- */
 
@@ -680,6 +706,9 @@ html:not(.hoverStale) .list .item:hover { background: rgba(255, 255, 255, 0.075)
   /* A stepped glide (see .bossHpFill). */
   transition: width var(--bar-glide, 200ms) steps(5, end);
 }
+/* A change too small to see jumps there (meter.js GLIDE_MIN_JUMP). */
+.list .item .fill.noGlide,
+.bossHpFill.noGlide { transition: none; }
 /* The lit edge is the part you actually read at a glance. When the tint
    washes out over bright terrain or at low panel opacity, the edge still
    says exactly where the bar ends — six of them stack into a skyline
@@ -1030,6 +1059,30 @@ html:not(.hoverStale) .list .item:hover { background: rgba(255, 255, 255, 0.075)
 /* Share of party damage. Brighter than the other secondary text on the row:
    it is a number people read at a glance mid-fight, and at 11px over the
    moving bar the muted --hud-sub grey was hard to pick out. */
+/* Extra metrics from the metric menu: smaller and dimmer than the main
+   figure, which the bars and the order follow. */
+.list .item .dps .dpsExtra {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  opacity: 0.9;
+}
+/* Each metric as wide as its widest figure on the rows (meter.js sets
+   --mw-<metric> in characters; the digits are tabular), right-aligned: the
+   same metric lines up down the rows. */
+.list .item .dps [data-metric] { text-align: right; box-sizing: content-box; }
+.list .item .dps [data-metric="dps"] { min-width: var(--mw-dps, 0); }
+.list .item .dps [data-metric="totalDamage"] { min-width: var(--mw-totalDamage, 0); }
+.list .item .dps [data-metric="damageReceived"] { min-width: var(--mw-damageReceived, 0); }
+.list .item .dps [data-metric="hps"] { min-width: var(--mw-hps, 0); }
+.list .item .dps [data-metric="totalHeal"] { min-width: var(--mw-totalHeal, 0); }
+.list .item .dps [data-metric="stagger"] { min-width: var(--mw-stagger, 0); }
+body:not(.noStatColours) .list .item .dps [data-metric="dps"] { color: var(--metric-dps); }
+body:not(.noStatColours) .list .item .dps [data-metric="totalDamage"] { color: var(--metric-totalDamage); }
+body:not(.noStatColours) .list .item .dps [data-metric="damageReceived"] { color: var(--metric-damageReceived); }
+body:not(.noStatColours) .list .item .dps [data-metric="hps"] { color: var(--metric-hps); }
+body:not(.noStatColours) .list .item .dps [data-metric="totalHeal"] { color: var(--metric-totalHeal); }
+body:not(.noStatColours) .list .item .dps [data-metric="stagger"] { color: var(--metric-stagger); }
 .list .item .dps .dpsContribution {
   font-variation-settings: "wght" 600, "wdth" 75;
   font-size: 11px;
@@ -1097,10 +1150,11 @@ html:not(.hoverStale) .list .item:hover { background: rgba(255, 255, 255, 0.075)
   font-style: italic;
   color: var(--hud-sub);
 }
-/* Everyone not in your party on an open-world boss, from its lost HP. */
+/* Everyone not in your party on an open-world boss, from its lost HP.
+   Upright and near-white like a player's name, just a touch softer: the
+   italic grey read as a placeholder, not a row. */
 .meter .item.isOthers .content .name {
-  font-style: italic;
-  color: var(--hud-sub);
+  color: rgba(255, 255, 255, 0.82);
 }
 .meter .item.isOthers { cursor: default; }
 body.mainPlayerNamesBold :is(.meter, .barPreviewPanel) .item .content .name,
@@ -1247,7 +1301,174 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
   transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
 }
 .footerBtns .targetModeBtn { min-width: 44px; }
+body:not(.noStatColours) .footerBtns .metricToggleBtn[data-metric="dps"] { color: var(--metric-dps); }
+body:not(.noStatColours) .footerBtns .metricToggleBtn[data-metric="totalDamage"] { color: var(--metric-totalDamage); }
+body:not(.noStatColours) .footerBtns .metricToggleBtn[data-metric="damageReceived"] { color: var(--metric-damageReceived); }
+body:not(.noStatColours) .footerBtns .metricToggleBtn[data-metric="hps"] { color: var(--metric-hps); }
+body:not(.noStatColours) .footerBtns .metricToggleBtn[data-metric="totalHeal"] { color: var(--metric-totalHeal); }
+body:not(.noStatColours) .footerBtns .metricToggleBtn[data-metric="stagger"] { color: var(--metric-stagger); }
 .footerBtns .metricToggleBtn { min-width: 30px; }
+.footerBtns .footerBtn.isOpen {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.11);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+/* The metric menu: in the meter's flow above the footer, so the window
+   grows to hold it. Three columns, as labelled in its head: a radio for the
+   one metric the bars and order follow, the name, a tick for shown. */
+.metricMenu {
+  display: grid;
+  grid-template-columns: minmax(18px, max-content) 1fr minmax(18px, max-content);
+  column-gap: 6px;
+  flex-shrink: 0;
+  width: max-content;
+  min-width: 176px;
+  margin: 6px 8px 4px auto;
+  padding: 5px 6px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(var(--hud-bg), 0.96);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  font-family: var(--hud-tech);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+.metricMenu[hidden] { display: none; }
+.metricMenuHead,
+.metricMenuItem {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+}
+.metricMenuHead {
+  padding: 0 4px 4px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 9px;
+  font-variation-settings: "wght" 700, "wdth" 75;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.metricMenuHeadSort,
+.metricMenuHeadShow { text-align: center; }
+.metricMenuItem {
+  min-height: 22px;
+  padding: 0 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.metricMenuItem:hover { background: rgba(255, 255, 255, 0.07); }
+.metricMenuItem.isPrimary { background: rgba(255, 255, 255, 0.05); cursor: default; }
+
+/* Sort radio: a ring, filled with the accent for the sorting metric. */
+.metricMenuSort {
+  justify-self: center;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border: 1.5px solid rgba(255, 255, 255, 0.4);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.metricMenuSort:hover { border-color: #fff; }
+.metricMenuItem.isPrimary .metricMenuSort {
+  border-color: var(--isUser-fill);
+  box-shadow: inset 0 0 0 2px rgba(var(--hud-bg), 1);
+  background: var(--isUser-fill);
+  cursor: default;
+}
+.metricMenuName {
+  padding: 3px 0;
+  border: 0;
+  background: none;
+  color: rgba(255, 255, 255, 0.62);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: inherit;
+}
+.metricMenuItem.isShown .metricMenuName { color: rgba(255, 255, 255, 0.9); }
+.metricMenuItem.isPrimary .metricMenuName { color: #fff; font-variation-settings: "wght" 700; }
+/* Each metric's name in its colour; dimmer while it isn't shown. */
+.metricMenuItem[data-metric="dps"] { --m: var(--metric-dps); }
+.metricMenuItem[data-metric="totalDamage"] { --m: var(--metric-totalDamage); }
+.metricMenuItem[data-metric="damageReceived"] { --m: var(--metric-damageReceived); }
+.metricMenuItem[data-metric="hps"] { --m: var(--metric-hps); }
+.metricMenuItem[data-metric="totalHeal"] { --m: var(--metric-totalHeal); }
+.metricMenuItem[data-metric="stagger"],
+.metricMenuItem[data-metric="bossStagger"] { --m: var(--metric-stagger); }
+body:not(.noStatColours) .metricMenu:not(.targetMenu) .metricMenuItem .metricMenuName { color: var(--m, #fff); opacity: 0.6; }
+body:not(.noStatColours) .metricMenu:not(.targetMenu) .metricMenuItem.isShown .metricMenuName { opacity: 1; }
+
+/* Show tick: a box, filled with a check when the column is on. The sorting
+   metric's is on and dimmed: it is always shown. */
+.metricMenuCheck {
+  justify-self: center;
+  position: relative;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid rgba(255, 255, 255, 0.4);
+  border-radius: 3px;
+  box-sizing: border-box;
+}
+.metricMenuItem:hover .metricMenuCheck { border-color: rgba(255, 255, 255, 0.75); }
+.metricMenuItem.isShown .metricMenuCheck {
+  border-color: var(--isUser-fill);
+  background: var(--isUser-fill);
+}
+.metricMenuItem.isShown .metricMenuCheck::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0.5px;
+  width: 3px;
+  height: 6px;
+  border: solid rgba(var(--hud-bg), 1);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+.metricMenuItem.isPrimary .metricMenuCheck { opacity: 0.45; }
+/* The footer's displays as one clickable area, which opens the footer menu
+   (core.js bindFooterMenu). */
+.meterFooter .footerInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: 0;
+  margin-left: -4px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.meterFooter .footerInfo:hover,
+.meterFooter .footerInfo.isOpen { background: rgba(255, 255, 255, 0.07); }
+.meterFooter .footerInfo:focus-visible { outline: 2px solid var(--isUser-fill); outline-offset: 1px; }
+/* The footer menu: a name and a tick per display, no sort column. */
+.footerMenu { grid-template-columns: 1fr minmax(18px, max-content); margin-left: 8px; margin-right: auto; }
+
+/* The target mode menu: the same card, a radio per mode, the button's
+   label, then what the mode counts. */
+.targetMenu { min-width: 0; }
+.targetMenu .metricMenuName { letter-spacing: 0.06em; }
+.targetMenuDesc {
+  padding-left: 6px;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+}
+.targetMenu .metricMenuItem.isPrimary .targetMenuDesc { color: rgba(255, 255, 255, 0.78); }
+.metricMenuSep {
+  grid-column: 1 / -1;
+  height: 1px;
+  margin: 3px 2px;
+  background: rgba(255, 255, 255, 0.08);
+}
 .footerBtns .footerBtn:hover {
   color: #fff;
   background: rgba(255, 255, 255, 0.11);
@@ -1702,6 +1923,84 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
   border-top: 1px solid var(--hud-hairline);
 }
 
+/* Settings → What's new: a card per release, the newest (and any not yet
+   installed) open. The notes are the release's own text. */
+.changelogList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+.changelogRelease {
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.changelogRelease > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.changelogRelease > summary::-webkit-details-marker { display: none; }
+.changelogRelease > summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border: solid rgba(255, 255, 255, 0.5);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+.changelogRelease[open] > summary::before { transform: rotate(45deg); }
+.changelogRelease > summary:hover { background: rgba(255, 255, 255, 0.04); }
+.changelogVersion {
+  font-variation-settings: "wght" 700;
+  font-size: 13px;
+  color: var(--title);
+}
+.changelogBadge {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(106, 166, 255, 0.18);
+  color: #a9cbff;
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+}
+.changelogRelease.isNewer .changelogBadge { background: rgba(110, 220, 140, 0.18); color: #9ee6b1; }
+.changelogDate {
+  margin-left: auto;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+}
+.changelogNotes {
+  padding: 2px 14px 10px 26px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.82);
+}
+.changelogNotes p,
+.changelogNotes h4 { margin: 8px 0 2px; }
+.changelogNotes .changelogHeading {
+  font-size: 11px;
+  font-weight: normal;
+  font-variation-settings: "wght" 700;
+  letter-spacing: 0.04em;
+  color: var(--title);
+}
+.changelogNotes ul { margin: 2px 0 4px; padding-left: 16px; }
+.changelogNotes li + li { margin-top: 3px; }
+.changelogNotes code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+}
+.changelogStatus:empty { display: none; }
+
 /* Narrow window: the sections become a strip of tabs above the settings. */
 @media (max-width: 560px) {
   .settingsPanel .settingsBody {
@@ -1852,6 +2151,29 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
   flex: 0 1 180px;
   max-width: 180px;
   font-family: var(--hud-ident);
+}
+/* Test plugins: their own heading under the reviewed ones, each row marked. */
+.settingsPanel .pluginTestHead {
+  margin: 12px 0 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+.settingsPanel .pluginTestTitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.85);
+}
+.settingsPanel .pluginTest .pluginNameText::after {
+  content: "TEST";
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: 1px;
+  color: #1a1206;
+  background: #f2b94f;
 }
 .settingsPanel .localActorIdInput {
   width: 76px;
@@ -2025,6 +2347,12 @@ body.mainPlayerDpsBold :is(.meter, .barPreviewPanel) .item .content .dps > p {
 }
 .settingsPanel .settingsDropdownBtn:focus-visible,
 .settingsPanel .keybindBtn:focus-visible,
+/* A plugin downloading or installing: its button says so, greyed and not
+   clickable until it's done. */
+.settingsPanel .settingsAction.pluginBusy:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
 .settingsPanel .settingsAction:focus-visible,
 .settingsPanel .settingsRange:focus-visible {
   outline: 2px solid var(--settings-accent, var(--isUser-fill));
@@ -2702,6 +3030,32 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
   font-size: 7.5px;
 }
 
+/* Deaths in the fight (meter.js, once above 0): the A2 badge's shape in a
+   muted red, after the name and its figure, so it reads as a mark on the
+   player and never as one of the numbers. */
+.list .item .deathCount {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: -3px;
+  padding: 0 4px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 120, 120, 0.7);
+  background: rgba(45, 10, 12, 0.6);
+  color: #ffa3a3;
+  font: 700 10px/1 var(--hud-tech, sans-serif);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+body.noDeaths .list .item .deathCount { display: none !important; }
+.meter.slim .list .item .deathCount {
+  height: 12px;
+  font-size: 9px;
+}
+
 /* The supporter badge — a gold crown beside the name, outlined dark so it
    stays clear on a bar texture.
    Deliberately an icon and not a "PATRON" pill: the slim layouts run an 11.5px
@@ -2921,6 +3275,13 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
     background: rgba(224, 107, 107, 0.1);
     border-color: rgba(224, 107, 107, 0.3);
   }
+
+  .historyNoteLink {
+    color: #8fc8ff;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .historyNoteLink:hover { color: #b8dcff; }
 }
 
 .historyDeleteBtn {
@@ -4801,8 +5162,17 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
 /* The account offer borrows the Discord card, in the site's own blue. */
 .accountPromo .accountPromoActions {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: center;
+}
+/* Three buttons in a row: each on one line, the row wrapping only when a
+   language's words are too long for it. */
+.accountPromo .accountPromoActions button {
+  white-space: nowrap;
+}
+.accountPromo .accountPromoActions .accountPromoSignIn {
+  padding: 8px 20px;
 }
 .accountPromo .accountPromoSignIn {
   background: #2f7cf6;
@@ -4839,6 +5209,83 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
   margin-top: 4px;
   user-select: text;
 }
+/* Sharing (2.0.80): the first run's choice (#accountPromo) and the notice to
+   those already sharing (#sharingNotice), on the Discord card. */
+.linkButton {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: #9fc4ff;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.linkButton:hover { color: #c4dbff; }
+.linkButton:disabled { opacity: 0.6; cursor: default; }
+.sharingPrompt .sharingSignIn .accountPromoSignIn,
+.sharingPrompt .sharingSignIn .accountPromoSignIn:hover { background: none; }
+.sharingPrompt .discordPromoCard { width: min(400px, 95vw); text-align: left; align-items: stretch; gap: 10px; }
+.sharingPrompt .discordPromoTitle { padding: 0; }
+.sharingChoice {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+.sharingChoice:hover { background: rgba(255, 255, 255, 0.08); }
+.sharingChoice.isPicked { border-color: #9b6bff; background: rgba(155, 107, 255, 0.16); }
+.sharingChoiceTitle { font-size: 14px; font-weight: 700; }
+.sharingChoiceText { font-size: 12px; color: rgba(255, 255, 255, 0.65); line-height: 1.4; }
+.sharingTag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  vertical-align: 1px;
+  background: rgba(155, 107, 255, 0.3);
+  color: #e0d4ff;
+}
+.sharingPreview { border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; overflow: hidden; font-size: 12px; }
+.sharingPreviewTitle { padding: 5px 9px; font-size: 11px; color: rgba(255, 255, 255, 0.6); background: rgba(255, 255, 255, 0.05); }
+.sharingPreviewRow { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center; padding: 4px 9px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.sharingDot { width: 10px; height: 10px; border-radius: 50%; }
+.sharingPrompt .accountPromoActions { justify-content: space-between; align-items: center; }
+.sharingPrompt .sharingContinue,
+.sharingNotice .sharingKeep { background: #8b5cf6; }
+.sharingPrompt .sharingContinue:hover,
+.sharingNotice .sharingKeep:hover { background: #7c4ddb; }
+.sharingNotice .discordPromoCard { width: min(420px, 95vw); }
+.sharingNotice .accountPromoActions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.sharingNotice .accountPromoLater {
+  border: none; border-radius: 8px; padding: 8px 14px; font-size: 14px; font-weight: 600;
+  color: rgba(255, 255, 255, 0.85); background: rgba(255, 255, 255, 0.12); cursor: pointer;
+}
+.sharingNotice .accountPromoLater:hover { background: rgba(255, 255, 255, 0.2); }
+.sharingNotice .discordPromoDone { padding: 8px 18px; font-size: 14px; }
+/* Settings → Privacy. */
+#settingsSection-privacy .settingsHint { display: block; max-width: none; }
+#settingsSection-privacy .settingsHint:empty { display: none; }
+.privacyIntro { margin: 0 0 8px; }
+.privacyRowHint { margin: -4px 0 8px; font-size: 11.5px; }
+.privacyNever {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.65);
+}
+.privacyLinks { display: flex; gap: 8px; margin-top: 10px; }
 .accountPromo .accountPromoState:empty {
   display: none;
 }
@@ -5008,6 +5455,72 @@ body.mainPlayerNamesBold .settingsPanel .themeDropdownMenu .settingsDropdownItem
   color: rgba(255, 255, 255, 0.8);
   text-align: center;
 }
+
+/* Below the ways to give: the site's Donate page, and the sponsor, plainly
+   marked as an ad as the site marks it. */
+.supportModal .supportMore {
+  display: block;
+  margin: 2px 0 10px;
+  font-size: 12px;
+  color: #8fc8ff;
+  text-align: center;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.supportModal .supportMore:hover { color: #b8dcff; }
+.supportModal .supportSponsor {
+  position: relative;
+  display: block;
+  padding: 12px 14px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.85);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.supportModal .supportSponsor:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.supportModal .supportSponsorLabel {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.6);
+}
+.supportModal .supportSponsorRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-right: 70px;
+}
+.supportModal .supportSponsorLogo { height: 22px; width: auto; flex: none; }
+.supportModal .supportSponsorText { display: flex; flex-direction: column; gap: 4px; }
+.supportModal .supportSponsorTitle { font-size: 14.5px; font-weight: 700; color: #fff; line-height: 1.3; }
+.supportModal .supportSponsor:hover .supportSponsorTitle { text-decoration: underline; }
+.supportModal .supportSponsorCode { font-size: 13px; color: rgba(255, 255, 255, 0.75); }
+.supportModal .supportSponsorCode b {
+  margin-left: 2px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  letter-spacing: 0.06em;
+}
+.supportModal .supportSponsorNote {
+  display: block;
+  margin-top: 9px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.55);
+}
+
 
 .windowDragFreeze {
   -webkit-user-select: none !important;
@@ -5509,8 +6022,228 @@ body.isHistoryWindow .historyPanel .historyHeader .closeX {
   color: rgba(255, 255, 255, 0.78);
 }
 
+/* Fights and Personal bests, beside the title. "On" is the theme accent. */
+.historyPanel .historyTabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 auto 0 12px;
+}
+.historyPanel .historyTab {
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--hud-sub);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.historyPanel .historyTab:hover {
+  color: var(--title);
+}
+.historyPanel .historyTab.active {
+  color: #fff;
+  background: color-mix(in srgb, var(--isUser-fill) 22%, transparent);
+  border-color: color-mix(in srgb, var(--isUser-fill) 55%, transparent);
+}
+.historyPanel .historyTab:focus-visible {
+  outline: 2px solid var(--accent, #8fc2ff);
+  outline-offset: 1px;
+}
+/* The bests have no views, order, period or delete. */
+.historyPanel.bestsTab .historyViewToggle,
+.historyPanel.bestsTab .historyDeleteToggle,
+.historyPanel.bestsTab .historyFilters2,
+.historyPanel:not(.bestsTab) .historyBestsSort {
+  display: none;
+}
+
+/* The second line of filters: period, order, wipes hidden. */
+.historyPanel .historyFilters {
+  flex-wrap: wrap;
+}
+.historyPanel .historyFilters2 {
+  align-items: center;
+  padding-top: 0;
+}
+.historyPanel .historyFilters2 .historyFilterSelect {
+  flex: 0 1 auto;
+  width: auto;
+}
+.historyPanel .historyFilterSearch {
+  flex: 1.4;
+  min-width: 140px;
+  padding: 0 8px;
+  background-image: none;
+}
+.historyPanel .historySortLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--hud-sub);
+}
+.historyPanel .historyKillsOnly {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+}
+.historyPanel .historyKillsOnly input {
+  accent-color: var(--isUser-fill);
+}
+
+/* A row's party DPS and yours (the theme accent), with your share. */
+/* Each figure whole on its line: "2026-10-30 11:50" broke in two. */
+.historyPanel .historyRowMeta > span {
+  white-space: nowrap;
+}
+.historyPanel .historyRowStat b {
+  font-variation-settings: "wght" 700, "wdth" 87.5;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.86);
+}
+.historyPanel .historyRowMine b {
+  color: var(--isUser-fill);
+}
+.historyPanel .historyRowShare {
+  color: var(--hud-faint);
+}
+.historyPanel .historyWipeBadge,
+.historyPanel .historyPbBadge,
+.historyPanel .historyFinalBadge {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--hud-tech);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.historyPanel .historyWipeBadge {
+  color: #ffb3ad;
+  border: 1px solid rgba(224, 82, 74, 0.55);
+}
+.historyPanel .historyPbBadge {
+  color: #1a1204;
+  background: #f3c969;
+}
+.historyPanel .historyFinalBadge {
+  margin-left: 6px;
+  color: var(--hud-sub);
+  border: 1px solid var(--pane-field-border);
+}
+
+/* Personal bests: a dungeon, its bosses' bests in columns. */
+.historyPanel .historyBestRow {
+  display: grid;
+  grid-template-columns: 1.7fr 0.8fr 0.9fr 0.8fr;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--hud-hairline);
+}
+.historyPanel .historyBestHead {
+  padding: 7px 14px;
+  font-family: var(--hud-tech);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--hud-faint);
+}
+.historyPanel .historyBestDungeonName {
+  padding: 10px 14px 4px;
+  font-family: var(--hud-tech);
+  font-variation-settings: "wght" 700, "wdth" 87.5;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--title);
+}
+.historyPanel .historyBestName {
+  min-width: 0;
+}
+.historyPanel .historyBestCounts {
+  margin-top: 2px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--hud-sub);
+}
+.historyPanel .historyBestCell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 3px 6px;
+  margin: -3px -6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-family: var(--hud-tech);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+}
+.historyPanel .historyBestCell:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+.historyPanel .historyBestCell:disabled {
+  cursor: default;
+  color: var(--hud-faint);
+}
+.historyPanel .historyBestCell:focus-visible {
+  outline: 2px solid var(--accent, #8fc2ff);
+  outline-offset: 1px;
+}
+.historyPanel .historyBestValue {
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.9);
+}
+.historyPanel .historyBestRow > .historyBestCell:nth-child(3) .historyBestValue {
+  color: var(--isUser-fill);
+}
+.historyPanel .historyBestUnconfirmed {
+  margin-left: 2px;
+  color: var(--hud-faint);
+}
+.historyPanel .historyBestSub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--hud-sub);
+}
+.historyPanel .historyBestClass {
+  width: 14px;
+  height: 14px;
+}
+.historyPanel .historyBestDungeon .historyShowAll {
+  margin-left: 34px;
+}
+.historyPanel .historyBestDungeon .historyBestRow {
+  padding-left: 34px;
+}
+
 .historyPanel .historyRowIcons {
   gap: 3px;
+  /* A full party's twelve icons wrap rather than squeeze the figures. */
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.historyPanel .historyRowInfo {
+  flex: 1 0 auto;
 }
 .historyPanel .historyRowClassIcon {
   width: 20px;
@@ -5582,6 +6315,110 @@ body.isHistoryWindow .historyPanel .historyHeader .closeX {
   font-weight: 700;
   letter-spacing: 0.08em;
   color: var(--hud-sub);
+}
+/* The header is a button now (Tab, Enter, and it says open or closed):
+   the button's own look goes, the section's stays. */
+.historyPanel button.historyGroupHeader {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 10px 14px;
+}
+.historyPanel button.historyGroupHeader:focus-visible {
+  outline: 2px solid var(--accent, #8fc2ff);
+  outline-offset: -2px;
+}
+/* A chevron that points right when closed and down when open. */
+.historyPanel .historyGroupChevron {
+  color: var(--hud-sub);
+  transform: rotate(0deg);
+}
+.historyPanel .historyGroupHeader.expanded .historyGroupChevron {
+  transform: rotate(90deg);
+}
+/* The name, and under it what the section holds at a glance. */
+.historyPanel .historyGroupTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.historyPanel .historyGroupSummary {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--hud-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A boss inside a dungeon's section: its name and count, then its rows. */
+.historyPanel .historySubGroup + .historySubGroup {
+  border-top: 1px solid var(--hud-hairline);
+}
+.historyPanel .historySubGroupHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 14px 4px 34px;
+}
+.historyPanel .historySubGroupName {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--title);
+}
+.historyPanel .historySubGroupMeta {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--hud-sub);
+}
+/* "Show all 11", under a section's first rows. */
+.historyPanel .historyShowAll {
+  display: block;
+  margin: 4px 14px 8px 34px;
+  padding: 4px 10px;
+  border: 1px solid var(--pane-field-border);
+  border-radius: 4px;
+  background: var(--pane-field-bg);
+  color: var(--title);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.historyPanel .historyShowAll:hover {
+  border-color: var(--hud-sub);
+}
+.historyPanel .historyShowAll:focus-visible,
+.historyPanel .historyExpandAll:focus-visible {
+  outline: 2px solid var(--accent, #8fc2ff);
+  outline-offset: 1px;
+}
+/* Expand all / Collapse all, above the sections. */
+.historyPanel .historyGroupTools {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 14px 2px;
+}
+.historyPanel .historyExpandAll {
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--hud-sub);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.historyPanel .historyExpandAll:hover {
+  color: var(--title);
+  background: rgba(255, 255, 255, 0.06);
 }
 /* A rail down the left of a group's children, so a long list still says
    which section you are inside without scrolling back to the header. */
@@ -7307,6 +8144,8 @@ body:not(.isSettingsWindow):not(.isHistoryWindow) :is(input, textarea, [contente
    the account and Discord offers, and sharing field boss timers. */
 html.a2-offline .settingsNavItem[data-section="account"],
 html.a2-offline .settingsNavItem[data-section="streaming"],
+html.a2-offline .settingsNavItem[data-section="privacy"],
+html.a2-offline #settingsSection-privacy,
 html.a2-offline #settingsSection-account,
 html.a2-offline #settingsSection-streaming,
 html.a2-offline .settingsPanel .sendLogsRow,
@@ -8167,6 +9006,14 @@ html.a2-offline .historyUploadBtn {
 .settingsPanel .pluginDevToggle {
   margin-top: 14px;
 }
+/* Show the DPS meter and Update plugins automatically, side by side at the
+   top of Plugins, each switch at the end of its half; stacked again when
+   the window is too narrow for both. */
+.settingsPanel .pluginTopToggles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  column-gap: 20px;
+}
 /* A developer-folder plugin, in the installed list. */
 .settingsPanel .pluginUnreviewedTag {
   padding: 0 6px;
@@ -8182,6 +9029,10 @@ html.a2-offline .historyUploadBtn {
   padding-left: 18px;
   font-size: 13px;
   line-height: 1.5;
+}
+.settingsPanel .hotkeyConsentCard .pluginConsentNote {
+  font-size: 12px;
+  opacity: 0.75;
 }
 /* A plugin the last update check changed: a green arrow by its version. */
 .settingsPanel .pluginUpdated {
@@ -8663,6 +9514,31 @@ html.a2-offline .historyUploadBtn {
   margin: 0 0 10px;
   line-height: 1.45;
   color: rgba(255, 255, 255, 0.78);
+}
+/* What's new: the notes of the update waiting or just installed, first in
+   a plugin's details. */
+.settingsPanel .pluginWhatsNew {
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--settings-accent, #22b8cf);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--settings-accent, #22b8cf) 10%, transparent);
+}
+.settingsPanel .pluginWhatsNewTitle {
+  margin-bottom: 4px;
+  font-weight: 600;
+  color: #fff;
+}
+.settingsPanel .pluginWhatsNewList {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.85);
+}
+.settingsPanel .pluginWhatsNewVersion {
+  margin-right: 6px;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
 }
 .settingsPanel .pluginAuthor {
   margin: -6px 0 10px;

@@ -30,6 +30,9 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEAD: usize = 8 * 1024;
 /// Open connections at once. A scene or two in OBS uses one or two.
 const MAX_CONNECTIONS: usize = 32;
+/// A watcher that takes nothing for this long is dropped: one that stopped
+/// reading would otherwise hold its connection forever (#131).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PAGE: &str = include_str!("page.html");
 
@@ -308,7 +311,7 @@ async fn events(mut stream: TcpStream, shared: &Shared, key: String, mut stop: w
                 Referrer-Policy: no-referrer\r\n\
                 Connection: close\r\n\r\n\
                 retry: 2000\n\n";
-    if stream.write_all(head.as_bytes()).await.is_err() {
+    if !send(&mut stream, head.as_bytes()).await {
         return;
     }
     let mut feed = shared.feed.subscribe();
@@ -319,7 +322,7 @@ async fn events(mut stream: TcpStream, shared: &Shared, key: String, mut stop: w
         let current: Arc<str> = feed.borrow_and_update().clone();
         if !current.is_empty() && *current != *last_sent {
             let frame = format!("data: {current}\n\n");
-            if stream.write_all(frame.as_bytes()).await.is_err() {
+            if !send(&mut stream, frame.as_bytes()).await {
                 return;
             }
             last_sent = current.to_string();
@@ -334,13 +337,18 @@ async fn events(mut stream: TcpStream, shared: &Shared, key: String, mut stop: w
                 since_beat += Duration::from_secs(1);
                 if since_beat >= HEARTBEAT_EVERY {
                     since_beat = Duration::ZERO;
-                    if stream.write_all(b": ping\n\n").await.is_err() {
+                    if !send(&mut stream, b": ping\n\n").await {
                         return;
                     }
                 }
             }
         }
     }
+}
+
+/// Write it all within `WRITE_TIMEOUT`.
+async fn send(stream: &mut TcpStream, bytes: &[u8]) -> bool {
+    matches!(tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(bytes)).await, Ok(Ok(())))
 }
 
 async fn respond(

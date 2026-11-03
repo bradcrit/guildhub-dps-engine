@@ -32,7 +32,8 @@ impl Manager {
             Manager::Apt => "/usr/bin/apt-get install -y --allow-downgrades",
             Manager::Dpkg => "/usr/bin/dpkg -i",
             Manager::Dnf => "/usr/bin/dnf install -y",
-            // Our packages are not signed with a key zypper knows.
+            // Signed, but with a key zypper doesn't know; the package's
+            // hash is the signed manifest's, checked before this runs.
             Manager::Zypper => "/usr/bin/zypper --non-interactive install --allow-unsigned-rpm",
             Manager::Rpm => "/usr/bin/rpm -U --replacepkgs",
         }
@@ -103,20 +104,38 @@ pub fn package_url<'a>(packages: &UpdatePackages<'a>) -> &'a str {
     manager().map_or("", |m| m.package(packages))
 }
 
+/// What runs as root: the package copied into a folder only root can write,
+/// its SHA-256 checked there, and that copy installed. The download sits in
+/// the player's own /tmp file until then, where anything running as the
+/// player could swap it after the meter checked it (security audit M2).
+fn root_script(install: &str) -> String {
+    format!(
+        r#"d=$(/usr/bin/mktemp -d) || exit 1
+f="$d/$(/usr/bin/basename "$1")"
+/usr/bin/cp -- "$1" "$f" && echo "$2  $f" | /usr/bin/sha256sum -c --status && {install} "$f"
+s=$?
+/usr/bin/rm -rf "$d"
+exit $s"#
+    )
+}
+
 /// Hand the package to its package manager once the meter has exited, then
 /// start the meter again: the new one, or the old one if the password prompt
 /// was cancelled, so a refused update never leaves the player without a meter.
-pub fn run_installer(package: &Path, _install_dir: &str) -> Result<(), String> {
+pub fn run_installer(package: &Path, sha256: &str, _install_dir: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let manager = manager().ok_or("this install cannot update itself")?;
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("no checksum for the package".into());
+    }
     let script = format!(
         r#"
         while kill -0 "$2" 2>/dev/null; do sleep 0.2; done
-        pkexec {install} "$1"
+        pkexec /bin/sh -c '{root}' a2tools-update "$1" "$3"
         rm -f "$1"
         exec {INSTALLED_BINARY}
     "#,
-        install = manager.install_command(),
+        root = root_script(manager.install_command()),
     );
     tracing::info!("Updating through {:?}: {}", manager, package.display());
     Command::new("/bin/sh")
@@ -125,6 +144,7 @@ pub fn run_installer(package: &Path, _install_dir: &str) -> Result<(), String> {
         .arg("a2tools-update")
         .arg(package)
         .arg(std::process::id().to_string())
+        .arg(sha256.to_ascii_lowercase())
         .stdin(Stdio::null())
         // Its own process group, so closing a terminal the meter was started
         // from does not take the update down with it.
@@ -147,6 +167,17 @@ mod tests {
         assert_eq!(Manager::Dnf.package(&p), "r");
         assert_eq!(Manager::Zypper.package(&p), "r");
         assert_eq!(Manager::Rpm.package(&p), "r");
+    }
+
+    #[test]
+    fn root_checks_its_own_copy_before_installing_it() {
+        let script = root_script(Manager::Pacman.install_command());
+        // Quoted once inside sh -c '…': no single quote of its own.
+        assert!(!script.contains('\''));
+        let check = script.find("sha256sum -c").unwrap();
+        let install = script.find("/usr/bin/pacman -U").unwrap();
+        assert!(script.find("cp --").unwrap() < check && check < install);
+        assert!(script.contains(r#"&& /usr/bin/pacman -U --noconfirm "$f""#));
     }
 
     #[test]

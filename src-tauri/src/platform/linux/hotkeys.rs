@@ -103,7 +103,8 @@ impl HotkeyManager {
             .ok()
             .and_then(|exe| exe.parent().map(|dir| dir.join(HELPER)))
             .filter(|path| path.exists())
-            .unwrap_or_else(|| std::path::PathBuf::from(HELPER));
+            // Where the packages put it; never looked up on PATH (audit I1).
+            .unwrap_or_else(|| std::path::Path::new("/usr/bin").join(HELPER));
         let mut child = match Command::new(&path)
             .args(&args)
             // Its stdin is how it learns the meter is gone: it exits at EOF.

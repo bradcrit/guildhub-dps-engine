@@ -350,7 +350,6 @@ impl StaggerLog {
     }
 
     /// The gauge's (max, rest), if known.
-    #[cfg(test)]
     pub fn gauge(&self, entity: i32) -> Option<(u32, u32)> {
         self.gauges.get(&entity).map(|g| (g.max, g.rest))
     }

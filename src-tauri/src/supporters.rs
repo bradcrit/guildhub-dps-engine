@@ -451,6 +451,9 @@ mod tests {
             run_at: 0,
             buffs: None,
             stagger: None,
+            local_actor_id: None,
+            killed: None,
+            max_hp_from_spawn: None,
         }
     }
 

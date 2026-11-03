@@ -407,6 +407,12 @@ pub struct StatEvent {
     pub values: Vec<(u16, i32)>,
 }
 
+/// Open instances at most: past it, every one not on you closes, as on a
+/// map load. Endless ones close only so, and a crafted stream that never
+/// loads a map could open them without end (audit L8); a real fight holds a
+/// few hundred.
+const LIVE_CAP: usize = 20_000;
+
 /// Every abnormal instance and stat record of a capture, in capture time.
 #[derive(Default)]
 pub struct Timeline {
@@ -497,6 +503,10 @@ impl Timeline {
                 }
                 if let Some(&limit) = self.stack_limits.get(&a.abnormal) {
                     self.push_out(ms, a.entity, a.abnormal, limit);
+                }
+                if self.live.len() >= LIVE_CAP {
+                    let own = self.own;
+                    self.close_where(ms, End::MapLoad, |k| Some(k.0) != own);
                 }
                 self.live.insert((a.entity, a.instance), Instance::from(&a, ms));
             }

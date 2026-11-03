@@ -15,7 +15,15 @@ pub fn socket_paths() -> Vec<PathBuf> {
 /// without closing its end blocks the read until it does. So `presence.rs`
 /// runs each handshake on its own thread and waits for it only so long.
 pub fn connect(path: &Path) -> std::io::Result<Stream> {
-    std::fs::OpenOptions::new().read(true).write(true).open(path)
+    use std::os::windows::fs::OpenOptionsExt;
+    // Identification only: whatever serves a pipe by this name learns who
+    // connected, it can't act as the meter (security audit M9).
+    const SECURITY_IDENTIFICATION: u32 = 1 << 16;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(path)
 }
 
 /// No identity to tell one pipe instance from the next without opening it.

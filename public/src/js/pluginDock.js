@@ -238,15 +238,26 @@
   };
 
   listen("dock-layout", (event) => applyLayout(event.payload));
+  // A plugin that showed itself (an alert) opens its tab; the tab open before
+  // is gone back to when it hides itself again ("dock-return").
+  const backTo = new Map();
   listen("dock-focus", (event) => {
-    if (docked.has(event.payload)) activate(event.payload);
+    const id = event.payload;
+    if (!docked.has(id)) return;
+    if (prefs.active && prefs.active !== id && !backTo.has(id)) backTo.set(id, prefs.active);
+    activate(id);
+  });
+  listen("dock-return", (event) => {
+    const back = backTo.get(event.payload);
+    backTo.delete(event.payload);
+    if (back && docked.has(back)) activate(back);
   });
 
   // Plugin events, each to its plugin's frame; one without a plugin to all.
   // `listen` hears events sent to any window, plugins' own windows too: the
   // ones for plugins not docked here are left alone.
-  listen("plugin-event", (event) => {
-    const payload = event.payload || {};
+  const onEvent = (payload) => {
+    payload ||= {};
     if (typeof payload.event !== "string") return;
     if (payload.plugin === undefined) {
       if (payload.event === "theme") applyTheme(payload.data);
@@ -254,6 +265,11 @@
       return;
     }
     docked.get(payload.plugin)?.plugin.receive(payload);
+  };
+  listen("plugin-event", (event) => onEvent(event.payload));
+  // The meter's numbered events, several at once (pluginHost.js).
+  listen("plugin-events", (event) => {
+    if (Array.isArray(event.payload)) for (const e of event.payload) onEvent(e);
   });
 
   // The bar: it moves the window, and its buttons.

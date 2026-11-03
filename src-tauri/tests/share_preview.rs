@@ -54,6 +54,9 @@ fn record_spanning(start_ms: i64, duration_ms: i64) -> FightRecord {
         run_at: 0,
         buffs: None,
         stagger: None,
+        local_actor_id: None,
+        killed: None,
+        max_hp_from_spawn: None,
     }
 }
 
