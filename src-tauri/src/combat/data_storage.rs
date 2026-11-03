@@ -64,6 +64,33 @@ const NEVER_MS: i64 = i64::MIN;
 /// Deaths kept for Details' DPS chart (`Inner::death_log`): far more than
 /// a session's fights need, small enough never to matter.
 const MAX_DEATHS: usize = 2_000;
+/// A player's death recap (`Inner::death_hits`): the monster hits on them in
+/// this long before the death, at most `DEATH_HITS` of them. Each death keeps
+/// its own, so a revive and later hits can't push an earlier death's out
+/// before the fight is saved.
+const DEATH_HIT_WINDOW_MS: i64 = 15_000;
+const DEATH_HITS: usize = 20;
+/// A hit sent just after the HP that read 0 still belongs to that death.
+const DEATH_HIT_LATE_MS: i64 = 1_000;
+/// Death recaps kept: one per player death, far more than a session's fights need.
+const MAX_DEATH_RECAPS: usize = 500;
+
+/// A monster's hit on a player, for a death recap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncomingHit {
+    pub at_ms: i64,
+    /// The monster's NPC code (0 when not known).
+    pub npc: i32,
+    pub skill: i32,
+    pub damage: i64,
+}
+
+/// A player death's recap: their max HP then, and the monster hits before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathHits {
+    pub max_hp: Option<i32>,
+    pub hits: Vec<IncomingHit>,
+}
 /// How often, in damage records, unnamed party members are matched to the
 /// roster by class. A fight brings a few hundred records a second, so this
 /// names them within the first moments of combat.
@@ -815,6 +842,12 @@ struct Inner {
     /// (`42 36` flag 3) and party members' (`note_hp`). Details marks the
     /// players' on its DPS chart. The last `MAX_DEATHS` only.
     death_log: VecDeque<(i32, i64, Option<i64>)>,
+    /// The monster hits on each known player in the last
+    /// `DEATH_HIT_WINDOW_MS`, oldest first: what a death recap is made of.
+    incoming_hits: HashMap<i32, VecDeque<IncomingHit>>,
+    /// Each player death's recap, under the death's entity and time as
+    /// `death_log` has them. The last `MAX_DEATH_RECAPS` only.
+    death_hits: VecDeque<(i32, i64, DeathHits)>,
     /// The maps the player last opened, one per map (`capture::boss_map`),
     /// and a count that moves with each, for `boss_maps_since`.
     boss_maps: Vec<crate::capture::boss_map::BossMap>,
@@ -1050,6 +1083,8 @@ impl DataStorage {
                 hostile_target_ids: HashSet::new(),
                 dead_entity_ids: HashSet::new(),
                 death_log: VecDeque::new(),
+                incoming_hits: HashMap::new(),
+                death_hits: VecDeque::new(),
                 boss_maps: Vec::new(),
                 boss_map_seq: 0,
                 abyss_artifacts: crate::capture::abyss_artifacts::ArtifactState { wars: Vec::new(), artifacts: Vec::new() },
@@ -2599,6 +2634,10 @@ impl DataStorage {
             let resolved_target = summon_resolver::resolve(target_id, &inner.summon_storage);
             if inner.known_player_ids.contains(&resolved_target) {
                 let dmg = pdp.total_damage() as i64;
+                if dmg > 0 {
+                    let npc = inner.mob_storage.get(&actor_id).copied().unwrap_or(0);
+                    note_incoming_hit(&mut inner, resolved_target, IncomingHit { at_ms: pdp.timestamp(), npc, skill: skill_code, damage: dmg });
+                }
                 if let Some(actor_data) = fight_of(&mut inner, resolved_target, Some(actor_id)) {
                     actor_data.damage_received += dmg;
                     actor_data.hits_received += 1;
@@ -2888,9 +2927,20 @@ impl DataStorage {
         }
         let before = inner.last_hp.insert(entity_id, hp);
         if hp == 0 && before.is_some_and(|b| b > 0) {
-            inner.death_log.push_back((entity_id, now_ms(), None));
+            let at = now_ms();
+            inner.death_log.push_back((entity_id, at, None));
             while inner.death_log.len() > MAX_DEATHS {
                 inner.death_log.pop_front();
+            }
+            let hits: Vec<IncomingHit> = inner
+                .incoming_hits
+                .get(&entity_id)
+                .map(|hits| hits.iter().filter(|h| h.at_ms >= at - DEATH_HIT_WINDOW_MS && h.at_ms <= at).copied().collect())
+                .unwrap_or_default();
+            let max_hp = inner.party_max_hp.get(&entity_id).copied();
+            inner.death_hits.push_back((entity_id, at, DeathHits { max_hp, hits }));
+            while inner.death_hits.len() > MAX_DEATH_RECAPS {
+                inner.death_hits.pop_front();
             }
         } else if hp > 0 && before == Some(0) {
             let now = now_ms();
@@ -3022,6 +3072,13 @@ impl DataStorage {
 
     pub fn deaths_between(&self, from: i64, to: i64) -> Vec<(i32, i64, Option<i64>)> {
         self.inner.read().death_log.iter().filter(|d| d.1 >= from && d.1 <= to).copied().collect()
+    }
+
+    /// The recap of `entity`'s death at `at_ms` (as `deaths_between` gave
+    /// it): the monster hits before it, oldest first. None for a death not
+    /// logged by `note_hp`, or one too long ago.
+    pub fn death_hits(&self, entity: i32, at_ms: i64) -> Option<DeathHits> {
+        self.inner.read().death_hits.iter().rev().find(|d| d.0 == entity && d.1 == at_ms).map(|d| d.2.clone())
     }
 
     /// `id` left the world. Only a linked summon is marked: see
@@ -4430,6 +4487,21 @@ fn apply_pending_nickname(inner: &mut Inner, uid: i32) {
     if inner.nickname_storage.contains_key(&uid) { return; }
     if let Some(pending) = inner.pending_nicknames.remove(&uid) {
         append_nickname_inner(inner, uid, &pending);
+    }
+}
+
+/// A monster's hit on a known player: kept for `DEATH_HIT_WINDOW_MS`, and
+/// added to their death's recap when it came in just after the HP that read 0.
+fn note_incoming_hit(inner: &mut Inner, player: i32, hit: IncomingHit) {
+    let hits = inner.incoming_hits.entry(player).or_default();
+    hits.push_back(hit);
+    while hits.front().is_some_and(|h| h.at_ms < hit.at_ms - DEATH_HIT_WINDOW_MS) || hits.len() > DEATH_HITS {
+        hits.pop_front();
+    }
+    if let Some((_, at, recap)) = inner.death_hits.iter_mut().rev().find(|d| d.0 == player) {
+        if hit.at_ms > *at && hit.at_ms <= *at + DEATH_HIT_LATE_MS && recap.hits.len() < DEATH_HITS {
+            recap.hits.push(hit);
+        }
     }
 }
 

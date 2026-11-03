@@ -187,7 +187,7 @@ pub struct PingPoint {
 
 /// A player dying during a fight, ms from its first hit (Details marks it on
 /// the DPS chart).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DeathPoint {
     pub actor_id: i32,
@@ -196,6 +196,31 @@ pub struct DeathPoint {
     /// stayed down to the end. The chart greys their line in between.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revived_ms: Option<i64>,
+    /// What monsters hit them with just before (`DataStorage::death_hits`),
+    /// oldest first, the killing blow last: a PvE death recap. Empty in
+    /// fights saved before the meter kept them, and for a death no monster
+    /// hit led to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<DeathHit>,
+    /// Their max HP when they died (the party roster's `1b 92`), to tell
+    /// each hit as a share of it; none when not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_hp: Option<i32>,
+}
+
+/// One monster hit in a death recap.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeathHit {
+    /// ms from the fight's first hit.
+    pub t: i64,
+    /// The monster's NPC code, and its name ("" when the table has none).
+    pub npc: i32,
+    pub by: String,
+    pub skill: i32,
+    /// The skill's name ("" when the table has none).
+    pub name: String,
+    pub dmg: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

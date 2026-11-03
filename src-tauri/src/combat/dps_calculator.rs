@@ -1915,11 +1915,29 @@ impl DpsCalculator {
             .map(|(id, t, revived)| {
                 let uid = *orphan_to_owner.get(&id).unwrap_or(&id);
                 let uid = *canonical.get(&resolve_nickname(uid, &nickname_data, &summon_data)).unwrap_or(&uid);
+                let recap = self.data_storage.death_hits(id, t);
                 DeathPoint {
                     actor_id: uid,
                     ts_ms: (t - fight_start).min(battle_time),
                     // Back up after the fight ended: down to its end.
                     revived_ms: revived.map(|r| r - fight_start).filter(|&r| r <= battle_time),
+                    hits: recap
+                        .as_ref()
+                        .map(|r| {
+                            r.hits
+                                .iter()
+                                .map(|h| DeathHit {
+                                    t: h.at_ms - fight_start,
+                                    npc: h.npc,
+                                    by: if h.npc > 0 { self.npc_lookup.get_npc_name(h.npc) } else { String::new() },
+                                    skill: h.skill,
+                                    name: self.skill_lookup.lookup_skill_name(h.skill),
+                                    dmg: h.damage,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    max_hp: recap.and_then(|r| r.max_hp),
                 }
             })
             .collect();
@@ -2111,11 +2129,45 @@ mod tests {
         crate::clock::set_override(None);
         let deaths = meter(&storage).get_target_details(50_000, None).deaths.unwrap();
         assert_eq!(deaths, vec![
-            DeathPoint { actor_id: 2259, ts_ms: 3_000, revived_ms: Some(5_000) },
-            DeathPoint { actor_id: 2260, ts_ms: 7_500, revived_ms: None },
+            DeathPoint { actor_id: 2259, ts_ms: 3_000, revived_ms: Some(5_000), ..Default::default() },
+            DeathPoint { actor_id: 2260, ts_ms: 7_500, revived_ms: None, ..Default::default() },
         ]);
         // A summary carries none, so its count reads as unknown, not 0.
         assert!(meter(&storage).get_hover_details(50_000, None).deaths.is_none());
+    }
+
+    #[test]
+    fn a_death_keeps_the_monster_hits_before_it_and_the_killing_blow_sent_just_after() {
+        let storage = Arc::new(DataStorage::new());
+        storage.append_nickname(2259, "Naicha");
+        storage.append_mob(50_000, 2300812);
+        storage.append_damage(hit(2259, 50_000, 1_000));
+        let boss = |at: i64, dmg: i32| {
+            let mut p = hit(50_000, 2259, at);
+            p.set_skill_code(1_200_001);
+            p.set_damage(dmg);
+            p
+        };
+        let at = |ms| crate::clock::set_override(Some(ms));
+        at(2_000);
+        storage.note_party_hp(2259, 9_000, 9_000);
+        storage.append_damage(boss(3_000, 2_000));
+        storage.append_damage(boss(3_800, 4_000));
+        at(4_000);
+        storage.note_party_hp(2259, 0, 9_000); // dies ...
+        storage.append_damage(boss(4_500, 3_000)); // ... the killing blow's record a moment later
+        at(6_000);
+        storage.note_party_hp(2259, 4_000, 9_000); // revived
+        storage.append_damage(boss(7_000, 1_000)); // hit again: not the death's
+        crate::clock::set_override(None);
+        let deaths = meter(&storage).get_target_details(50_000, None).deaths.unwrap();
+        assert_eq!(deaths.len(), 1);
+        assert_eq!(deaths[0].max_hp, Some(9_000));
+        assert_eq!(deaths[0].hits.iter().map(|h| (h.t, h.npc, h.skill, h.dmg)).collect::<Vec<_>>(), vec![
+            (2_000, 2300812, 1_200_001, 2_000),
+            (2_800, 2300812, 1_200_001, 4_000),
+            (3_500, 2300812, 1_200_001, 3_000),
+        ]);
     }
 
     #[test]
