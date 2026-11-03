@@ -64,6 +64,9 @@ const NEVER_MS: i64 = i64::MIN;
 /// Deaths kept for Details' DPS chart (`Inner::death_log`): far more than
 /// a session's fights need, small enough never to matter.
 const MAX_DEATHS: usize = 2_000;
+/// Mob kills kept with their spot (`Inner::mob_kills`) — the pet tracker's
+/// respawn timers need only the last minute's.
+const MOB_KILLS_KEPT: usize = 200;
 /// A player's death recap (`Inner::death_hits`): the monster hits on them in
 /// this long before the death, at most `DEATH_HITS` of them. Each death keeps
 /// its own, so a revive and later hits can't push an earlier death's out
@@ -805,6 +808,9 @@ struct Inner {
     /// The mobs in sight: entity -> NPC code, from their spawn until they
     /// die, despawn or a zone load (`mobs_in_sight`).
     mobs_in_sight: HashMap<i32, i32>,
+    /// The mobs in sight that died, where and when — NPC code, spot, time;
+    /// the last `MOB_KILLS_KEPT` only (`mob_kills_since`).
+    mob_kills: VecDeque<(i32, Position, i64)>,
     /// The mob in sight you hit directly last, and when (`my_target`).
     my_last_hit: Option<(i32, i64)>,
     /// Your last known spot and when it was told (`capture::positions`).
@@ -1069,6 +1075,7 @@ impl DataStorage {
                 roster_dungeon_id: 0,
                 current_map_id: None,
                 mobs_in_sight: HashMap::new(),
+                mob_kills: VecDeque::new(),
                 my_last_hit: None,
                 self_position: None,
                 self_guess: None,
@@ -1260,6 +1267,24 @@ impl DataStorage {
             }
         }
         mobs
+    }
+
+    /// The spots of the living mobs in sight, by NPC code — those whose spot
+    /// the game told.
+    pub fn mob_spots(&self) -> std::collections::BTreeMap<i32, Vec<Position>> {
+        let inner = self.inner.read();
+        let mut spots = std::collections::BTreeMap::<i32, Vec<Position>>::new();
+        for (entity, &code) in &inner.mobs_in_sight {
+            if let Some(&pos) = inner.entity_positions.get(entity) {
+                spots.entry(code).or_default().push(pos);
+            }
+        }
+        spots
+    }
+
+    /// The mobs in sight that died at `since_ms` or later: NPC code, spot, time.
+    pub fn mob_kills_since(&self, since_ms: i64) -> Vec<(i32, Position, i64)> {
+        self.inner.read().mob_kills.iter().filter(|k| k.2 >= since_ms).copied().collect()
     }
 
     /// A spot the game told of (`capture::positions`): yours, or another entity's.
@@ -2877,8 +2902,14 @@ impl DataStorage {
         inner.boss_hp_sent.remove(&entity_id);
         self.stagger.lock().note_gone(entity_id, now_ms(), true);
         inner.dead_entity_ids.insert(entity_id);
-        inner.mobs_in_sight.remove(&entity_id);
-        inner.entity_positions.remove(&entity_id);
+        let code = inner.mobs_in_sight.remove(&entity_id);
+        let spot = inner.entity_positions.remove(&entity_id);
+        if let (Some(code), Some(spot)) = (code, spot) {
+            inner.mob_kills.push_back((code, spot, now_ms()));
+            while inner.mob_kills.len() > MOB_KILLS_KEPT {
+                inner.mob_kills.pop_front();
+            }
+        }
         inner.hp_floored_ids.remove(&entity_id);
         inner.death_log.push_back((entity_id, now_ms(), None));
         while inner.death_log.len() > MAX_DEATHS {
@@ -4661,6 +4692,26 @@ mod tests {
         storage.append_mob(5, 777);
         storage.note_spotted(Spotted::Entity(5, spot(1_500_000.0, 7_000.0)));
         assert_eq!(storage.mobs_in_sight(60_000).get(&777), Some(&(1, None)));
+        crate::clock::set_override(None);
+    }
+
+    #[test]
+    fn a_mob_in_sight_dying_is_kept_with_its_spot() {
+        let storage = DataStorage::new();
+        let spot = |x: f32, y: f32| Position { x, y, z: 0.0 };
+        crate::clock::set_override(Some(1_000));
+        storage.append_mob(1, 777);
+        storage.note_spotted(Spotted::Entity(1, spot(12_000.0, -3_000.0)));
+        storage.append_mob(2, 888);
+        assert_eq!(storage.mob_spots().get(&777).map(Vec::len), Some(1));
+        assert!(!storage.mob_spots().contains_key(&888));
+        crate::clock::set_override(Some(5_000));
+        storage.mark_entity_dead(1);
+        // One without a spot: no kill to place.
+        storage.mark_entity_dead(2);
+        assert_eq!(storage.mob_kills_since(0), vec![(777, spot(12_000.0, -3_000.0), 5_000)]);
+        assert!(storage.mob_kills_since(5_001).is_empty());
+        assert!(storage.mob_spots().is_empty());
         crate::clock::set_override(None);
     }
 

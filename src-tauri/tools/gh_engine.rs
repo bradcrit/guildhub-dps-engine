@@ -101,7 +101,11 @@
 //! metres, to the nearest 10 (null: unknown) — the pet tracker tells from it
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
 //! since, by the mobs that left sight (`DataStorage::self_estimate`) — tens
-//! of metres off.
+//! of metres off. Each npc has `spots` too, `[x, y]` in metres (to the
+//! nearest MOB_SPOT_STEP_M) of each of them whose spot the game told; `kills`
+//! (`[{"npc","x","y","at"}]`) are the mobs in sight that died in the last
+//! MOB_KILLS_SHOWN_MS, where (same metres) and when (unix ms) — the pet
+//! tracker's respawn timers.
 //! `cubes` (`{"cubes":[{"metres","above","age","opening"}],"opened"}`) on
 //! every change and once on connecting: the Hidden Cubes in range
 //! (`capture::objects`), closest first, from when the game sends one until it
@@ -194,6 +198,10 @@ const DPS_RATE: Duration = Duration::from_millis(200);
 const SAVE_EVERY: Duration = Duration::from_secs(30);
 /// How often your character, Odyle energy and field boss kills are looked at.
 const SELF_RATE: Duration = Duration::from_secs(1);
+/// `npcs`: the mobs' spots to the nearest this many metres.
+const MOB_SPOT_STEP_M: f32 = 5.0;
+/// `npcs`: the kills of mobs in sight this recent (ms) — each comes in several events, the Companion takes it once.
+const MOB_KILLS_SHOWN_MS: i64 = 60_000;
 /// The mob you hit last counts as the one you fight for this long (`npcs`).
 const TARGET_HIT_MS: i64 = 15_000;
 /// Distances (`npcs`) from your spot while it is at most this old.
@@ -632,11 +640,24 @@ impl Engine {
 
     /// The living mobs in sight, by NPC code (see the top of this file).
     fn npcs_json(&self) -> String {
+        // Spots in metres, to the nearest MOB_SPOT_STEP_M — a mob shuffling on its spot isn't a new event.
+        let metres = |v: f32| (v / 100.0 / MOB_SPOT_STEP_M).round() as i64 * MOB_SPOT_STEP_M as i64;
+        let mut spots = self.storage.mob_spots();
         let npcs: Vec<_> = self
             .storage
             .mobs_in_sight(SELF_POS_MAX_AGE_MS)
             .into_iter()
-            .map(|(npc, (count, metres))| serde_json::json!({ "npc": npc, "count": count, "metres": metres.map(|m| m.round() as u32) }))
+            .map(|(npc, (count, near))| {
+                let at: Vec<_> = spots.remove(&npc).unwrap_or_default().iter().map(|p| [metres(p.x), metres(p.y)]).collect();
+                serde_json::json!({ "npc": npc, "count": count, "metres": near.map(|m| m.round() as u32), "spots": at })
+            })
+            .collect();
+        let since = a2tools_dps_meter_lib::clock::now_ms() - MOB_KILLS_SHOWN_MS;
+        let kills: Vec<_> = self
+            .storage
+            .mob_kills_since(since)
+            .into_iter()
+            .map(|(npc, p, at)| serde_json::json!({ "npc": npc, "x": metres(p.x), "y": metres(p.y), "at": at }))
             .collect();
         let target = self.storage.my_target(TARGET_HIT_MS);
         let me = self.storage.self_estimate(SELF_POS_MAX_AGE_MS);
@@ -645,7 +666,7 @@ impl Engine {
         // Your spot on the ground in metres, to the nearest 10 (else the event is new at every step).
         let pos = me.map(|(p, ..)| serde_json::json!({ "x": (p.x / 1000.0).round() as i64 * 10, "y": (p.y / 1000.0).round() as i64 * 10 }));
         let guessed = me.is_some_and(|(_, _, guessed)| guessed);
-        serde_json::json!({ "npcs": npcs, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed }).to_string()
+        serde_json::json!({ "npcs": npcs, "kills": kills, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed }).to_string()
     }
 
     /// The Hidden Cubes in range (see the top of this file).
