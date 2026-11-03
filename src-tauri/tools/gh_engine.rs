@@ -382,20 +382,16 @@ struct BarData {
     abnormal_names: HashMap<u32, String>,
     /// Every abnormal of the game's in `abnormals.json`: whether it files it as a debuff.
     debuffs: HashMap<u32, bool>,
-    /// Skills (first four digits) whose abnormals have another skill's icon,
-    /// and that skill's abnormals theirs: the game data swapped the two. The
-    /// skill applies its own abnormal (Lunge Stance 1140 → 114000x01), but
-    /// it showed Zikel's Blessing's crown and Zikel's Blessing Lunge Stance's
-    /// fire (2026-10-31) — they get their skill's icon.
-    swapped: HashMap<u32, u32>,
 }
 
 impl BarData {
-    /// The icon an abnormal shows: its skill's for a `swapped` skill, else its own.
+    /// The icon an abnormal shows: `ABNORMAL_ICON_FIXES`' for its skill, else its own.
     fn abnormal_icon(&self, abnormal: u32) -> Option<&str> {
         let digits = abnormal.to_string();
-        if digits.len() == 9 && digits[..4].parse().is_ok_and(|own: u32| self.swapped.contains_key(&own)) {
-            return self.skill_icons.get(&digits[..4]).map(String::as_str);
+        if digits.len() == 9 {
+            if let Some((_, icon)) = ABNORMAL_ICON_FIXES.iter().find(|(skill, _)| digits[..4].parse() == Ok(*skill)) {
+                return Some(icon);
+            }
         }
         self.abnormal_icons.get(&abnormal).map(String::as_str)
     }
@@ -416,6 +412,13 @@ impl BarData {
         (digits.len() == 8).then(|| self.skill_icons.get(&digits[..4])).flatten().map(String::as_str)
     }
 }
+
+/// Skills (first four digits) whose abnormals the game data gives the other
+/// one's icon — and since upstream 2.0.87 the skills too (`skill_icons.json`
+/// from the game's Skill table), so the two agree and no longer tell. In the
+/// game Lunge Stance's buff (114000x01) has the fire, Zikel's Blessing's
+/// (112500x01) the crown (checked 2026-10-31 and 2026-11-03).
+const ABNORMAL_ICON_FIXES: [(u32, &str); 2] = [(1125, "ICON_GL_SKILL_040"), (1140, "ICON_GL_SKILL_024")];
 
 /// The game's stand-in icons of abnormals that have none of their own — its
 /// inner states (Dodge 200 on every dodge, stuns, per-tick helpers): a red
@@ -448,38 +451,7 @@ fn load_bar_data(dir: &std::path::Path, language: &str, abnormals: Option<&str>)
     // Only the game's own entries say; the Companion adds icons for some it lacks.
     let debuffs = table.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.get("debuff")?.as_bool()?))).collect();
     let skill_icons: HashMap<String, String> = read(dir.join("skill_icons.json")).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-    let swapped = swapped_skills(&skill_icons, &abnormal_icons);
-    BarData { skill_icons, abnormal_icons, abnormal_names, debuffs, swapped }
-}
-
-/// `BarData::swapped`: skill A's abnormals (nine digits, A's four first) all
-/// have skill B's icon, B's alone, and B's all have A's.
-fn swapped_skills(skill_icons: &HashMap<String, String>, abnormal_icons: &HashMap<u32, String>) -> HashMap<u32, u32> {
-    let mut icons: HashMap<&str, HashSet<&str>> = HashMap::new();
-    for (id, icon) in abnormal_icons {
-        if (100_000_000..1_000_000_000).contains(id) {
-            let digits = id.to_string();
-            if let Some((skill, _)) = skill_icons.get_key_value(&digits[..4]) {
-                icons.entry(skill.as_str()).or_default().insert(icon.as_str());
-            }
-        }
-    }
-    let only = |skill: &str| icons.get(skill).filter(|set| set.len() == 1).and_then(|set| set.iter().next().copied());
-    let owner = |icon: &str| {
-        let owners: Vec<_> = skill_icons.iter().filter(|(_, own)| own.as_str() == icon).map(|(skill, _)| skill.as_str()).collect();
-        if let [skill] = owners[..] { Some(skill) } else { None }
-    };
-    let mut swapped = HashMap::new();
-    for (a, a_icon) in skill_icons {
-        let Some(b_icon) = only(a).filter(|icon| icon != a_icon) else { continue };
-        let Some(b) = owner(b_icon) else { continue };
-        if owner(a_icon) == Some(a.as_str()) && only(b) == Some(a_icon.as_str()) {
-            if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
-                swapped.insert(a, b);
-            }
-        }
-    }
-    swapped
+    BarData { skill_icons, abnormal_icons, abnormal_names, debuffs }
 }
 
 impl Engine {
@@ -1770,30 +1742,18 @@ mod tests {
         assert!(shop_event(&body[..20]).is_none());
     }
 
-    /// Lunge Stance's abnormals have Zikel's Blessing's icon and the other
-    /// way round, so they show their skill's; a skill whose icon is shared
-    /// or whose abnormals have two icons is no swap.
+    /// Lunge Stance's and Zikel's Blessing's abnormals show the icon the
+    /// game shows, whatever the data says; the rest show their own.
     #[test]
-    fn two_skills_with_each_others_abnormal_icons_are_swapped() {
-        let skill_icons: HashMap<String, String> = [
-            ("1125", "ICON_GL_SKILL_040"), ("1140", "ICON_GL_SKILL_024"),
-            ("1776", "ICON_CL_SKILL_Passive_005"), ("1777", "ICON_CL_SKILL_Passive_006"),
-            ("1201", "ICON_CO_SKILL_001"), ("1215", "ICON_CO_SKILL_001"), ("1300", "ICON_AS_SKILL_008"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    fn swapped_stance_abnormals_get_the_games_icon() {
         let abnormal_icons: HashMap<u32, String> = [
-            (112500001, "ICON_GL_SKILL_024"), (112500101, "ICON_GL_SKILL_024"), (114000001, "ICON_GL_SKILL_040"),
-            (177600001, "ICON_CL_SKILL_Passive_006"), (177700001, "ICON_CL_SKILL_Passive_007"),
-            (130000011, "ICON_CO_SKILL_001"), (120100001, "ICON_AS_SKILL_008"), (10012401, "ICON_GL_SKILL_040"),
+            (112500101, "ICON_GL_SKILL_024"), (114000001, "ICON_GL_SKILL_040"),
+            (177600001, "ICON_CL_SKILL_Passive_006"), (10012401, "ICON_GL_SKILL_040"),
         ]
         .into_iter()
         .map(|(k, v)| (k, v.to_string()))
         .collect();
-        let swapped = swapped_skills(&skill_icons, &abnormal_icons);
-        assert_eq!(swapped, HashMap::from([(1125, 1140), (1140, 1125)]));
-        let data = BarData { skill_icons, abnormal_icons, swapped, ..Default::default() };
+        let data = BarData { abnormal_icons, ..Default::default() };
         assert_eq!(data.abnormal_icon(114000001), Some("ICON_GL_SKILL_024"));
         assert_eq!(data.abnormal_icon(112500101), Some("ICON_GL_SKILL_040"));
         assert_eq!(data.abnormal_icon(177600001), Some("ICON_CL_SKILL_Passive_006"));
