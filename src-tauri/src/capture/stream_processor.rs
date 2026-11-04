@@ -370,29 +370,34 @@ impl StreamProcessor {
     // ===== OPEN-WORLD PARTY (00 92, 0D 92) =====
 
     /// An open-world party's members, which `02 97` (a dungeon or raid
-    /// party's roster) never names: `00 92` as the party forms or you join
-    /// one (your own entry; seen with you alone), `0d 92` as a member joins.
+    /// party's roster) never names: `00 92` is the whole party, sent as it
+    /// forms and again as someone leaves it; `0d 92` a member joining and
+    /// `22 92` a member's record again (back from another map).
     /// Each member is a record `24 <36-character GUID> <dbid u64 LE> <len u8>
     /// <name> <class u32>` (the roster's class codes, the world id in the top
     /// of `dbid`), with level and item level further on (see
-    /// `open_party_members`). Taken as a partial roster: a member who left
-    /// stays until the party ends (`13 92`).
+    /// `open_party_members`). `00 92` replaces the roster — with you alone
+    /// in it, the party is over; the others only add to it.
     ///
-    /// Seen on 2026-11-04 19:23:45 (Bradcrit forming a party, `00 92`) and
-    /// 19:23:47 (xlWinnie joining, `0d 92`), both of 2313.
+    /// Seen on 2026-11-04 (both of 2313): Bradcrit forming a party at
+    /// 19:23:45 (`00 92`, him alone), xlWinnie joining at 19:23:47 (`0d 92`),
+    /// her record again at 19:34:48 (`22 92`, after `21 92` with her dbid —
+    /// from another map), her leaving at 19:35:00 (`00 92`, Bradcrit alone).
     fn parse_open_party_packet(&self, packet: &[u8]) {
         let length_info = read_varint(packet, 0);
         if length_info.length <= 0 {
             return;
         }
         let offset = length_info.length as usize;
-        if !matches!(packet.get(offset..offset + 2), Some([0x00 | 0x0D, 0x92])) {
-            return;
-        }
+        let whole = match packet.get(offset..offset + 2) {
+            Some([0x00, 0x92]) => true,
+            Some([0x0D | 0x22, 0x92]) => false,
+            _ => return,
+        };
         let members = open_party_members(packet, offset + 2);
         if !members.is_empty() {
-            tracing::debug!("Open-world party: {:?}", members.iter().map(|(n, _)| n).collect::<Vec<_>>());
-            self.data_storage.set_party_roster_of(None, members, false);
+            tracing::debug!("Open-world party{}: {:?}", if whole { "" } else { " (joined)" }, members.iter().map(|(n, _)| n).collect::<Vec<_>>());
+            self.data_storage.set_party_roster_of(None, members, whole);
         }
     }
 
@@ -3030,7 +3035,7 @@ fn parse_party_roster_at(data: &[u8], at: usize) -> Option<Roster> {
     Some(Roster { party_key, members, complete, dungeon_id, party_size, name_fields })
 }
 
-/// The members of an open-world party record (`00 92`, `0d 92`; see
+/// The members of an open-world party record (`00 92`, `0d 92`, `22 92`; see
 /// `StreamProcessor::parse_open_party_packet`) from `from` on: each found by
 /// its GUID, `24` and 36 characters of hex digits and dashes, the dbid, name
 /// and class behind it. Level and item level are read where the record has
@@ -4320,6 +4325,9 @@ mod tests {
         let got = |p: &[u8]| super::open_party_members(p, 4).into_iter().map(|(n, m)| (n, m.server_id, m.job, m.level, m.gear_score)).collect::<Vec<_>>();
         assert_eq!(got(&formed), vec![("Bradcrit".to_string(), 2313, Some(JobClass::Gladiator), 45, 2800)]);
         assert_eq!(got(&joined), vec![("xlWinnie".to_string(), 2313, Some(JobClass::Cleric), 45, 2791)]);
+        // xlWinnie leaving (00 92 again, 19:35:00): Bradcrit alone, past the vacant slot before him.
+        let left = hex("ba02009208aa350300594dfe473b6f020000000909050000000201000205000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010301f8190000090909092443453137393032362d313043452d343330332d423639382d3436314443393342434645313b6f02000000090908427261646372697408000000a5f401a5f4015f1000005f10000000000000000000000000000000000000560400000000000039040000f42aed4780783d470040f644070b554e53544f505041424c45020000002d00000000000000f00a0000835602000000000001");
+        assert_eq!(got(&left), vec![("Bradcrit".to_string(), 2313, Some(JobClass::Gladiator), 45, 2800)]);
     }
 
     use super::*;
