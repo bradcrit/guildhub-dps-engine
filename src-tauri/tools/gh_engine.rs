@@ -41,7 +41,8 @@
 //! | `POST /v1/config?mode=<id>&window=<ms>` | which targets the meter follows (`TargetSelectionMode` ids) and the all-targets window |
 //! | `POST /v1/character?name=<name>` | the character played, as the parent read it off the game's screen just now |
 //!
-//! Events: `dps` (the view) and `self` (as `/v1/self`) on every change, each
+//! Events: `dps` (the view, each `map` entry with its player's home `server`,
+//! null while not known) and `self` (as `/v1/self`) on every change, each
 //! sent once on connecting (`self` also carries the game's `ping` in ms);
 //! `fight` (`{"id","killed"}`) when a fight is written to
 //! history; `bossKill` (`{"npc","at","server"}`) when a field boss dies in the
@@ -139,7 +140,7 @@
 //! until its maximum is known (the login sends it; a meter started
 //! mid-session hears it at the next login — HP in a party at once, from its
 //! `1b 92`).
-//! `party` (`{"members":[{"id","name","class","level","slot","me","near","hp","mp",
+//! `party` (`{"members":[{"id","name","class","server","level","slot","me","near","hp","mp",
 //! "dead","debuffs"}]}`, every 100 ms at most, on a change, and once on connecting)
 //! for the party frames: the roster's members in slot order (empty outside a
 //! party), `near` while they are in sight (you always; spawned and not gone
@@ -612,6 +613,7 @@ impl Engine {
                 let hp = gauge(resources.wide(HP));
                 serde_json::json!({
                     "id": id, "name": name, "class": member.job.map(class_key),
+                    "server": self.storage.stated_server(&name).filter(|&s| s != 0).or((member.server_id != 0).then_some(member.server_id)),
                     "level": (member.level > 0).then_some(member.level), "slot": member.slot,
                     "me": id.is_some() && id == me,
                     "near": id.is_some_and(|id| Some(id) == me || self.storage.player_in_sight(id)),
@@ -1207,6 +1209,21 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                         .filter(|&(max, _, _)| max > 0)
                         .map(|(max, rest, broken)| serde_json::json!({ "max": max, "rest": rest, "broken": broken }));
                     let mut view = serde_json::to_value(&dps).unwrap_or_default();
+                    // Each player's home server (`server`, null while not
+                    // known) — the Companion looks a row's character up by
+                    // name and server: a self or loot record's word, else the
+                    // party roster's.
+                    let roster = calc.storage.get_party_members();
+                    if let Some(map) = view.get_mut("map").and_then(|m| m.as_object_mut()) {
+                        for actor in map.values_mut() {
+                            let Some(fields) = actor.as_object_mut() else { continue };
+                            let name = fields.get("nickname").and_then(|n| n.as_str()).unwrap_or("").trim().to_string();
+                            let server = (!name.is_empty())
+                                .then(|| calc.storage.stated_server(&name).filter(|&s| s != 0).or_else(|| roster.get(&name).map(|m| m.server_id).filter(|&s| s != 0)))
+                                .flatten();
+                            fields.insert("server".into(), server.into());
+                        }
+                    }
                     if let Some(fields) = view.as_object_mut() {
                         fields.insert("targetDead".into(), dead.into());
                         fields.insert("targetStagger".into(), stagger.unwrap_or_default());
