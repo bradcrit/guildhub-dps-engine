@@ -140,7 +140,7 @@
 //! until its maximum is known (the login sends it; a meter started
 //! mid-session hears it at the next login — HP in a party at once, from its
 //! `1b 92`).
-//! `party` (`{"members":[{"id","name","class","server","level","slot","me","near","hp","mp",
+//! `party` (`{"members":[{"id","name","class","server","level","combatPower","itemLevel","slot","me","near","hp","mp",
 //! "dead","debuffs"}]}`, every 100 ms at most, on a change, and once on connecting)
 //! for the party frames: the roster's members in slot order (empty outside a
 //! party), `near` while they are in sight (you always; spawned and not gone
@@ -615,6 +615,8 @@ impl Engine {
                     "id": id, "name": name, "class": member.job.map(class_key),
                     "server": self.storage.stated_server(&name).filter(|&s| s != 0).or((member.server_id != 0).then_some(member.server_id)),
                     "level": (member.level > 0).then_some(member.level), "slot": member.slot,
+                    "combatPower": (member.combat_power > 0).then_some(member.combat_power),
+                    "itemLevel": (member.gear_score > 0).then_some(member.gear_score),
                     "me": id.is_some() && id == me,
                     "near": id.is_some_and(|id| Some(id) == me || self.storage.player_in_sight(id)),
                     "hp": hp, "mp": gauge(resources.small(MP)),
