@@ -288,6 +288,7 @@ impl StreamProcessor {
             || self.parsing_nickname(packet);
         let parsed_hp = self.parse_hp_mp_update_packet(packet);
         self.parse_party_scope_packet(packet);
+        self.parse_open_party_packet(packet);
         self.parse_party_left_packet(packet);
         self.parse_odyle_energy_packet(packet);
         self.parse_daily_duty_packet(packet);
@@ -363,6 +364,35 @@ impl StreamProcessor {
         let id = read_varint(packet, offset + 2);
         if id.length > 0 {
             self.data_storage.note_party_scope(id.value);
+        }
+    }
+
+    // ===== OPEN-WORLD PARTY (00 92, 0D 92) =====
+
+    /// An open-world party's members, which `02 97` (a dungeon or raid
+    /// party's roster) never names: `00 92` as the party forms or you join
+    /// one (your own entry; seen with you alone), `0d 92` as a member joins.
+    /// Each member is a record `24 <36-character GUID> <dbid u64 LE> <len u8>
+    /// <name> <class u32>` (the roster's class codes, the world id in the top
+    /// of `dbid`), with level and item level further on (see
+    /// `open_party_members`). Taken as a partial roster: a member who left
+    /// stays until the party ends (`13 92`).
+    ///
+    /// Seen on 2026-11-04 19:23:45 (Bradcrit forming a party, `00 92`) and
+    /// 19:23:47 (xlWinnie joining, `0d 92`), both of 2313.
+    fn parse_open_party_packet(&self, packet: &[u8]) {
+        let length_info = read_varint(packet, 0);
+        if length_info.length <= 0 {
+            return;
+        }
+        let offset = length_info.length as usize;
+        if !matches!(packet.get(offset..offset + 2), Some([0x00 | 0x0D, 0x92])) {
+            return;
+        }
+        let members = open_party_members(packet, offset + 2);
+        if !members.is_empty() {
+            tracing::debug!("Open-world party: {:?}", members.iter().map(|(n, _)| n).collect::<Vec<_>>());
+            self.data_storage.set_party_roster_of(None, members, false);
         }
     }
 
@@ -3000,6 +3030,60 @@ fn parse_party_roster_at(data: &[u8], at: usize) -> Option<Roster> {
     Some(Roster { party_key, members, complete, dungeon_id, party_size, name_fields })
 }
 
+/// The members of an open-world party record (`00 92`, `0d 92`; see
+/// `StreamProcessor::parse_open_party_packet`) from `from` on: each found by
+/// its GUID, `24` and 36 characters of hex digits and dashes, the dbid, name
+/// and class behind it. Level and item level are read where the record has
+/// them: `02 00 00 00 <level u32> <4 zero bytes> <item level u32>`, after the
+/// member's legion — 0 (not known) when that isn't found. No combat power:
+/// these records carry none.
+fn open_party_members(data: &[u8], from: usize) -> Vec<(String, crate::combat::data_storage::PartyMember)> {
+    use crate::combat::data_storage::PartyMember;
+    let is_guid = |b: &[u8]| b.len() == 36 && b.iter().enumerate().all(|(i, &c)| if matches!(i, 8 | 13 | 18 | 23) { c == b'-' } else { c.is_ascii_hexdigit() });
+    let mut out: Vec<(String, PartyMember)> = Vec::new();
+    let mut i = from;
+    while i + 1 + 36 + 8 + 1 < data.len() {
+        if data[i] != 0x24 || !is_guid(&data[i + 1..i + 37]) {
+            i += 1;
+            continue;
+        }
+        let mut o = i + 37;
+        i += 1;
+        let Some(dbid) = data.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap())) else { break };
+        let server_id = (dbid >> 48) as u16;
+        if !(1000..=2999).contains(&server_id) {
+            continue;
+        }
+        o += 8;
+        let len = data[o] as usize;
+        o += 1;
+        let Some(name) = (1..=40).contains(&len).then(|| data.get(o..o + len)).flatten().and_then(|b| std::str::from_utf8(b).ok()) else { continue };
+        let name: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+        if name.is_empty() {
+            continue;
+        }
+        o += len;
+        let Some(job) = (o + 4 <= data.len()).then(|| crate::entity::job_class::JobClass::from_roster_class(parse_u32_le(data, o))).flatten() else { continue };
+        o += 4;
+        // Level and item level, before the next member's record.
+        let end = (o + 220).min(data.len());
+        let next = (o..end.saturating_sub(37)).find(|&k| data[k] == 0x24 && is_guid(&data[k + 1..k + 37])).unwrap_or(end);
+        let (level, gear_score) = (o..next.saturating_sub(15))
+            .find_map(|k| {
+                let level = parse_u32_le(data, k + 4);
+                let gear = parse_u32_le(data, k + 12);
+                (data[k..k + 4] == [2, 0, 0, 0] && (1..=200).contains(&level) && data[k + 8..k + 12].iter().all(|&b| b == 0) && (1..=10_000).contains(&gear))
+                    .then_some((level as i32, gear as i32))
+            })
+            .unwrap_or((0, 0));
+        if !out.iter().any(|(n, _)| *n == name) {
+            out.push((name, PartyMember { slot: 0, level, gear_score, combat_power: 0, server_id, dbid, job: Some(job) }));
+        }
+        i = o;
+    }
+    out
+}
+
 /// Find a little-endian `u16` equal to `wanted` in `data[from..to]`.
 fn find_u16(data: &[u8], from: usize, to: usize, wanted: u16) -> Option<usize> {
     let end = to.min(data.len().saturating_sub(2));
@@ -4226,6 +4310,18 @@ fn scanned_name_fields(data: &[u8], out: &mut Vec<NameField>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_open_world_party_names_its_members() {
+        use crate::entity::job_class::JobClass;
+        let hex = |h: &str| (0..h.len()).step_by(2).map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+        // Bradcrit forming a party (00 92) and xlWinnie joining it (0d 92), 2026-11-04 19:23:45/47.
+        let formed = hex("c101009200aa350300594dfe473b6f0200000009090500000002010002010301f8190000090909092443453137393032362d313043452d343330332d423639382d3436314443393342434645313b6f02000000090908427261646372697408000000a5f401a5f4015f1000005f10000000000000000000000000000000000000560400000000000039040000f42aed4780783d470040f644070b554e53544f505041424c45020000002d00000000000000f00a0000835602000000000001");
+        let joined = hex("ad010d920702941d0000090909092439414139353944372d463237452d344643422d383937452d433339433744333145344137067002000000090908786c57696e6e696520000000c2b701c2b701241400002414000000000000000000000000000000000000560400000000000031040000fe9b07484a2ebac700849446070b554e53544f505041424c45020000002d00000000000000e70a00000100ce5909010f627a020000000000");
+        let got = |p: &[u8]| super::open_party_members(p, 4).into_iter().map(|(n, m)| (n, m.server_id, m.job, m.level, m.gear_score)).collect::<Vec<_>>();
+        assert_eq!(got(&formed), vec![("Bradcrit".to_string(), 2313, Some(JobClass::Gladiator), 45, 2800)]);
+        assert_eq!(got(&joined), vec![("xlWinnie".to_string(), 2313, Some(JobClass::Cleric), 45, 2791)]);
+    }
+
     use super::*;
     use crate::combat::data_storage::SkillCombatData;
     use crate::combat::stagger::{End, Outcome, StaggerWindow};

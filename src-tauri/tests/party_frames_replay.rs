@@ -102,6 +102,8 @@ fn a_capture_feeds_the_party_frames() {
             print_party(&storage, at_ms);
         }
     }
+    // And as the capture ends: a short one never reaches the next 30 s.
+    print_party(&storage, printed_ms);
     clock::set_override(None);
 
     let mut taken_off: Vec<_> = taken_off.into_iter().collect();
