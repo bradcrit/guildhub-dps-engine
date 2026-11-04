@@ -779,6 +779,11 @@ struct Inner {
     /// or combat power (Vakron, 2026-10-17: three of five, who left at the
     /// end of the run). See `fight_roster`.
     former_party_members: HashMap<String, PartyMember>,
+    /// The party as a run before this one last had it (`remember_party`):
+    /// taken back once the game shows one of its members is still with you
+    /// (`note_party_member_seen`) — a restarted engine hears no roster until
+    /// someone joins or leaves.
+    remembered_party: Vec<(String, PartyMember)>,
     /// When the last roster arrived, and whether its members who have not
     /// fought should still get rows. See `party_placeholders_wanted`.
     party_roster_at_ms: i64,
@@ -1065,6 +1070,7 @@ impl DataStorage {
                 low_id_entities: HashSet::new(),
                 party_members: HashMap::new(),
                 former_party_members: HashMap::new(),
+                remembered_party: Vec::new(),
                 party_roster_at_ms: 0,
                 party_size: None,
                 own_party_key: None,
@@ -3265,6 +3271,8 @@ impl DataStorage {
             return;
         }
         let mut inner = self.inner.write();
+        // A roster of this run: the remembered party is old news.
+        inner.remembered_party.clear();
         let local = inner.local_character_name.as_deref().map(str::trim).unwrap_or_default().to_string();
         if !local.is_empty() && members.iter().any(|(name, _)| name.trim() == local) {
             inner.self_in_roster = true;
@@ -3458,6 +3466,27 @@ impl DataStorage {
     /// Names a dungeon run: its fights and loot share it.
     pub fn run_started_at(&self, at_ms: i64) -> i64 {
         self.inner.read().instance_entries.iter().rev().find(|&&at| at <= at_ms).copied().unwrap_or(0)
+    }
+
+    /// The party an earlier run of the engine had (its saved roster), held
+    /// until `note_party_member_seen` confirms it — or a roster replaces it.
+    pub fn remember_party(&self, members: Vec<(String, PartyMember)>) {
+        self.inner.write().remembered_party = members;
+    }
+
+    /// A party member's record came (`1c 92`, with their `dbid`): when no
+    /// roster has come this run and they were in the remembered party, that
+    /// party is yours still — taken back as a partial roster.
+    pub fn note_party_member_seen(&self, dbid: u64) {
+        let members = {
+            let mut inner = self.inner.write();
+            if dbid == 0 || inner.party_members.len() >= 2 || !inner.remembered_party.iter().any(|(_, m)| m.dbid == dbid) {
+                return;
+            }
+            std::mem::take(&mut inner.remembered_party)
+        };
+        tracing::info!("Party taken back from the last run: {} members", members.len());
+        self.set_party_roster_of(None, members, false);
     }
 
     pub fn get_party_members(&self) -> HashMap<String, PartyMember> {

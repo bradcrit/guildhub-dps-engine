@@ -289,6 +289,7 @@ impl StreamProcessor {
         let parsed_hp = self.parse_hp_mp_update_packet(packet);
         self.parse_party_scope_packet(packet);
         self.parse_open_party_packet(packet);
+        self.parse_party_member_update_packet(packet);
         self.parse_party_left_packet(packet);
         self.parse_odyle_energy_packet(packet);
         self.parse_daily_duty_packet(packet);
@@ -398,6 +399,30 @@ impl StreamProcessor {
         if !members.is_empty() {
             tracing::debug!("Open-world party{}: {:?}", if whole { "" } else { " (joined)" }, members.iter().map(|(n, _)| n).collect::<Vec<_>>());
             self.data_storage.set_party_roster_of(None, members, whole);
+        }
+    }
+
+    // ===== PARTY MEMBER UPDATE (1C 92) =====
+
+    /// `<len> 1c 92 <dbid u64 LE> <class u32> <map u32> …`: a party member's
+    /// record (their map, position, level, item level, legion), every few
+    /// seconds while they move — no name. It shows who is in your party
+    /// without a roster: a restarted engine takes the remembered party back
+    /// by it (`DataStorage::note_party_member_seen`). Seen for xlWinnie of
+    /// 2313 from 19:24:09 on 2026-11-04, 2 s apart as she ran, 15 s on
+    /// another map.
+    fn parse_party_member_update_packet(&self, packet: &[u8]) {
+        let length_info = read_varint(packet, 0);
+        if length_info.length <= 0 {
+            return;
+        }
+        let offset = length_info.length as usize;
+        if packet.get(offset..offset + 2) != Some(&[0x1C, 0x92][..]) {
+            return;
+        }
+        let Some(dbid) = packet.get(offset + 2..offset + 10).map(|b| u64::from_le_bytes(b.try_into().unwrap())) else { return };
+        if (1000..=2999).contains(&((dbid >> 48) as u16)) {
+            self.data_storage.note_party_member_seen(dbid);
         }
     }
 
@@ -5402,6 +5427,29 @@ mod tests {
         let mut p = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
         p.set_override_timestamp(Some(1_000));
         (storage, p)
+    }
+
+    /// A restarted engine's remembered party comes back with a member's `1c 92`
+    /// (xlWinnie of 2313, 2026-11-04 19:34:53) — not with a stranger's.
+    #[test]
+    fn a_remembered_party_comes_back_with_a_members_record() {
+        use crate::combat::data_storage::PartyMember;
+        let winnie = 0x0909_0000_0002_7006u64;
+        let remembered = vec![
+            ("Bradcrit".to_string(), PartyMember { dbid: 0x0909_0000_0002_6f3b, server_id: 2313, ..Default::default() }),
+            ("xlWinnie".to_string(), PartyMember { dbid: winnie, server_id: 2313, ..Default::default() }),
+        ];
+        let record = "501c9206700200000009092000000056040000000000002f040000c2b50348c187b1c70088b2462d00000000000000e70a00000b554e53544f505041424c450200000001627a02000000000005";
+        let stranger = record.replacen("0670020000000909", "0771020000000909", 1);
+
+        let (storage, mut p) = processor();
+        storage.remember_party(remembered.clone());
+        p.parse_perfect_packet(&hex(&stranger));
+        assert!(storage.get_party_members().is_empty());
+        p.parse_perfect_packet(&hex(record));
+        let mut names: Vec<_> = storage.get_party_members().into_keys().collect();
+        names.sort();
+        assert_eq!(names, ["Bradcrit", "xlWinnie"]);
     }
 
     fn skill_of(storage: &DataStorage, target: i32, actor: i32, skill: i32) -> SkillCombatData {

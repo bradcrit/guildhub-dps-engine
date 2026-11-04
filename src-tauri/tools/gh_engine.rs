@@ -289,6 +289,63 @@ const CAST_TIMES_SAVE_EVERY: Duration = Duration::from_secs(60);
 /// The debuffs a party member can take off, learnt (`learn_cleansable`) and
 /// kept between sessions: `[abnormal, …]`.
 const CLEANSABLE_FILE: &str = "cleansable.json";
+/// Your party as it last was (`save_party`), for the next run: an engine
+/// restarted mid-party (a Companion update) hears no roster until someone
+/// joins or leaves, and takes it back once a member's `1c 92` shows they are
+/// still with you (`DataStorage::note_party_member_seen`).
+const PARTY_FILE: &str = "party.json";
+/// A saved party older than this is not taken back.
+const PARTY_KEEP_MS: i64 = 12 * 3_600_000;
+
+/// The party file's text for this roster — None for no party (fewer than two).
+fn party_file_text(roster: &std::collections::HashMap<String, a2tools_dps_meter_lib::combat::data_storage::PartyMember>, now_ms: i64) -> Option<String> {
+    if roster.len() < 2 {
+        return None;
+    }
+    let mut members: Vec<_> = roster.iter().collect();
+    members.sort_by_key(|(name, m)| (m.slot, (*name).clone()));
+    let members: Vec<_> = members
+        .into_iter()
+        .map(|(name, m)| {
+            serde_json::json!({
+                "name": name, "slot": m.slot, "level": m.level, "gearScore": m.gear_score, "combatPower": m.combat_power,
+                "dbid": m.dbid.to_string(), "class": m.job.map(class_key),
+            })
+        })
+        .collect();
+    Some(serde_json::json!({ "savedAt": now_ms, "members": members }).to_string())
+}
+
+/// The saved party (see PARTY_FILE), if it is recent enough.
+fn read_party_file(text: &str, now_ms: i64) -> Vec<(String, a2tools_dps_meter_lib::combat::data_storage::PartyMember)> {
+    use a2tools_dps_meter_lib::combat::data_storage::PartyMember;
+    let Ok(saved) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
+    if saved["savedAt"].as_i64().is_none_or(|at| now_ms - at > PARTY_KEEP_MS) {
+        return Vec::new();
+    }
+    saved["members"]
+        .as_array()
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|m| {
+                    let name = m["name"].as_str()?.to_string();
+                    let dbid: u64 = m["dbid"].as_str()?.parse().ok()?;
+                    let job = m["class"].as_str().and_then(|key| ALL_CLASSES.into_iter().find(|&c| class_key(c) == key));
+                    Some((name, PartyMember {
+                        slot: m["slot"].as_u64().unwrap_or(0) as u8,
+                        level: m["level"].as_i64().unwrap_or(0) as i32,
+                        gear_score: m["gearScore"].as_i64().unwrap_or(0) as i32,
+                        combat_power: m["combatPower"].as_i64().unwrap_or(0),
+                        server_id: (dbid >> 48) as u16,
+                        dbid,
+                        job,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 /// Known before anything is learnt: Burn (two kinds) and Stun, which a
 /// Cleric's cleanse took off other players on 2026-10-31.
 const CLEANSABLE_SEEN: [u32; 3] = [12_000_001, 12_000_121, 12_000_161];
@@ -955,6 +1012,12 @@ impl Engine {
     }
 }
 
+/// Every class, for `class_key` backwards.
+const ALL_CLASSES: [JobClass; 9] = [
+    JobClass::Gladiator, JobClass::Templar, JobClass::Ranger, JobClass::Assassin, JobClass::Sorcerer,
+    JobClass::Cleric, JobClass::Elementalist, JobClass::Chanter, JobClass::Fighter,
+];
+
 /// The class as GuildHub names it (its AION2_CLASSES).
 fn class_key(class: JobClass) -> &'static str {
     match class {
@@ -1073,6 +1136,14 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (skill_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (resource_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (party, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let party_path = args.data_dir.join(PARTY_FILE);
+    if let Ok(text) = std::fs::read_to_string(&party_path) {
+        let remembered = read_party_file(&text, a2tools_dps_meter_lib::clock::now_ms());
+        if !remembered.is_empty() {
+            tracing::info!("Remembered party of {} members, until a member shows up", remembered.len());
+            storage.remember_party(remembered);
+        }
+    }
     let cleansable_path = args.data_dir.join(CLEANSABLE_FILE);
     let mut cleansable: HashSet<u32> = CLEANSABLE_SEEN.into_iter().collect();
     if let Some(learned) = std::fs::read_to_string(&cleansable_path).ok().and_then(|text| serde_json::from_str::<Vec<u32>>(&text).ok()) {
@@ -1249,6 +1320,8 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
             let mut interval = tokio::time::interval(SKILLS_RATE);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let (mut seq, mut saved) = (0u64, std::time::Instant::now());
+            // Before the first look: the party file stays until a roster says otherwise.
+            let mut saved_party = String::from("[]");
             loop {
                 interval.tick().await;
                 let bars = engine.skills_json();
@@ -1264,6 +1337,22 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                     learned.sort_unstable();
                     if let Ok(text) = serde_json::to_string(&learned) {
                         let _ = std::fs::write(&cleansable_path, text);
+                    }
+                }
+                // Your party for the next run, saved as it changes (gone: no party).
+                let roster = engine.storage.get_party_members();
+                let mut names: Vec<&String> = roster.keys().collect();
+                names.sort();
+                let key = format!("{names:?}");
+                if key != saved_party {
+                    saved_party = key;
+                    match party_file_text(&roster, a2tools_dps_meter_lib::clock::now_ms()) {
+                        Some(text) => {
+                            let _ = std::fs::write(&party_path, text);
+                        }
+                        None => {
+                            let _ = std::fs::remove_file(&party_path);
+                        }
                     }
                 }
                 let party = engine.party_json();
