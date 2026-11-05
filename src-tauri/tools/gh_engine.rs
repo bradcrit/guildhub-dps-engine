@@ -1897,6 +1897,23 @@ mod tests {
         assert_eq!(data.abnormal_icon(10012401), Some("ICON_GL_SKILL_040"));
     }
 
+    /// Against the shipped game data: every Lunge Stance abnormal and its
+    /// skill show the fire (024), every Zikel's Blessing the crown (040).
+    #[test]
+    fn the_shipped_data_gives_the_stances_the_games_icons() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("src").join("data");
+        let abnormals = std::fs::read_to_string(dir.join("abnormals.json")).unwrap();
+        let data = load_bar_data(&dir, "en", Some(&abnormals));
+        for level in 0..6 {
+            assert_eq!(data.abnormal_icon(114_000_001 + level * 100), Some("ICON_GL_SKILL_024"), "Lunge Stance");
+            assert_eq!(data.abnormal_icon(112_500_001 + level * 100), Some("ICON_GL_SKILL_040"), "Zikel's Blessing");
+        }
+        assert_eq!(data.skill_icon(11_400_000), Some("ICON_GL_SKILL_024"));
+        assert_eq!(data.skill_icon(11_250_000), Some("ICON_GL_SKILL_040"));
+        assert_eq!(data.abnormal_names.get(&114_000_001).map(String::as_str), Some("Lunge Stance"));
+        assert_eq!(data.abnormal_names.get(&112_500_001).map(String::as_str), Some("Zikel's Blessing"));
+    }
+
     /// The same two on the cooldown bar: the skill table swaps them as well.
     #[test]
     fn swapped_stance_skills_get_the_games_icon() {
