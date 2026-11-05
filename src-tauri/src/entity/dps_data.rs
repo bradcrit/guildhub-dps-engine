@@ -54,6 +54,10 @@ pub struct DpsData {
     pub zone_generation: u64,
     #[serde(default)]
     pub instance_generation: u64,
+    /// The rows are an open-world boss's (`DpsCalculator::world_boss_rows`):
+    /// you, your party without damage numbers, and Others.
+    #[serde(default)]
+    pub world_boss: bool,
 }
 
 impl DpsData {
@@ -76,6 +80,7 @@ impl DpsData {
             party_generation: 0,
             zone_generation: 0,
             instance_generation: 0,
+            world_boss: false,
         }
     }
 }

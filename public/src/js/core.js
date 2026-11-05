@@ -1821,6 +1821,10 @@ class DpsApp {
         gearScore,
         isUser: !isOthers && ((!!name && name === this.USER_NAME) || (hasLocalId && numericId === localId)),
         isOthers,
+        // A party member on an open-world boss: the server sends none of
+        // their direct hits, so their damage is in Others and the row
+        // shows "—" for damage (dps_calculator.rs world_boss_rows).
+        damageUnmeasured: !!(isObj && value.damageUnmeasured),
         isIdentifying,
         // Resolved in Rust against a downloaded roster; the frontend only
         // renders it. Cosmetic only — it must not reach sorting or bar colour.
@@ -6473,6 +6477,8 @@ class DpsApp {
   }
 
   metricFor(row, mode) {
+    const damageMode = mode !== "damageReceived" && mode !== "hps" && mode !== "totalHeal" && mode !== "stagger";
+    if (row?.damageUnmeasured && damageMode) return { value: 0, text: "—" };
     if (mode === "totalDamage") {
       const totalDamage = Number(row?.totalDamage) || 0;
       return {

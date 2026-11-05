@@ -489,7 +489,9 @@ const createMeterUI = ({
         visibleTotalDamage > 0 ? (Number(row.totalDamage) / visibleTotalDamage) * 100 : 0;
 
       let contributionClass = "";
-      if (damageContribution < 3) {
+      if (row.damageUnmeasured) {
+        // No number to judge (dps_calculator.rs world_boss_rows).
+      } else if (damageContribution < 3) {
         contributionClass = "error";
       } else if (damageContribution < 5) {
         contributionClass = "warning";
@@ -529,7 +531,7 @@ const createMeterUI = ({
         view.lastExtraText = extraText;
       }
 
-      const contributionText = `${damageContribution.toFixed(1)}%`;
+      const contributionText = row.damageUnmeasured ? "—" : `${damageContribution.toFixed(1)}%`;
       if (view.lastContributionText !== contributionText) {
         view.dpsContribution.textContent = contributionText;
         view.lastContributionText = contributionText;

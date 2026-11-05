@@ -677,8 +677,11 @@ impl DpsCalculator {
     /// Global update of 2026-10-15 the server sends no one else's direct hits
     /// on these bosses, only their damage over time, so their rows showed a
     /// few percent of what they did (Furious Saursus, 2026-10-17: 7.8M of the
-    /// 152M it lost; #55). Others is the HP the boss has lost since this meter
-    /// first saw the fight, less what your and your party's rows show.
+    /// 152M it lost; #55). That holds for your party too: their rows showed
+    /// only their damage over time (High Commander Lagta, 2026-11-05: 36k
+    /// against the 186M in Others). So party rows keep their heal and damage
+    /// taken but carry no damage (`damage_unmeasured`), and Others is the HP
+    /// the boss has lost since this meter first saw the fight, less your row.
     /// Returns the total the rows now add up to. `None` when the target is no
     /// field boss.
     #[allow(clippy::too_many_arguments)]
@@ -703,12 +706,19 @@ impl DpsCalculator {
             return None;
         }
         let local_name = self.data_storage.local_character_name();
-        dps_data.map.retain(|uid, d| {
-            let name = d.nickname.trim();
+        let is_you = |uid: &i32, d: &PersonalData| {
             local_ids.as_ref().is_some_and(|ids| ids.contains(uid))
-                || local_name.as_deref().is_some_and(|n| n.trim() == name)
-                || party.contains_key(name)
-        });
+                || local_name.as_deref().is_some_and(|n| n.trim() == d.nickname.trim())
+        };
+        dps_data.map.retain(|uid, d| is_you(uid, d) || party.contains_key(d.nickname.trim()));
+        dps_data.world_boss = true;
+        for (uid, d) in dps_data.map.iter_mut() {
+            if !is_you(uid, d) {
+                d.amount = 0.0;
+                d.analyzed_data.clear();
+                d.damage_unmeasured = true;
+            }
+        }
         let listed: f64 = dps_data.map.values().map(|d| d.amount).sum();
 
         let hp_now = if self.data_storage.is_entity_dead(target) { 0 } else { current_hp };
@@ -843,6 +853,7 @@ impl DpsCalculator {
                 .unwrap_or_else(|| "Unknown".to_string());
             entry.combat_power = member.combat_power;
             entry.gear_score = member.gear_score;
+            entry.damage_unmeasured = dps_data.world_boss;
             dps_data.map.entry(uid).or_insert(entry);
         }
     }
@@ -2506,6 +2517,7 @@ mod tests {
         storage.set_party_roster(vec![
             ("Naicha".into(), PartyMember { slot: 1, ..Default::default() }),
             ("Oppi".into(), PartyMember { slot: 2, ..Default::default() }),
+            ("Quiet".into(), PartyMember { slot: 3, ..Default::default() }),
         ], true);
         storage.append_nickname_authoritative(15_130, "Oppi");
         let mut calc = boss_meter(&storage);
@@ -2519,17 +2531,28 @@ mod tests {
         storage.append_damage(hit(15_130, 44_090, 2_000));
         storage.append_damage(hit(2653, 44_090, 2_100));
         let mine = first.map[&7983].amount;
-        let shown_before = mine + calc.get_dps().map[&15_130].amount;
-        storage.set_mob_current_hp(44_090, 1_000_000 - 500_000 - (shown_before - mine) as i32);
+        let oppi = 500; // one `hit`
+        storage.set_mob_current_hp(44_090, 1_000_000 - 500_000 - oppi);
         storage.append_damage(hit(7983, 44_090, 3_000));
         let shown = calc.get_dps();
-        let mut ids: Vec<i32> = shown.map.keys().copied().collect();
-        ids.sort_unstable();
-        assert_eq!(ids, vec![7983, 15_130, OTHERS_ROW_ID]);
+        assert!(shown.world_boss);
+        let mut names: Vec<&str> = shown.map.values().map(|d| d.nickname.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["Naicha", "Oppi", "Others", "Quiet"]);
+        assert!(shown.map.contains_key(&15_130) && shown.map.contains_key(&OTHERS_ROW_ID));
+        // Your party's direct hits never come on a world boss (Lagta,
+        // 2026-11-05): their rows carry no damage, it goes to Others.
+        for d in shown.map.values().filter(|d| d.nickname == "Oppi" || d.nickname == "Quiet") {
+            assert!(d.damage_unmeasured, "{} has no damage number", d.nickname);
+            assert_eq!(d.amount, 0.0);
+            assert_eq!(d.damage_contribution, 0.0);
+        }
+        assert!(!shown.map[&7983].damage_unmeasured);
         let others = &shown.map[&OTHERS_ROW_ID];
         assert!(others.is_others);
         let listed: f64 = shown.map.iter().filter(|(id, _)| **id != OTHERS_ROW_ID).map(|(_, d)| d.amount).sum();
-        let lost = (1_000_000 + mine as i64) - (1_000_000 - 500_000 - (shown_before - mine) as i64);
+        assert_eq!(listed, shown.map[&7983].amount, "only your row counts");
+        let lost = (1_000_000 + mine as i64) - (1_000_000 - 500_000 - oppi as i64);
         assert_eq!((listed + others.amount) as i64, lost, "the rows add up to what the boss lost");
         let share: f64 = shown.map.values().map(|d| d.damage_contribution).sum();
         assert!((share - 100.0).abs() < 0.01);

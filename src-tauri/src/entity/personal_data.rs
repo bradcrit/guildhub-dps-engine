@@ -38,6 +38,12 @@ pub struct PersonalData {
     /// from the HP the boss lost (`DpsCalculator::world_boss_rows`).
     #[serde(default)]
     pub is_others: bool,
+    /// A party member on an open-world boss: the server sends none of their
+    /// direct hits there, so their damage is counted in Others and the row
+    /// shows no number ("—"). Heal and damage taken still count. Left out
+    /// when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub damage_unmeasured: bool,
     #[serde(default)]
     pub hps: f64,
     #[serde(default)]
@@ -64,6 +70,10 @@ pub struct PersonalData {
     pub deaths: i32,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 fn is_zero(n: &i32) -> bool {
     *n == 0
 }
@@ -82,6 +92,7 @@ impl PersonalData {
             is_supporter: false,
             uses_a2tools: false,
             is_others: false,
+            damage_unmeasured: false,
             hps: 0.0,
             heal_amount: 0.0,
             effective_heal: 0.0,
@@ -105,6 +116,7 @@ impl PersonalData {
             is_supporter: false,
             uses_a2tools: false,
             is_others: false,
+            damage_unmeasured: false,
             hps: 0.0,
             heal_amount: 0.0,
             effective_heal: 0.0,
