@@ -473,9 +473,17 @@ impl BarData {
         self.abnormal_icons.get(&abnormal).is_some_and(|icon| BOON_ICON_ENDS.iter().any(|end| icon.ends_with(end)))
     }
 
+    /// The icon a skill shows: `ABNORMAL_ICON_FIXES`' for it, else the data's
+    /// (the cooldown bar showed Lunge Stance with the crown, 2026-11-05).
     fn skill_icon(&self, skill: u32) -> Option<&str> {
         let digits = skill.to_string();
-        (digits.len() == 8).then(|| self.skill_icons.get(&digits[..4])).flatten().map(String::as_str)
+        if digits.len() != 8 {
+            return None;
+        }
+        if let Some((_, icon)) = ABNORMAL_ICON_FIXES.iter().find(|(fixed, _)| digits[..4].parse() == Ok(*fixed)) {
+            return Some(icon);
+        }
+        self.skill_icons.get(&digits[..4]).map(String::as_str)
     }
 }
 
@@ -1887,6 +1895,20 @@ mod tests {
         assert_eq!(data.abnormal_icon(112500101), Some("ICON_GL_SKILL_040"));
         assert_eq!(data.abnormal_icon(177600001), Some("ICON_CL_SKILL_Passive_006"));
         assert_eq!(data.abnormal_icon(10012401), Some("ICON_GL_SKILL_040"));
+    }
+
+    /// The same two on the cooldown bar: the skill table swaps them as well.
+    #[test]
+    fn swapped_stance_skills_get_the_games_icon() {
+        let skill_icons: HashMap<String, String> = [("1125", "ICON_GL_SKILL_024"), ("1140", "ICON_GL_SKILL_040"), ("1141", "ICON_GL_SKILL_041")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let data = BarData { skill_icons, ..Default::default() };
+        assert_eq!(data.skill_icon(11400000), Some("ICON_GL_SKILL_024"));
+        assert_eq!(data.skill_icon(11250000), Some("ICON_GL_SKILL_040"));
+        assert_eq!(data.skill_icon(11410000), Some("ICON_GL_SKILL_041"));
+        assert_eq!(data.skill_icon(1140), None);
     }
 
     #[test]
