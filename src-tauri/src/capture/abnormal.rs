@@ -373,6 +373,10 @@ pub struct Instance {
     /// A passive or other abnormal without a timer.
     pub endless: bool,
     pub start_ms: i64,
+    /// When its timer last started: `start_ms`, or the last time the server
+    /// pushed its end later (a buff applied again while still on). A bar's
+    /// full length runs from here to the end; `start_ms` stays for uptime.
+    pub timer_start_ms: i64,
     /// `None` while open.
     pub end_ms: Option<i64>,
     pub end: End,
@@ -391,6 +395,7 @@ impl Instance {
             level: a.level,
             endless: a.length_ms.is_none(),
             start_ms,
+            timer_start_ms: start_ms,
             end_ms: None,
             end: End::Open,
             server_end_ms: a.end_ms,
@@ -443,6 +448,10 @@ pub struct Timeline {
     /// to TAKEN_OFF_KEPT while nobody takes them.
     taken_off: Vec<(u32, i32, i32)>,
 }
+
+/// How much later the server must put an instance's end before its timer
+/// counts as started over.
+const REFRESH_MIN_MS: i64 = 500;
 
 /// Most `Timeline::taken_off` entries held between two reads.
 const TAKEN_OFF_KEPT: usize = 256;
@@ -517,6 +526,7 @@ impl Timeline {
                     self.close(next.clone(), ms, End::Recast);
                     next.caster = a.caster;
                     next.start_ms = ms;
+                    next.timer_start_ms = ms;
                     self.live.insert(key, next);
                 }
                 self.seen(ms, &a);
@@ -597,6 +607,13 @@ impl Timeline {
             self.live.insert(key, Instance::from(a, start));
         }
         if let Some(live) = self.live.get_mut(&key) {
+            // A later end (by more than the jitter of a list's re-read):
+            // the timer started over now.
+            if let (Some(new), Some(old)) = (a.end_ms, live.server_end_ms)
+                && new > old + REFRESH_MIN_MS
+            {
+                live.timer_start_ms = ms.max(live.start_ms);
+            }
             live.level = a.level;
             live.server_end_ms = a.end_ms;
             if a.skill.is_some() {
@@ -894,6 +911,23 @@ mod tests {
     }
 
     #[test]
+    fn a_buff_applied_again_while_on_starts_its_timer_over() {
+        // A 20 s buff at 0, applied again at 9 s (11 s left): the bar's full
+        // length is 20 s again, not 29 s; uptime still counts from 0.
+        let buff = |end| Applied {
+            entity: 1, instance: 5, abnormal: 100_000_001, length_ms: Some(20_000), end_ms: Some(end),
+            caster: 1, level: 1, skill: None, restarted: false,
+        };
+        let mut t = Timeline::default();
+        t.seen(0, &buff(20_000));
+        t.seen(1_000, &buff(20_100));
+        assert_eq!(t.live[&(1, 5)].timer_start_ms, 0);
+        t.seen(9_000, &buff(29_000));
+        let i = &t.live[&(1, 5)];
+        assert_eq!((i.start_ms, i.timer_start_ms, i.server_end_ms), (0, 9_000, Some(29_000)));
+    }
+
+    #[test]
     fn a_skill_takes_off_four_elements_at_once() {
         // 21:58:33.217: Elemental Fusion (16300002) uses up four Elements.
         let Some(Record::Removed { entity, list }) = parse(&hex(
@@ -1154,6 +1188,7 @@ mod tests {
             level: 2,
             endless: false,
             start_ms: start,
+            timer_start_ms: start,
             end_ms: end,
             end: if end.is_some() { End::Expired } else { End::Open },
             server_end_ms: None,

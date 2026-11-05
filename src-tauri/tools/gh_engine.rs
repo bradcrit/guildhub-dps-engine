@@ -560,10 +560,10 @@ impl Engine {
                     row.5 |= mine;
                     row.6 |= hostile;
                     if end > row.2 {
-                        (row.2, row.3) = (end, instance.start_ms);
+                        (row.2, row.3) = (end, instance.timer_start_ms);
                     }
                 }
-                None => rows.push((instance.abnormal, instance.skill, end, instance.start_ms, 1, mine, hostile)),
+                None => rows.push((instance.abnormal, instance.skill, end, instance.timer_start_ms, 1, mine, hostile)),
             }
         }
         rows.sort_by_key(|r| (r.2.is_none(), r.2, r.0));
@@ -656,10 +656,10 @@ impl Engine {
                         Some(row) => {
                             row.4 += 1;
                             if end > row.2 {
-                                (row.2, row.3) = (end, instance.start_ms);
+                                (row.2, row.3) = (end, instance.timer_start_ms);
                             }
                         }
-                        None => debuffs.push((instance.abnormal, instance.skill, end, instance.start_ms, 1)),
+                        None => debuffs.push((instance.abnormal, instance.skill, end, instance.timer_start_ms, 1)),
                     }
                 }
                 debuffs.sort_by_key(|d| (!cleansable.contains(&d.0), d.2.is_none(), d.2, d.0));
