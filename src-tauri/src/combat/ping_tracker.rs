@@ -202,6 +202,14 @@ impl PingTracker {
         self.inner.lock().last_ping
     }
 
+    /// What the last two pings agree the ping is at least: one reading can
+    /// be far out (8687 ms on a steady 10 ms line), two in a row are the line.
+    pub fn held_ping_ms(&self) -> Option<i32> {
+        let inner = self.inner.lock();
+        let [.., (_, before), (_, last)] = inner.history.as_slice() else { return None };
+        Some((*before).min(*last))
+    }
+
     pub fn get_ping_history(&self, start_ms: i64, end_ms: i64) -> Vec<(i64, i32)> {
         self.inner.lock().history.iter()
             .filter(|(ts, _)| *ts >= start_ms && *ts <= end_ms)

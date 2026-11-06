@@ -1,10 +1,11 @@
-//! How the game's connection is doing, from the TCP headers alone.
+//! How the game's connection is doing, from its TCP headers and the server's
+//! heartbeat.
 //!
 //! The game pings once every ten seconds, so a lag of a few seconds can fall
 //! between two pings and a lag in progress shows nothing until it is over.
 //! Its connection is busy, though: about 20 segments a second each way, in
-//! town as in a fight (measured 2026-11-06). Three readings come from that,
-//! and none of them touches a payload or sends anything:
+//! town as in a fight (measured 2026-11-06). The readings below come from
+//! that, and none of them sends anything:
 //!
 //! - **Round trip**: from a segment of ours to the server's acknowledgement of
 //!   it. The server answers with its tick, about every 50 ms, so samples run
@@ -18,9 +19,16 @@
 //!   good: what the player feels as loss is the wait for the second copy. A
 //!   hole in what was captured does not count, as the capture can cause that
 //!   itself; a copy of what was already seen can't be its doing.
-//! - **Stall**: how long our oldest segment has gone unacknowledged. The time
-//!   since the server last spoke would do too, but this one stays silent in
-//!   a quiet moment: nothing sent, nothing owed.
+//! - **Stall**: how long our oldest segment has gone unacknowledged: the line.
+//!   Acknowledgements come from the server machine's TCP stack, not the game
+//!   server, so all of the above stays clean while the game server hangs.
+//! - **Server lag**: for that, the server's heartbeat, the 11-byte frame
+//!   `0E 00 36` + its clock in unix ms (little-endian), every 50 ms (48 to 52,
+//!   100 about once in 2000; five captures of 2026-11-04). A late line moves
+//!   when a stamp arrives, not what it says, so a jump between two stamps is
+//!   the server's own. Live, no heartbeat while acknowledgements still come
+//!   says the same. It is not proof the game logic is well: the heartbeat may
+//!   run apart from it, and a server slow to act on a skill keeps its beat.
 //!
 //! Fed from the capture threads, ahead of the parser, as bare ACKs carry no
 //! payload and never reach it.
@@ -53,6 +61,17 @@ const MAX_UNACKED: usize = 2_048;
 /// reconnect from the same ports), as in `tcp_order`.
 const FAR: i64 = 4 * 1024 * 1024;
 
+/// The heartbeat's frame, ahead of its stamp, and the frame's whole size.
+const HEARTBEAT: [u8; 3] = [0x0E, 0x00, 0x36];
+const HEARTBEAT_BYTES: usize = 11;
+/// A stamp further than this from our clock is not a heartbeat's.
+const STAMP_WITHIN_MS: i64 = 24 * 60 * 60 * 1000;
+/// Server lag counts from here, well over the heartbeat's own hiccups.
+const SERVER_LAG_FROM_MS: i64 = 300;
+/// How long a lag that has ended stays in the reading, to be seen at all.
+const SERVER_LAG_HOLD_MS: i64 = 5_000;
+/// Our oldest segment younger than this: the line is answering.
+const LINE_ANSWERS_MS: i64 = 200;
 /// A round trip this short, beside a game ping this long, is a local tunnel.
 const TUNNEL_RTT_MS: i64 = 3;
 const TUNNEL_PING_MS: i32 = 20;
@@ -78,6 +97,28 @@ pub struct NetReading {
     pub resent_pct: f64,
     /// Whole seconds in ms, 0 under `STALL_FROM_MS`.
     pub stall_ms: i64,
+    /// The server's longest pause of late, to 100 ms, 0 under `SERVER_LAG_FROM_MS`.
+    pub server_lag_ms: i64,
+}
+
+/// The server's heartbeat stamps in `payload`, oldest first: every one, as a
+/// late line hands over several in a segment.
+pub fn heartbeats(payload: &[u8], now_ms: i64) -> Vec<i64> {
+    let mut stamps = Vec::new();
+    let mut at = 0;
+    while at + HEARTBEAT_BYTES <= payload.len() {
+        if payload[at..at + HEARTBEAT.len()] == HEARTBEAT {
+            let stamp = &payload[at + HEARTBEAT.len()..at + HEARTBEAT_BYTES];
+            let stamp = i64::from_le_bytes(stamp.try_into().expect("8 bytes"));
+            if (stamp - now_ms).abs() < STAMP_WITHIN_MS {
+                stamps.push(stamp);
+                at += HEARTBEAT_BYTES;
+                continue;
+            }
+        }
+        at += 1;
+    }
+    stamps
 }
 
 impl NetReading {
@@ -85,10 +126,17 @@ impl NetReading {
     /// server: a local tunnel (a ping reducer) acknowledges for it, in a
     /// millisecond or so. Only that close: the game's ping jumps on a steady
     /// line (37 ms, once 8687 ms, against 10), and the reading must outlast it.
-    pub fn rtt_beside(&self, game_ping_ms: Option<i32>) -> Option<i64> {
+    ///
+    /// `held_ping_ms` (`PingTracker::held_ping_ms`) goes further into the
+    /// server than an acknowledgement does: well above the round trip it is
+    /// the truer ping, the jumps being single readings.
+    pub fn rtt_beside(&self, game_ping_ms: Option<i32>, held_ping_ms: Option<i32>) -> Option<i64> {
         let rtt = self.rtt_ms?;
-        match game_ping_ms {
-            Some(ping) if rtt <= TUNNEL_RTT_MS && ping >= TUNNEL_PING_MS => None,
+        if game_ping_ms.is_some_and(|ping| rtt <= TUNNEL_RTT_MS && ping >= TUNNEL_PING_MS) {
+            return None;
+        }
+        match held_ping_ms.map(i64::from) {
+            Some(held) if held > rtt + SPIKE_ABOVE_MS => Some(held),
             _ => Some(rtt),
         }
     }
@@ -120,6 +168,14 @@ struct Inner {
     client_high: Option<u32>,
     server_high: Option<u32>,
     last_seen_ms: i64,
+    /// The last heartbeat's stamp, and when it came. No stamp after a hole in
+    /// the stream: what is missing could have been the line's doing.
+    last_stamp: Option<i64>,
+    last_beat_ms: i64,
+    /// When a segment of ours was last acknowledged.
+    last_ack_ms: i64,
+    /// Pauses between stamps from `SERVER_LAG_FROM_MS` up: (when seen, ms).
+    server_pauses: VecDeque<(i64, i64)>,
 }
 
 #[derive(Default)]
@@ -163,6 +219,26 @@ impl Inner {
         self.seconds.back_mut().expect("just pushed")
     }
 
+    fn take_heartbeats(&mut self, stamps: &[i64], in_order: bool, now_ms: i64) {
+        if !in_order {
+            self.last_stamp = None;
+        }
+        for &stamp in stamps {
+            if let Some(last) = self.last_stamp {
+                let pause = stamp - last;
+                if pause >= SERVER_LAG_FROM_MS {
+                    tracing::info!("Game server paused: {pause} ms between two heartbeats");
+                    self.server_pauses.push_back((now_ms, pause));
+                }
+            }
+            self.last_stamp = Some(stamp);
+            self.last_beat_ms = now_ms;
+        }
+        while self.server_pauses.front().is_some_and(|(at, _)| now_ms - at >= SERVER_LAG_HOLD_MS) {
+            self.server_pauses.pop_front();
+        }
+    }
+
     fn take_ack(&mut self, ack: u32, s: &Segment) {
         let mut last = None;
         while let Some(front) = self.unacked.front() {
@@ -171,6 +247,7 @@ impl Inner {
                 break;
             }
             last = self.unacked.pop_front();
+            self.last_ack_ms = s.now_ms;
             if let Some(first) = &last {
                 let waited = s.now_ms - first.now_ms;
                 if waited >= STALL_FROM_MS {
@@ -220,8 +297,9 @@ impl NetHealth {
         }
     }
 
-    /// One segment of the locked port, on `device`.
-    pub fn on_segment(&self, client_port: u16, device: &str, s: Segment) {
+    /// One segment of the locked port, on `device`, with the heartbeat stamps
+    /// it carries (`heartbeats`).
+    pub fn on_segment(&self, client_port: u16, device: &str, s: Segment, stamps: &[i64]) {
         let mut inner = self.inner.lock();
         if !inner.connection.as_ref().is_some_and(|(port, name)| *port == client_port && name == device) {
             return;
@@ -236,8 +314,11 @@ impl NetHealth {
         inner.second(s.at_ms).segments += 1;
         if s.from_server {
             let end = s.seq.wrapping_add(s.payload);
+            let in_order = inner.server_high.is_none_or(|high| high == s.seq);
             if advance(&mut inner.server_high, end).is_none() {
                 inner.second(s.at_ms).resent += 1;
+            } else {
+                inner.take_heartbeats(stamps, in_order, s.now_ms);
             }
         } else {
             inner.take_client_data(&s);
@@ -265,7 +346,14 @@ impl NetHealth {
         };
         let waited = inner.unacked.front().map_or(0, |u| now_ms - u.now_ms);
         let stall_ms = if waited >= STALL_FROM_MS { waited / 1000 * 1000 } else { 0 };
-        Some(NetReading { rtt_ms, resent_pct, stall_ms })
+        // Answered since the last heartbeat, and owing nothing old: the line
+        // is up. Nothing sent at all is our end hanging, not the server.
+        let line_up = inner.last_ack_ms > inner.last_beat_ms && waited < LINE_ANSWERS_MS;
+        let silent = if inner.last_beat_ms > 0 && line_up { now_ms - inner.last_beat_ms } else { 0 };
+        let pause = inner.server_pauses.iter().filter(|(at, _)| now_ms - at < SERVER_LAG_HOLD_MS).map(|p| p.1).max();
+        let server = silent.max(pause.unwrap_or(0));
+        let server_lag_ms = if server >= SERVER_LAG_FROM_MS { server / 100 * 100 } else { 0 };
+        Some(NetReading { rtt_ms, resent_pct, stall_ms, server_lag_ms })
     }
 }
 
@@ -288,7 +376,13 @@ mod tests {
     }
 
     fn feed(h: &NetHealth, s: Segment) {
-        h.on_segment(PORT, DEVICE, s);
+        h.on_segment(PORT, DEVICE, s, &[]);
+    }
+
+    /// The server's segment of `stamp`, `at` ms in, next on from `theirs`.
+    fn beat(h: &NetHealth, theirs: &mut u32, stamp: i64, at: i64) {
+        h.on_segment(PORT, DEVICE, seg(true, *theirs, 100, 11, at), &[T0 + stamp]);
+        *theirs += 11;
     }
 
     #[test]
@@ -306,12 +400,99 @@ mod tests {
 
     #[test]
     fn a_round_trip_far_under_the_games_ping_is_a_tunnels() {
-        let reading = NetReading { rtt_ms: Some(1), resent_pct: 0.0, stall_ms: 0 };
-        assert_eq!(reading.rtt_beside(Some(40)), None);
+        let reading = NetReading { rtt_ms: Some(1), resent_pct: 0.0, stall_ms: 0, server_lag_ms: 0 };
+        assert_eq!(reading.rtt_beside(Some(40), None), None);
         let reading = NetReading { rtt_ms: Some(10), ..reading };
-        assert_eq!(reading.rtt_beside(Some(17)), Some(10), "the game's runs a little higher");
-        assert_eq!(reading.rtt_beside(Some(8687)), Some(10), "and jumps now and then");
-        assert_eq!(reading.rtt_beside(None), Some(10));
+        assert_eq!(reading.rtt_beside(Some(17), None), Some(10), "the game's runs a little higher");
+        assert_eq!(reading.rtt_beside(Some(8687), Some(20)), Some(10), "and jumps now and then");
+        assert_eq!(reading.rtt_beside(None, None), Some(10));
+    }
+
+    #[test]
+    fn a_game_ping_held_well_above_the_round_trip_is_the_ping() {
+        let reading = NetReading { rtt_ms: Some(10), resent_pct: 0.0, stall_ms: 0, server_lag_ms: 0 };
+        assert_eq!(reading.rtt_beside(Some(300), Some(280)), Some(280));
+        assert_eq!(reading.rtt_beside(Some(60), Some(55)), Some(10), "within a tick");
+    }
+
+    #[test]
+    fn heartbeats_are_found_wherever_they_lie_in_a_segment() {
+        let frame = |stamp: i64| [&HEARTBEAT[..], &stamp.to_le_bytes()].concat();
+        let data = [&[1, 2][..], &frame(T0), &[3][..], &frame(T0 + 50)].concat();
+        assert_eq!(heartbeats(&data, T0), vec![T0, T0 + 50]);
+        assert_eq!(heartbeats(&frame(5), T0), Vec::<i64>::new(), "no clock of ours");
+        assert_eq!(heartbeats(&frame(T0)[..10], T0), Vec::<i64>::new(), "cut off");
+    }
+
+    #[test]
+    fn a_heartbeat_as_the_server_sent_it() {
+        // 2026-11-04 19:56:22, from a capture.
+        let frame = [0x0E, 0x00, 0x36, 0x63, 0x5E, 0xEB, 0xA7, 0xA1, 0x01, 0x00, 0x00];
+        assert_eq!(heartbeats(&frame, 1_793_818_583_000), vec![1_793_818_582_627]);
+    }
+
+    #[test]
+    fn a_jump_between_stamps_is_the_servers_lag() {
+        let h = health();
+        let mut theirs = 500;
+        beat(&h, &mut theirs, 0, 0);
+        beat(&h, &mut theirs, 50, 50);
+        beat(&h, &mut theirs, 100, 100);
+        assert_eq!(h.snapshot(T0 + 110).unwrap().server_lag_ms, 0);
+        beat(&h, &mut theirs, 480, 480);
+        assert_eq!(h.snapshot(T0 + 490).unwrap().server_lag_ms, 300);
+        assert_eq!(h.snapshot(T0 + 5400).unwrap().server_lag_ms, 300, "still there to be seen");
+    }
+
+    #[test]
+    fn a_late_line_is_not_the_servers_lag() {
+        let h = health();
+        let mut theirs = 500;
+        beat(&h, &mut theirs, 0, 0);
+        // Everything held up for 2 s, the stamps still 50 ms apart.
+        beat(&h, &mut theirs, 50, 2000);
+        beat(&h, &mut theirs, 100, 2001);
+        assert_eq!(h.snapshot(T0 + 2010).unwrap().server_lag_ms, 0);
+    }
+
+    #[test]
+    fn a_hole_in_the_stream_is_not_the_servers_lag() {
+        let h = health();
+        let mut theirs = 500;
+        beat(&h, &mut theirs, 0, 0);
+        theirs += 11 * 40;
+        beat(&h, &mut theirs, 2050, 2050);
+        assert_eq!(h.snapshot(T0 + 2060).unwrap().server_lag_ms, 0);
+    }
+
+    #[test]
+    fn no_heartbeat_while_the_line_answers_is_the_servers_lag() {
+        let h = health();
+        let mut theirs = 500;
+        beat(&h, &mut theirs, 0, 0);
+        // Our segment answered by the server's TCP stack, the game server silent.
+        feed(&h, seg(false, 100, theirs, 10, 1400));
+        feed(&h, seg(true, theirs, 110, 0, 1410));
+        let reading = h.snapshot(T0 + 1500).unwrap();
+        assert_eq!((reading.server_lag_ms, reading.stall_ms), (1500, 0));
+    }
+
+    #[test]
+    fn nothing_sent_is_not_the_servers_lag() {
+        let h = health();
+        let mut theirs = 500;
+        beat(&h, &mut theirs, 0, 0);
+        assert_eq!(h.snapshot(T0 + 3000).unwrap().server_lag_ms, 0);
+    }
+
+    #[test]
+    fn no_heartbeat_with_the_line_gone_is_the_lines() {
+        let h = health();
+        let mut theirs = 500;
+        beat(&h, &mut theirs, 0, 0);
+        feed(&h, seg(false, 100, theirs, 10, 100));
+        let reading = h.snapshot(T0 + 1500).unwrap();
+        assert_eq!((reading.server_lag_ms, reading.stall_ms), (0, 1000));
     }
 
     #[test]
@@ -427,8 +608,8 @@ mod tests {
     #[test]
     fn another_connection_is_not_measured() {
         let h = health();
-        h.on_segment(PORT + 1, DEVICE, seg(false, 100, 500, 10, 0));
-        h.on_segment(PORT, "Other", seg(false, 100, 500, 10, 0));
+        h.on_segment(PORT + 1, DEVICE, seg(false, 100, 500, 10, 0), &[]);
+        h.on_segment(PORT, "Other", seg(false, 100, 500, 10, 0), &[]);
         assert_eq!(h.snapshot(T0 + 10), None);
     }
 

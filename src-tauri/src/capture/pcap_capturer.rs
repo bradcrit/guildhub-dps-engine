@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 
 use super::captured_payload::CapturedPayload;
 use super::combat_port_detector::CombatPortDetector;
-use super::net_health::{NetHealth, Segment};
+use super::net_health::{heartbeats, NetHealth, Segment};
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -699,7 +699,7 @@ fn start_capture_thread(
                     let frame = unsafe { std::slice::from_raw_parts(data, len) };
                     if let Some(head) = parse_tcp_head(frame, link_type) {
                         if let Some(port) = shared.port_detector.locked_port_now() {
-                            note_segment(&shared.net_health, port, &head, &label, ts, now);
+                            note_segment(&shared.net_health, port, &head, frame, &label, ts, now);
                         }
                         if let Some(mut payload) = head.payload_of(frame, &label) {
                             payload.captured_at_ms = ts;
@@ -811,7 +811,7 @@ impl TcpHead {
 }
 
 /// A segment on the game's port, for the connection's readings.
-fn note_segment(health: &NetHealth, port: u16, head: &TcpHead, device_name: &str, at_ms: i64, now_ms: i64) {
+fn note_segment(health: &NetHealth, port: u16, head: &TcpHead, frame: &[u8], device_name: &str, at_ms: i64, now_ms: i64) {
     let (from_server, client_port) = if head.src_port == port {
         (true, head.dst_port)
     } else if head.dst_port == port {
@@ -827,7 +827,11 @@ fn note_segment(health: &NetHealth, port: u16, head: &TcpHead, device_name: &str
         at_ms,
         now_ms,
     };
-    health.on_segment(client_port, device_name, segment);
+    let stamps = match frame.get(head.payload.clone()) {
+        Some(payload) if from_server => heartbeats(payload, now_ms),
+        _ => Vec::new(),
+    };
+    health.on_segment(client_port, device_name, segment, &stamps);
 }
 
 /// Parse raw captured frame to extract TCP payload.

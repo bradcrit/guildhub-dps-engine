@@ -44,7 +44,7 @@
 //! Events: `dps` (the view, each `map` entry with its player's home `server`,
 //! null while not known) and `self` (as `/v1/self`) on every change, each
 //! sent once on connecting (`self` also carries the game's `ping` in ms);
-//! `net` (`{"rtt","resentPct","stallMs"}`, null without a game connection) on
+//! `net` (`{"rtt","resentPct","stallMs","serverLagMs"}`, null without a game connection) on
 //! every change, at most each second, and once on connecting: the connection
 //! read from the TCP headers (`capture::net_health`);
 //! `fight` (`{"id","killed"}`) when a fight is written to
@@ -948,8 +948,8 @@ impl Engine {
             .net_health()
             .snapshot(chrono::Utc::now().timestamp_millis())
             .map(|r| {
-                let rtt = r.rtt_beside(self.ping.current_ping_ms());
-                serde_json::json!({ "rtt": rtt, "resentPct": r.resent_pct, "stallMs": r.stall_ms })
+                let rtt = r.rtt_beside(self.ping.current_ping_ms(), self.ping.held_ping_ms());
+                serde_json::json!({ "rtt": rtt, "resentPct": r.resent_pct, "stallMs": r.stall_ms, "serverLagMs": r.server_lag_ms })
             })
             .unwrap_or(serde_json::Value::Null)
             .to_string()
