@@ -14,7 +14,9 @@
 //!   a second or two swings (10 to 43 ms on a steady line): the lowest of
 //!   five seconds is the reading, unless the last two sat more than a tick
 //!   above it, which the drift can't do. The game's own ping runs a few ms
-//!   above the reading (17 ms against 10), its processing counted in.
+//!   above that (17 ms against 10), its processing counted in. Two pings side
+//!   by side only confuse, so what it runs above by (`overhead_ms`, learnt
+//!   from its last few pings) goes on top: the game's scale, each second.
 //! - **Resent share**: segments sent again, either way. TCP loses nothing for
 //!   good: what the player feels as loss is the wait for the second copy. A
 //!   hole in what was captured does not count, as the capture can cause that
@@ -72,6 +74,8 @@ const SERVER_LAG_FROM_MS: i64 = 300;
 const SERVER_LAG_HOLD_MS: i64 = 5_000;
 /// Our oldest segment younger than this: the line is answering.
 const LINE_ANSWERS_MS: i64 = 200;
+/// The game's last pings the overhead is taken from.
+const OVERHEADS: usize = 5;
 /// A round trip this short, beside a game ping this long, is a local tunnel.
 const TUNNEL_RTT_MS: i64 = 3;
 const TUNNEL_PING_MS: i32 = 20;
@@ -93,6 +97,8 @@ pub struct Segment {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NetReading {
     pub rtt_ms: Option<i64>,
+    /// What the game's ping runs above `rtt_ms`, usually.
+    pub overhead_ms: i64,
     /// Share of segments sent again, in percent, to one decimal.
     pub resent_pct: f64,
     /// Whole seconds in ms, 0 under `STALL_FROM_MS`.
@@ -122,8 +128,8 @@ pub fn heartbeats(payload: &[u8], now_ms: i64) -> Vec<i64> {
 }
 
 impl NetReading {
-    /// The round trip, unless the game's ping says it can't be the way to the
-    /// server: a local tunnel (a ping reducer) acknowledges for it, in a
+    /// The ping, on the game's scale: the round trip and the overhead, unless
+    /// the game's ping says the round trip can't be the way to the server: a local tunnel (a ping reducer) acknowledges for it, in a
     /// millisecond or so. Only that close: the game's ping jumps on a steady
     /// line (37 ms, once 8687 ms, against 10), and the reading must outlast it.
     ///
@@ -135,9 +141,10 @@ impl NetReading {
         if game_ping_ms.is_some_and(|ping| rtt <= TUNNEL_RTT_MS && ping >= TUNNEL_PING_MS) {
             return None;
         }
+        let ping = rtt + self.overhead_ms;
         match held_ping_ms.map(i64::from) {
-            Some(held) if held > rtt + SPIKE_ABOVE_MS => Some(held),
-            _ => Some(rtt),
+            Some(held) if held > ping + SPIKE_ABOVE_MS => Some(held),
+            _ => Some(ping),
         }
     }
 }
@@ -174,6 +181,10 @@ struct Inner {
     last_beat_ms: i64,
     /// When a segment of ours was last acknowledged.
     last_ack_ms: i64,
+    /// The game's ping last taken, by when it came, and what the last few ran
+    /// above the round trip.
+    last_game_ping_at: i64,
+    overheads: VecDeque<i64>,
     /// Pauses between stamps from `SERVER_LAG_FROM_MS` up: (when seen, ms).
     server_pauses: VecDeque<(i64, i64)>,
 }
@@ -208,6 +219,20 @@ fn advance(high: &mut Option<u32>, end: u32) -> Option<bool> {
 }
 
 impl Inner {
+    fn rtt_reading(&self) -> Option<i64> {
+        let lowest = |seconds: usize| self.seconds.iter().rev().take(seconds).filter_map(|s| s.rtt_ms).min();
+        match (lowest(RTT_SECONDS), lowest(SPIKE_SECONDS)) {
+            (Some(base), Some(latest)) if latest > base + SPIKE_ABOVE_MS => Some(latest),
+            (base, _) => base,
+        }
+    }
+
+    fn overhead_ms(&self) -> i64 {
+        let mut overheads: Vec<i64> = self.overheads.iter().copied().collect();
+        overheads.sort_unstable();
+        overheads.get(overheads.len() / 2).copied().unwrap_or(0)
+    }
+
     fn second(&mut self, at_ms: i64) -> &mut Second {
         let at = at_ms.div_euclid(1000);
         if self.seconds.back().is_none_or(|s| s.at < at) {
@@ -325,6 +350,24 @@ impl NetHealth {
         }
     }
 
+    /// The game's latest ping (`at_ms`: when it came, which tells a new one),
+    /// beside the round trip now. One far above isn't overhead but a jump.
+    pub fn note_game_ping(&self, at_ms: i64, ping_ms: i32) {
+        let mut inner = self.inner.lock();
+        if inner.last_game_ping_at == at_ms {
+            return;
+        }
+        inner.last_game_ping_at = at_ms;
+        let Some(rtt) = inner.rtt_reading() else { return };
+        let overhead = i64::from(ping_ms) - rtt;
+        if overhead <= SPIKE_ABOVE_MS {
+            inner.overheads.push_back(overhead.max(0));
+            while inner.overheads.len() > OVERHEADS {
+                inner.overheads.pop_front();
+            }
+        }
+    }
+
     /// The readings now, or `None` while no game connection is being seen.
     pub fn snapshot(&self, now_ms: i64) -> Option<NetReading> {
         let inner = self.inner.lock();
@@ -332,11 +375,7 @@ impl NetHealth {
         if inner.last_seen_ms == 0 || now_ms - inner.last_seen_ms >= GONE_AFTER_MS {
             return None;
         }
-        let lowest = |seconds: usize| inner.seconds.iter().rev().take(seconds).filter_map(|s| s.rtt_ms).min();
-        let rtt_ms = match (lowest(RTT_SECONDS), lowest(SPIKE_SECONDS)) {
-            (Some(base), Some(latest)) if latest > base + SPIKE_ABOVE_MS => Some(latest),
-            (base, _) => base,
-        };
+        let rtt_ms = inner.rtt_reading();
         let segments: u32 = inner.seconds.iter().map(|s| s.segments).sum();
         let resent: u32 = inner.seconds.iter().map(|s| s.resent).sum();
         let resent_pct = if segments < MIN_SEGMENTS {
@@ -353,7 +392,7 @@ impl NetHealth {
         let pause = inner.server_pauses.iter().filter(|(at, _)| now_ms - at < SERVER_LAG_HOLD_MS).map(|p| p.1).max();
         let server = silent.max(pause.unwrap_or(0));
         let server_lag_ms = if server >= SERVER_LAG_FROM_MS { server / 100 * 100 } else { 0 };
-        Some(NetReading { rtt_ms, resent_pct, stall_ms, server_lag_ms })
+        Some(NetReading { rtt_ms, overhead_ms: inner.overhead_ms(), resent_pct, stall_ms, server_lag_ms })
     }
 }
 
@@ -400,7 +439,7 @@ mod tests {
 
     #[test]
     fn a_round_trip_far_under_the_games_ping_is_a_tunnels() {
-        let reading = NetReading { rtt_ms: Some(1), resent_pct: 0.0, stall_ms: 0, server_lag_ms: 0 };
+        let reading = NetReading { rtt_ms: Some(1), overhead_ms: 0, resent_pct: 0.0, stall_ms: 0, server_lag_ms: 0 };
         assert_eq!(reading.rtt_beside(Some(40), None), None);
         let reading = NetReading { rtt_ms: Some(10), ..reading };
         assert_eq!(reading.rtt_beside(Some(17), None), Some(10), "the game's runs a little higher");
@@ -410,9 +449,35 @@ mod tests {
 
     #[test]
     fn a_game_ping_held_well_above_the_round_trip_is_the_ping() {
-        let reading = NetReading { rtt_ms: Some(10), resent_pct: 0.0, stall_ms: 0, server_lag_ms: 0 };
+        let reading = NetReading { rtt_ms: Some(10), overhead_ms: 0, resent_pct: 0.0, stall_ms: 0, server_lag_ms: 0 };
         assert_eq!(reading.rtt_beside(Some(300), Some(280)), Some(280));
         assert_eq!(reading.rtt_beside(Some(60), Some(55)), Some(10), "within a tick");
+    }
+
+    #[test]
+    fn the_ping_is_on_the_games_scale() {
+        let h = health();
+        feed(&h, seg(false, 100, 500, 10, 0));
+        feed(&h, seg(true, 500, 110, 0, 10));
+        // Its usual 7 or so above the round trip, then a jump that's no overhead.
+        for (at, ping) in [(1, 17), (2, 18), (3, 16), (4, 8687), (5, 37)] {
+            h.note_game_ping(at, ping);
+        }
+        h.note_game_ping(5, 37);
+        let reading = h.snapshot(T0 + 100).unwrap();
+        assert_eq!(reading.overhead_ms, 8);
+        assert_eq!(reading.rtt_beside(Some(37), Some(37)), Some(18));
+    }
+
+    #[test]
+    fn the_overhead_follows_the_connection() {
+        let h = health();
+        feed(&h, seg(false, 100, 500, 10, 0));
+        feed(&h, seg(true, 500, 110, 0, 10));
+        h.note_game_ping(1, 17);
+        h.follow(PORT + 1, DEVICE);
+        h.on_segment(PORT + 1, DEVICE, seg(false, 100, 500, 10, 200), &[]);
+        assert_eq!(h.snapshot(T0 + 210).unwrap().overhead_ms, 0);
     }
 
     #[test]

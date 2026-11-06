@@ -202,6 +202,11 @@ impl PingTracker {
         self.inner.lock().last_ping
     }
 
+    /// The last ping: when it came, and the ms.
+    pub fn latest_ping(&self) -> Option<(i64, i32)> {
+        self.inner.lock().history.last().copied()
+    }
+
     /// What the last two pings agree the ping is at least: one reading can
     /// be far out (8687 ms on a steady 10 ms line), two in a row are the line.
     pub fn held_ping_ms(&self) -> Option<i32> {
