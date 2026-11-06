@@ -84,7 +84,7 @@ impl NetReading {
     pub fn rtt_beside(&self, game_ping_ms: Option<i32>) -> Option<i64> {
         let rtt = self.rtt_ms?;
         match game_ping_ms.map(i64::from) {
-            Some(ping) if rtt * 3 < ping && ping - rtt >= 20 => None,
+            Some(ping) if rtt * 5 < ping && ping - rtt >= 30 => None,
             _ => Some(rtt),
         }
     }
@@ -306,6 +306,7 @@ mod tests {
         assert_eq!(reading.rtt_beside(Some(40)), None);
         let reading = NetReading { rtt_ms: Some(10), ..reading };
         assert_eq!(reading.rtt_beside(Some(17)), Some(10), "the game's runs a little higher");
+        assert_eq!(reading.rtt_beside(Some(40)), Some(10), "and jumps now and then");
         assert_eq!(reading.rtt_beside(None), Some(10));
     }
 
