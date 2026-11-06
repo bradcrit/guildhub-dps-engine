@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 
 use super::captured_payload::CapturedPayload;
 use super::combat_port_detector::CombatPortDetector;
+use super::net_health::{NetHealth, Segment};
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -387,6 +388,8 @@ struct Shared {
     /// Which port the game is on, once found: each capture thread filters
     /// for it.
     port_detector: Arc<CombatPortDetector>,
+    /// Told of every segment on that port, bare ACKs included.
+    net_health: Arc<NetHealth>,
     /// Set by the safety net (`SafetyNet`): every device captures without a
     /// filter for the rest of the session.
     unfiltered: AtomicBool,
@@ -413,9 +416,15 @@ impl PcapCapturer {
                 failed: Mutex::default(),
                 dropped: AtomicU64::new(0),
                 port_detector,
+                net_health: Arc::new(NetHealth::default()),
                 unfiltered: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// What the capture threads read of the game's connection.
+    pub fn net_health(&self) -> Arc<NetHealth> {
+        self.shared.net_health.clone()
     }
 
     pub fn start(&self) {
@@ -688,10 +697,15 @@ fn start_capture_thread(
                         now_ms()
                     };
                     let frame = unsafe { std::slice::from_raw_parts(data, len) };
-                    if let Some(mut payload) = parse_tcp_payload(frame, link_type, &label) {
-                        payload.captured_at_ms = ts;
-                        if sender.try_send(payload).is_err() {
-                            shared.dropped.fetch_add(1, Ordering::Relaxed);
+                    if let Some(head) = parse_tcp_head(frame, link_type) {
+                        if let Some(port) = shared.port_detector.locked_port_now() {
+                            note_segment(&shared.net_health, port, &head, &label, ts, now);
+                        }
+                        if let Some(mut payload) = head.payload_of(frame, &label) {
+                            payload.captured_at_ms = ts;
+                            if sender.try_send(payload).is_err() {
+                                shared.dropped.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -768,9 +782,63 @@ fn guess_link_header_len(frame: &[u8]) -> Option<usize> {
     }
 }
 
-/// Parse raw captured frame to extract TCP payload. The link type says where
-/// IPv4 starts; when it does not fit, the frame-only guess gets a chance.
+/// One IPv4 TCP segment's headers, and where its payload lies in the frame.
+struct TcpHead {
+    src_ip: std::net::Ipv4Addr,
+    dst_ip: std::net::Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    payload: std::ops::Range<usize>,
+}
+
+impl TcpHead {
+    fn payload_of(&self, frame: &[u8], device_name: &str) -> Option<CapturedPayload> {
+        let payload = frame.get(self.payload.clone()).filter(|p| !p.is_empty())?;
+        Some(CapturedPayload {
+            src_port: self.src_port,
+            dst_port: self.dst_port,
+            data: payload.to_vec(),
+            device_name: Some(device_name.to_string()),
+            captured_at_ms: now_ms(),
+            src_ip: Some(self.src_ip),
+            dst_ip: Some(self.dst_ip),
+            tcp_seq: self.seq,
+            tcp_ack: self.ack,
+        })
+    }
+}
+
+/// A segment on the game's port, for the connection's readings.
+fn note_segment(health: &NetHealth, port: u16, head: &TcpHead, device_name: &str, at_ms: i64, now_ms: i64) {
+    let (from_server, client_port) = if head.src_port == port {
+        (true, head.dst_port)
+    } else if head.dst_port == port {
+        (false, head.src_port)
+    } else {
+        return;
+    };
+    let segment = Segment {
+        from_server,
+        seq: head.seq,
+        ack: head.ack,
+        payload: head.payload.len() as u32,
+        at_ms,
+        now_ms,
+    };
+    health.on_segment(client_port, device_name, segment);
+}
+
+/// Parse raw captured frame to extract TCP payload.
+#[cfg(test)]
 fn parse_tcp_payload(frame: &[u8], link_type: c_int, device_name: &str) -> Option<CapturedPayload> {
+    parse_tcp_head(frame, link_type)?.payload_of(frame, device_name)
+}
+
+/// Parse a raw captured frame's headers. The link type says where IPv4 starts;
+/// when it does not fit, the frame-only guess gets a chance.
+fn parse_tcp_head(frame: &[u8], link_type: c_int) -> Option<TcpHead> {
     if frame.len() < 4 {
         return None;
     }
@@ -818,26 +886,9 @@ fn parse_tcp_payload(frame: &[u8], link_type: c_int, device_name: &str) -> Optio
     let ip_total_len = u16::from_be_bytes([ip_header[2], ip_header[3]]) as usize;
     let ip_end = ip_offset + ip_total_len;
     let end = if ip_total_len >= ip_header_len + 20 && ip_end <= frame.len() { ip_end } else { frame.len() };
-    let payload_offset = tcp_offset + tcp_header_len;
-    if payload_offset >= end {
-        return None;
-    }
-    let payload = &frame[payload_offset..end];
-    if payload.is_empty() {
-        return None;
-    }
+    let payload_offset = (tcp_offset + tcp_header_len).min(end);
 
-    Some(CapturedPayload {
-        src_port,
-        dst_port,
-        data: payload.to_vec(),
-        device_name: Some(device_name.to_string()),
-        captured_at_ms: now_ms(),
-        src_ip: Some(src_ip),
-        dst_ip: Some(dst_ip),
-        tcp_seq,
-        tcp_ack,
-    })
+    Some(TcpHead { src_ip, dst_ip, src_port, dst_port, seq: tcp_seq, ack: tcp_ack, payload: payload_offset..end })
 }
 
 #[cfg(test)]

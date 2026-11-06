@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use crate::capture::captured_payload::CapturedPayload;
 use crate::capture::combat_port_detector::CombatPortDetector;
+use crate::capture::net_health::NetHealth;
 use crate::capture::stream_assembler::StreamAssembler;
 use crate::capture::tcp_order::{Piece, TcpOrder};
 use crate::capture::stream_processor::StreamProcessor;
@@ -198,6 +199,7 @@ pub struct CaptureDispatcher {
     ping_tracker: Arc<PingTracker>,
     dot_skill_ids: std::collections::HashSet<i32>,
     suspended: Arc<AtomicBool>,
+    net_health: Option<Arc<NetHealth>>,
 }
 
 impl CaptureDispatcher {
@@ -216,6 +218,7 @@ impl CaptureDispatcher {
             ping_tracker,
             dot_skill_ids: std::collections::HashSet::new(),
             suspended: Arc::new(AtomicBool::new(false)),
+            net_health: None,
         }
     }
 
@@ -228,6 +231,11 @@ impl CaptureDispatcher {
     /// packets are dropped, so nothing is counted and the fight timer stops.
     pub fn use_suspend_flag(&mut self, flag: Arc<AtomicBool>) {
         self.suspended = flag;
+    }
+
+    /// Told which connection is the game's, once this knows.
+    pub fn use_net_health(&mut self, health: Arc<NetHealth>) {
+        self.net_health = Some(health);
     }
 
     /// Run the dispatch loop, consuming packets from the channel.
@@ -447,6 +455,11 @@ impl CaptureDispatcher {
 
             if !connections.admit(&cap) {
                 continue;
+            }
+
+            // The game's own connection, on the locked port: the one to measure.
+            if let (Some(health), false, Some(device)) = (&self.net_health, unlocked, cap.device_name.as_deref()) {
+                health.follow(cap.dst_port, device);
             }
 
             // Get or create assembler

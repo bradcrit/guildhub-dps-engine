@@ -11,6 +11,7 @@ pub mod frame_tap;
 pub mod framing;
 pub mod game_lists;
 pub mod loot;
+pub mod net_health;
 pub mod objects;
 pub mod packet_accumulator;
 pub mod positions;

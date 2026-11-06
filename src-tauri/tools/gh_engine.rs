@@ -44,6 +44,9 @@
 //! Events: `dps` (the view, each `map` entry with its player's home `server`,
 //! null while not known) and `self` (as `/v1/self`) on every change, each
 //! sent once on connecting (`self` also carries the game's `ping` in ms);
+//! `net` (`{"rtt","resentPct","stallMs"}`, null without a game connection) on
+//! every change, at most each second, and once on connecting: the connection
+//! read from the TCP headers (`capture::net_health`);
 //! `fight` (`{"id","killed"}`) when a fight is written to
 //! history; `bossKill` (`{"npc","at","server"}`) when a field boss dies in the
 //! open world; `bossMap` (`{"server","map","seenAt","bosses":[{"npc","up","at"}]}`)
@@ -399,6 +402,8 @@ struct Engine {
     me: watch::Sender<Arc<str>>,
     /// The players of the other faction in sight as JSON (`pvp_json`).
     pvp: watch::Sender<Arc<str>>,
+    /// The game connection's readings as JSON (`net_json`).
+    net: watch::Sender<Arc<str>>,
     /// The mobs in sight as JSON (`npcs_json`).
     npcs: watch::Sender<Arc<str>>,
     /// The Hidden Cubes in range as JSON (`cubes_json`).
@@ -938,6 +943,18 @@ impl Engine {
     }
 
     /// The PvP view's players (see the top of this file).
+    fn net_json(&self) -> String {
+        self.capturer
+            .net_health()
+            .snapshot(chrono::Utc::now().timestamp_millis())
+            .map(|r| {
+                let rtt = r.rtt_beside(self.ping.current_ping_ms());
+                serde_json::json!({ "rtt": rtt, "resentPct": r.resent_pct, "stallMs": r.stall_ms })
+            })
+            .unwrap_or(serde_json::Value::Null)
+            .to_string()
+    }
+
     fn pvp_json(&self) -> String {
         let players: Vec<_> = self
             .storage
@@ -1141,6 +1158,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (dps, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (me, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (pvp, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let (net, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (npcs_in_sight, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (cubes, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (skill_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
@@ -1173,6 +1191,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         dps,
         me,
         pvp,
+        net,
         npcs: npcs_in_sight,
         cubes,
         skill_bars,
@@ -1266,6 +1285,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
 
     let mut dispatcher = CaptureDispatcher::new(storage, skills, npcs, port_detector, ping);
     dispatcher.set_dot_skill_ids(dot_ids);
+    dispatcher.use_net_health(engine.capturer.net_health());
     tokio::spawn(async move { dispatcher.run(rx).await });
 
     // The meter's view, published when it changes.
@@ -1400,6 +1420,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let me = engine.self_json();
                 if **engine.me.borrow() != *me {
                     engine.me.send_replace(Arc::from(me));
+                }
+                let net = engine.net_json();
+                if **engine.net.borrow() != *net {
+                    engine.net.send_replace(Arc::from(net));
                 }
                 let pvp = engine.pvp_json();
                 if **engine.pvp.borrow() != *pvp {
@@ -1729,6 +1753,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     let mut dps = engine.dps.subscribe();
     let mut me = engine.me.subscribe();
     let mut pvp = engine.pvp.subscribe();
+    let mut net = engine.net.subscribe();
     let mut npcs = engine.npcs.subscribe();
     let mut cubes = engine.cubes.subscribe();
     let mut skill_bars = engine.skill_bars.subscribe();
@@ -1740,6 +1765,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     dps.mark_changed();
     me.mark_changed();
     pvp.mark_changed();
+    net.mark_changed();
     npcs.mark_changed();
     cubes.mark_changed();
     skill_bars.mark_changed();
@@ -1766,6 +1792,16 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
                     continue;
                 }
                 format!("event: self\ndata: {current}\n\n")
+            }
+            changed = net.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let current = net.borrow_and_update().clone();
+                if current.is_empty() {
+                    continue;
+                }
+                format!("event: net\ndata: {current}\n\n")
             }
             changed = pvp.changed() => {
                 if changed.is_err() {
