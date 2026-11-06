@@ -53,6 +53,10 @@ const MAX_UNACKED: usize = 2_048;
 /// reconnect from the same ports), as in `tcp_order`.
 const FAR: i64 = 4 * 1024 * 1024;
 
+/// A round trip this short, beside a game ping this long, is a local tunnel.
+const TUNNEL_RTT_MS: i64 = 3;
+const TUNNEL_PING_MS: i32 = 20;
+
 /// One TCP segment of a connection, as the capture saw it.
 #[derive(Debug, Clone, Copy)]
 pub struct Segment {
@@ -79,12 +83,12 @@ pub struct NetReading {
 impl NetReading {
     /// The round trip, unless the game's ping says it can't be the way to the
     /// server: a local tunnel (a ping reducer) acknowledges for it, in a
-    /// millisecond or so. The game's ping is the older reading, so after a
-    /// spike this may pass on nothing for a moment; it is then shown instead.
+    /// millisecond or so. Only that close: the game's ping jumps on a steady
+    /// line (37 ms, once 8687 ms, against 10), and the reading must outlast it.
     pub fn rtt_beside(&self, game_ping_ms: Option<i32>) -> Option<i64> {
         let rtt = self.rtt_ms?;
-        match game_ping_ms.map(i64::from) {
-            Some(ping) if rtt * 5 < ping && ping - rtt >= 30 => None,
+        match game_ping_ms {
+            Some(ping) if rtt <= TUNNEL_RTT_MS && ping >= TUNNEL_PING_MS => None,
             _ => Some(rtt),
         }
     }
@@ -306,7 +310,7 @@ mod tests {
         assert_eq!(reading.rtt_beside(Some(40)), None);
         let reading = NetReading { rtt_ms: Some(10), ..reading };
         assert_eq!(reading.rtt_beside(Some(17)), Some(10), "the game's runs a little higher");
-        assert_eq!(reading.rtt_beside(Some(40)), Some(10), "and jumps now and then");
+        assert_eq!(reading.rtt_beside(Some(8687)), Some(10), "and jumps now and then");
         assert_eq!(reading.rtt_beside(None), Some(10));
     }
 
