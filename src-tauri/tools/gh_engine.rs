@@ -69,8 +69,9 @@
 //! (`{"at","name","class","itemLevel","rank","killingBlow","damage","hits","skill",
 //! "total","helpers","abyss"}`: the last hit yours, your damage, hits and top
 //! skill, everyone's damage and how many others hit them, in the 15 s before).
-//! `self` also has your `itemLevel` while a party roster states it, and `map`:
-//! the map id of the last zone load (null before one).
+//! `self` also has your `itemLevel` and `combatPower` (a party roster's, else
+//! your last self record's; null before either), and `map`: the map id of the
+//! last zone load (null before one).
 //!
 //! Pets (the game's own records, read as A2Tools' Pet Soul Tracker reads
 //! them; a pet collection is shared by a server's characters): `petList`
@@ -881,7 +882,8 @@ impl Engine {
             "serverId": profile.server_id,
             "class": profile.class.map(class_key),
             "level": profile.level,
-            "itemLevel": self.storage.self_item_level(),
+            "itemLevel": profile.gear_score,
+            "combatPower": profile.combat_power,
             "odyle": odyle,
             "lists": lists,
             "ping": self.ping.current_ping_ms(),
