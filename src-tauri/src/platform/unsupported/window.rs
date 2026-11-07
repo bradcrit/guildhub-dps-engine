@@ -6,6 +6,17 @@ pub fn cursor_position() -> Option<(i32, i32)> {
     None
 }
 
+/// No foreground tracking here; focus requests remain the OS's decision.
+pub fn user_focus_unchanged(_before: Option<isize>) -> bool {
+    true
+}
+
+/// A recent explicit configuration Open asks the compositor for focus.
+/// There is no portable foreground handle here; its focus policy decides.
+pub fn activate_from_user(window: &tauri::WebviewWindow, _before: Option<isize>) {
+    let _ = window.set_focus();
+}
+
 pub fn start_drag(window: &tauri::WebviewWindow) {
     let _ = window.start_dragging();
 }
@@ -13,6 +24,12 @@ pub fn start_drag(window: &tauri::WebviewWindow) {
 pub fn show_on_top_without_focus(window: &tauri::WebviewWindow) {
     let _ = window.show();
     let _ = window.set_always_on_top(true);
+}
+
+/// Turn a window's always-on-top on or off (the Windows one keeps a hidden
+/// window hidden; here the plain call does).
+pub fn set_on_top_without_showing(window: &tauri::WebviewWindow, on_top: bool) {
+    let _ = window.set_always_on_top(on_top);
 }
 
 /// A tool window behind others, brought in front (see the Windows one).

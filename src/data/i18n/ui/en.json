@@ -306,7 +306,7 @@
     "sort": "Sort",
     "sortNewest": "Newest",
     "sortFastest": "Fastest kill",
-    "sortPartyDps": "Party DPS",
+    "sortTotalDps": "Total DPS",
     "sortMyDps": "Your DPS",
     "sortRecent": "Most recent",
     "sortTier": "Dungeon tier",
@@ -315,6 +315,7 @@
     "pb": "PB",
     "pbTip": "One of your personal bests",
     "party": "Party",
+    "allPlayers": "All players",
     "you": "You",
     "totalDamage": "Total damage",
     "finalBoss": "Final boss",
@@ -385,6 +386,7 @@
     "showDpsSuffix": "Add /s to DPS",
     "autoHideMeter": "Hide when AION2 isn't focused",
     "hideWhenGameClosed": "Hide while AION2 is closed",
+    "closeWithGame": "Close the meter when AION2 closes",
     "hideWhenSolo": "Show only in a party",
     "hideOutOfCombat": {
       "label": "Hide out of combat",
@@ -603,6 +605,12 @@
         "highestDamage": "Highest Damage"
       }
     },
+    "trainTimeLimit": {
+      "label": "Train time limit",
+      "options": {
+        "off": "No limit"
+      }
+    },
     "showSupporterColors": "Show supporter colours",
     "showSupporterColorsHint": "Supporters' names render gold. Cosmetic only — it never changes any number.",
     "account": {
@@ -665,6 +673,7 @@
       "barTexture": "A pattern over the meter's bars. A thank-you for supporting A2 Tools.",
       "textureOffset": "Each bar starts its texture at a different place, so the bars don't all look alike.",
       "trainingMode": "In Train mode, which dummies the Details window shows: all of them together, or only the one you hit hardest.",
+      "trainTimeLimit": "In Train mode, hits on training dummies count for this long after your first one. The meter then stops until you press refresh, which starts the time again.",
       "allTargetsWindow": "In All Targets mode, the meter adds up every target hit within this time of the latest hit.",
       "updateRate": "How often the meter's numbers refresh. Faster shows hits sooner but uses more CPU.",
       "partyPresence": "Party members who also use A2Tools see a small A2 tag beside your name, and you see theirs. Anyone in your party using A2Tools can see it, so they'll know you use a third-party meter. Only hashes of character names and servers are sent.",
@@ -675,6 +684,7 @@
       "showMeter": "Off: only your plugins show. The meter keeps reading combat and uploading in the background. Bring it back here, with the show/hide hotkey, or with the meter button on a plugin window.",
       "clearOnZone": "When the last fight leaves the meter after the zone changes. Every fight stays in History either way.",
       "hideWhenGameClosed": "The meter hides while the game isn't running, and comes back when it starts.",
+      "closeWithGame": "The meter closes itself about 10 seconds after AION2 closes. Started before the game, it waits for it.",
       "hideWhenSolo": "The meter hides while you're not in a party, and comes back when you join one. The Show/Hide keybind still brings it up.",
       "hideOutOfCombat": "The meter hides once you've been out of combat this long, and comes back with the next hit. It stays up while Settings, History or Details is open, or the mouse is over it.",
       "runAsAdmin": "Needed to show the game's frame rate. Windows asks each time the meter starts.",
@@ -748,6 +758,7 @@
       "permsTitle": "It can:",
       "permFps": "Show the game's frame rate (on Windows, the meter asks to run as administrator for it)",
       "permDeathRecap": "After a player kills you: who they were and the damage they did to you",
+      "permLootRolls": "See Dice Roll loot: the item, who rolled what, and who won it",
       "permScreenshot": "Take screenshots of its own window, to the clipboard and your screenshot folder",
       "testHint": "Early versions for anyone to try, signed like the others. They may change or have rough edges: tell us what you find.",
       "testTitle": "Test plugins",
@@ -836,6 +847,10 @@
     "all": "All Targets",
     "identifying": "Identifying you...",
     "train": "Training Scarecrow",
+    "trainLimitReached": "Time limit reached",
+    "timed": "Timed: {time}",
+    "timedSeconds": "{n}sec",
+    "timedMinutes": "{n}min",
     "boss": "Boss Targets"
   },
   "classes": {
@@ -971,6 +986,7 @@
     "ttk": "Time to kill estimate",
     "partyTotal": "Party total",
     "odyle": "Odyle energy",
-    "ping": "Ping"
+    "ping": "Ping",
+    "jitter": "Jitter: {ms} ms"
   }
 }

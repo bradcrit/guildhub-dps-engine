@@ -155,6 +155,14 @@ pub fn is_plugin_window(label: &str) -> bool {
     label.starts_with("plugin-") || label == dock::LABEL
 }
 
+/// Using a configuration panel counts as using the game for focus hiding.
+/// Combat widgets are deliberately excluded: showing an alert is not focus.
+pub fn configuration_focused(app: &tauri::AppHandle) -> bool {
+    app.webview_windows().into_iter().any(|(label, window)| {
+        is_plugin_window(&label) && window.is_focused().unwrap_or(false)
+    })
+}
+
 /// Whether window `label` is to stay hidden now: AION2 closed, and its
 /// plugins (all the dock's shown ones) set to hide then.
 fn window_game_hides(app: &tauri::AppHandle, label: &str) -> bool {
@@ -328,6 +336,7 @@ pub async fn plugin_set_enabled(app: tauri::AppHandle, id: String, enabled: bool
     if !valid_id(&id) {
         return Err("not a plugin id".into());
     }
+    if !enabled { dock::cancel_manual_open(); }
     set_disabled(&app, &id, !enabled);
     reopened(&app, &id);
     if enabled {
@@ -669,6 +678,7 @@ impl PluginHost {
                 let mut map_seq = 0u64;
                 let mut abyss_seq = 0u64;
                 let mut recap_seq = 0u64;
+                let mut roll_seq = 0u64;
                 loop {
                     // Woken by each queued event; the timeout lets settling
                     // events go once their wait is over.
@@ -728,6 +738,15 @@ impl PluginHost {
                             for recap in recaps {
                                 let data = serde_json::to_value(&recap).unwrap_or_default();
                                 host.queue_permitted("events:death-recap", "deathRecap", recap.at, data);
+                            }
+                        }
+                        // Dice Roll loot, each roll as it comes: numbered and
+                        // kept, so a window opened later has the history.
+                        if let Some((next, rolls)) = state.data_storage.loot_rolls_since(roll_seq) {
+                            roll_seq = next;
+                            for roll in rolls {
+                                let data = serde_json::to_value(&roll).unwrap_or_default();
+                                host.queue_permitted("events:loot-rolls", "lootRoll", roll.at, data);
                             }
                         }
                     }
@@ -1261,6 +1280,7 @@ struct PromptTexts {
     perm_decoder: String,
     perm_fps: String,
     perm_death_recap: String,
+    perm_loot_rolls: String,
     perm_screenshot: String,
 }
 
@@ -1314,6 +1334,7 @@ fn prompt_texts(data_dir: Option<&Path>, lang: &str) -> PromptTexts {
         perm_decoder: perm("permDecoder", "Read selected game fields (may include other players): {name}"),
         perm_fps: perm("permFps", "Show the game's frame rate (on Windows, the meter asks to run as administrator for it)"),
         perm_death_recap: perm("permDeathRecap", "After a player kills you: who they were and the damage they did to you"),
+        perm_loot_rolls: perm("permLootRolls", "See Dice Roll loot: the item, who rolled what, and who won it"),
         perm_screenshot: perm("permScreenshot", "Take screenshots of its own window, to the clipboard and your screenshot folder"),
     }
 }
@@ -1329,6 +1350,7 @@ fn describe_permission(t: &PromptTexts, permission: &str) -> String {
         "events:character" => t.perm_character.clone(),
         "fps" => t.perm_fps.clone(),
         "events:death-recap" => t.perm_death_recap.clone(),
+        "events:loot-rolls" => t.perm_loot_rolls.clone(),
         "screenshot" => t.perm_screenshot.clone(),
         p => match p.strip_prefix("decoder:") {
             Some(name) => t.perm_decoder.replace("{name}", name),
@@ -1662,6 +1684,7 @@ pub async fn plugin_install(app: tauri::AppHandle, id: String) -> Result<Plugins
 /// Remove an installed plugin. Its saved data stays, for a later reinstall.
 #[tauri::command]
 pub fn plugin_uninstall(app: tauri::AppHandle, id: String) -> Result<PluginsView, String> {
+    dock::cancel_manual_open();
     if !valid_id(&id) {
         return Err("not a plugin id".into());
     }
@@ -1686,6 +1709,7 @@ pub fn plugin_uninstall(app: tauri::AppHandle, id: String) -> Result<PluginsView
 /// Stop loading a folder (its saved data stays).
 #[tauri::command]
 pub fn plugin_remove_folder(app: tauri::AppHandle, path: String) -> Result<PluginsView, String> {
+    dock::cancel_manual_open();
     let state = app.try_state::<AppState>().ok_or("no app state")?;
     let mut folders: Vec<String> =
         state.settings.get(DEV_FOLDERS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -1932,8 +1956,7 @@ pub async fn plugin_open(app: tauri::AppHandle, id: String) -> Result<(), String
     reopened(&app, &id);
     remember_window(&app, &id, Some("shown"));
     if dock::docks(&app, &id) {
-        dock::sync(&app, Some(&id));
-        return Ok(());
+        return dock::open_manually(&app, &id);
     }
     open_window(&app, &id, true)?;
     Ok(())
@@ -2119,6 +2142,7 @@ pub fn plugin_close(app: tauri::AppHandle, window: tauri::WebviewWindow, plugin:
     // its alerts) until it is turned off in Settings; Open shows it again.
     // Closing it stopped everything it did, which players did not expect.
     let id = window_plugin(&window, plugin.as_deref())?;
+    dock::cancel_manual_open();
     remember_window(&app, &id, Some("hidden"));
     // Docked: its tab goes; the dock with the last one (dock::sync).
     if window.label() == dock::LABEL {

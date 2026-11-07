@@ -839,7 +839,7 @@ const createDetailsUI = ({
         const iconEl = document.createElement("img");
         iconEl.className = "detailsPartyBarIcon";
         iconEl.src = `./assets/${job}.png`;
-        iconEl.alt = job;
+        window.i18n?.setClassTooltip?.(iconEl, job);
         iconEl.onerror = () => { iconEl.style.display = "none"; };
         contentEl.appendChild(iconEl);
       }
@@ -3372,9 +3372,12 @@ const createDetailsUI = ({
   };
   const renderRest = (details) => {
     const token = ++stageToken;
+    // The chart's lines draw in only when a fight first shows: asked for on
+    // every render, they swept in again at each 2 s refresh.
+    const firstShow = stagedForSeq !== openSeq;
     const steps = [
       [() => renderSkills(details, { compact: activeCompactMode }), () => detailsPanel.querySelector(".detailsSkills")],
-      [() => { chartRevealPending = true; renderDpsChart(details); chartRevealPending = false; }, () => fightTimeline],
+      [() => { chartRevealPending = firstShow; renderDpsChart(details); chartRevealPending = false; }, () => fightTimeline],
       [() => renderTimeline(details), null],
       [() => renderBuffs(), null],
     ];

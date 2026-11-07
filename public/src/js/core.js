@@ -8,6 +8,9 @@ const SETTING_CHOICES = {
   // How often the backend sends DPS (app.rs DPS_RATES_MS).
   updateRateMs: { allowed: ["100", "200", "250", "500"], fallback: "200" },
   trainSelectionMode: { allowed: ["all", "highestDamage"], fallback: "all" },
+  // How long hits on training dummies count after your first (app.rs
+  // TRAIN_TIME_LIMIT_KEY); "0" for no limit. Only the refresh starts it again.
+  trainTimeLimitMs: { allowed: ["0", "30000", "60000", "120000", "180000", "300000"], fallback: "0" },
   // The figure beside each player's name, in the meter and in Details.
   partyStat: { allowed: ["combatPower", "gearScore", "both", "off"], fallback: "combatPower" },
   // When the last fight leaves the screen after the zone changes.
@@ -99,6 +102,7 @@ class DpsApp {
       allTargetsWindowMs: "dpsMeter.allTargetsWindowMs",
       updateRateMs: "dpsMeter.updateRateMs",
       trainSelectionMode: "dpsMeter.trainSelectionMode",
+      trainTimeLimitMs: "dpsMeter.trainTimeLimitMs",
       partyStat: "dpsMeter.partyStat",
       clearOnZone: "dpsMeter.clearOnZone",
       barTexture: "dpsMeter.barTexture",
@@ -145,6 +149,7 @@ class DpsApp {
       font: "dpsMeter.font",
       autoHideMeter: "dpsMeter.autoHideMeter",
       hideWhenGameClosed: "dpsMeter.hideWhenGameClosed",
+      closeWithGame: "dpsMeter.closeWithGame",
       hideWhenSolo: "dpsMeter.hideWhenSolo",
       hideOutOfCombat: "dpsMeter.hideOutOfCombat",
       globalHotkeys: "dpsMeter.globalHotkeys",
@@ -686,6 +691,12 @@ class DpsApp {
     // Each metric in its own colour (styles.css); on unless turned off.
     this.statColours = this.safeGetStorage(this.storageKeys.statColours) !== "false";
     document.body.classList.toggle("noStatColours", !this.statColours);
+    // Turned on or off in the meter: the other windows (Details) follow.
+    window.addEventListener("storage", (event) => {
+      if (event.key !== this.storageKeys.statColours) return;
+      this.statColours = event.newValue !== "false";
+      document.body.classList.toggle("noStatColours", !this.statColours);
+    });
     // The death count badge (meter.js); off unless turned on.
     this.showDeaths = this.safeGetStorage(this.storageKeys.showDeaths) === "true";
     document.body.classList.toggle("noDeaths", !this.showDeaths);
@@ -942,6 +953,13 @@ class DpsApp {
     }
   }
 
+  // In Train mode, the Train time limit (ms) the timer stops at; 0 for none.
+  trainTimeCapMs(targetMode = this.lastTargetMode) {
+    if (targetMode !== "trainTargets") return 0;
+    const ms = Number(this.safeGetSetting?.(this.storageKeys.trainTimeLimitMs));
+    return Number.isFinite(ms) && ms > 0 ? ms : 0;
+  }
+
   resetAll({ callBackend = true } = {}) {
     this.resetPending = !!callBackend;
     this.invalidateHoverTooltip();
@@ -1152,6 +1170,15 @@ class DpsApp {
       </div>
       <div class="hoverDetailsTooltipSkills">${skillsHtml || `<div class="hoverDetailsTooltipSkill muted">${stateText}</div>`}</div>
     `;
+    // This hover card cannot itself be hovered. Name the class alongside its
+    // icon without changing the card's pointer-following/dismissal behavior.
+    const classIcon = this.hoverTooltipEl.querySelector?.(".hoverDetailsTooltipClassIcon");
+    if (classIcon) {
+      const label = document.createElement("span");
+      label.dataset.className = row.job;
+      label.textContent = window.i18n?.setClassTooltip?.(classIcon, row.job) || row.job;
+      classIcon.after(label);
+    }
     // Apply cached skill icons to tooltip img elements
     if (window.skillIcons?.applyIconToImage && skills.length) {
       const iconEls = this.hoverTooltipEl.querySelectorAll(".hoverDetailsTooltipSkill .skillIcon");
@@ -1434,7 +1461,7 @@ class DpsApp {
       // As above: a status message keeps the line shown.
       this.battleTime.setVisible(shouldBeVisible || !!this._connectionStatusOverride);
       if (shouldBeVisible) {
-        this.battleTime.update(now, this._lastBattleTimeMs);
+        this.battleTime.update(now, this._lastBattleTimeMs, { capMs: this.trainTimeCapMs() });
       }
 
       this.updateConnectionStatusUi();
@@ -1457,6 +1484,7 @@ class DpsApp {
       targetCurrentHp,
       targetStaggerPct,
       targetIsBoss,
+      trainLimitReached,
       dungeonId,
       targetMobCode,
       partyGeneration,
@@ -1628,7 +1656,7 @@ class DpsApp {
     this.battleTime.setVisible(shouldBeVisible);
 
     if (shouldBeVisible) {
-      this.battleTime.update(now, nextBattleTimeMs);
+      this.battleTime.update(now, nextBattleTimeMs, { capMs: this.trainTimeCapMs(targetMode) });
     }
 
     this.updateConnectionStatusUi();
@@ -1650,6 +1678,18 @@ class DpsApp {
       this._barsTargetLabel = nextTargetLabel;
     } else if (rowsToRender.length > 0 && noTarget && this._barsTargetLabel) {
       nextTargetLabel = this._barsTargetLabel;
+    }
+    // Train time limit (Settings → Advanced): the bars stay as they were
+    // when it ran out, until the refresh.
+    if (targetMode === "trainTargets" && trainLimitReached) {
+      nextTargetLabel = this.i18n?.t("target.trainLimitReached", "Time limit reached") ?? "Time limit reached";
+    } else if (targetMode === "trainTargets" && this.trainTimeCapMs(targetMode) > 0) {
+      // While it runs, the title says so: "TRAINING SCARECROW (Timed: 30sec)".
+      const ms = this.trainTimeCapMs(targetMode);
+      const time = ms < 60000
+        ? (this.i18n?.t("target.timedSeconds", "{n}sec") ?? "{n}sec").replace("{n}", String(Math.round(ms / 1000)))
+        : (this.i18n?.t("target.timedMinutes", "{n}min") ?? "{n}min").replace("{n}", String(Math.round(ms / 60000)));
+      nextTargetLabel = `${nextTargetLabel} (${(this.i18n?.t("target.timed", "Timed: {time}") ?? "Timed: {time}").replace("{time}", time)})`;
     }
     if (this.elBossName) {
       if (this.elBossName.textContent !== nextTargetLabel) {
@@ -1725,6 +1765,7 @@ class DpsApp {
       : -1;
     const targetStaggerPct = Number.isFinite(Number(payload?.targetStaggerPct)) ? Number(payload.targetStaggerPct) : -1;
     const targetIsBoss = payload?.targetIsBoss === true;
+    const trainLimitReached = payload?.trainLimitReached === true;
     const targetMobCode = Math.trunc(Number(payload?.targetMobCode)) || 0;
     const partyGeneration = Math.trunc(Number(payload?.partyGeneration)) || 0;
     const zoneGeneration = Math.trunc(Number(payload?.zoneGeneration)) || 0;
@@ -1742,6 +1783,7 @@ class DpsApp {
       targetCurrentHp,
       targetStaggerPct,
       targetIsBoss,
+      trainLimitReached,
       dungeonId,
       targetMobCode,
       partyGeneration,
@@ -2815,6 +2857,8 @@ class DpsApp {
     this.discordStatDropdownBtn = document.querySelector(".discordStatDropdownBtn");
     this.discordStatDropdownMenu = document.querySelector(".discordStatDropdownMenu");
     this.trainSelectionModeDropdownMenu = document.querySelector(".trainSelectionModeDropdownMenu");
+    this.trainTimeLimitDropdownBtn = document.querySelector(".trainTimeLimitDropdownBtn");
+    this.trainTimeLimitDropdownMenu = document.querySelector(".trainTimeLimitDropdownMenu");
     this.meterAnchorDropdownBtn = document.querySelector(".meterAnchorDropdownBtn");
     this.meterAnchorDropdownMenu = document.querySelector(".meterAnchorDropdownMenu");
     this.meterAnchorRow = this.meterAnchorDropdownBtn?.closest?.(".settingsRow") || null;
@@ -2902,6 +2946,7 @@ class DpsApp {
       defaultMeterMode: "bossTargets",
       allTargetsWindowMs: "120000",
       trainSelectionMode: "all",
+      trainTimeLimitMs: "0",
       meterAnchor: "top",
       partyStat: "combatPower",
       discordStat: "off",
@@ -3228,6 +3273,14 @@ class DpsApp {
       this.hideWhenGameClosedCheckbox.checked = this.safeGetSetting(this.storageKeys.hideWhenGameClosed) === "true";
       this.hideWhenGameClosedCheckbox.addEventListener("change", (event) => {
         this.safeSetSetting(this.storageKeys.hideWhenGameClosed, String(!!event.target?.checked));
+      });
+    }
+    // Close the meter once AION2 has closed (the same loop).
+    this.closeWithGameCheckbox = document.querySelector(".closeWithGameCheckbox");
+    if (this.closeWithGameCheckbox) {
+      this.closeWithGameCheckbox.checked = this.safeGetSetting(this.storageKeys.closeWithGame) === "true";
+      this.closeWithGameCheckbox.addEventListener("change", (event) => {
+        this.safeSetSetting(this.storageKeys.closeWithGame, String(!!event.target?.checked));
       });
     }
     // And while not in a party (the same loop).
@@ -4054,6 +4107,10 @@ class DpsApp {
         label: this.i18n?.t("settings.trainingMode.options.highestDamage", "Highest Damage"),
       },
     ];
+    const trainTimeLimitOptions = [
+      { value: "0", label: this.i18n?.t("settings.trainTimeLimit.options.off", "No limit") },
+      ...allTargetsWindowOptions,
+    ];
     const meterAnchorOptions = [
       { value: "top", label: this.i18n?.t("settings.meterAnchor.options.top", "Top") },
       { value: "middle", label: this.i18n?.t("settings.meterAnchor.options.middle", "Centre") },
@@ -4283,6 +4340,17 @@ class DpsApp {
         this.safeSetSetting(this.storageKeys.trainSelectionMode, value);
         window.javaBridge?.setTrainSelectionMode?.(value);
         if (!this.isCollapse) this.fetchDps();
+      }
+    );
+    setupDropdown(
+      this.trainTimeLimitDropdownBtn,
+      this.trainTimeLimitDropdownMenu,
+      trainTimeLimitOptions,
+      pickSettingChoice("trainTimeLimitMs", this.safeGetSetting(this.storageKeys.trainTimeLimitMs)),
+      (value) => {
+        if (value == null) return;
+        this.settingsSelections.trainTimeLimitMs = value;
+        this.safeSetSetting(this.storageKeys.trainTimeLimitMs, value);
       }
     );
     setupDropdown(
@@ -5258,6 +5326,7 @@ class DpsApp {
       [this.bossLogsCheckbox, "bossLogs", false],
       [this.autoHideMeterCheckbox, "autoHideMeter", false],
       [this.hideWhenGameClosedCheckbox, "hideWhenGameClosed", false],
+      [this.closeWithGameCheckbox, "closeWithGame", false],
       [this.hideWhenSoloCheckbox, "hideWhenSolo", false],
       [this.globalHotkeysCheckbox, "globalHotkeys", !document.documentElement?.classList?.contains?.("linux")],
       [this.saveRawPacketsCheckbox, "saveRawPackets", false],
@@ -5532,7 +5601,10 @@ class DpsApp {
     if (persist) {
       this.safeSetStorage(this.storageKeys.targetSelection, String(this.targetSelection));
     }
-    if (syncBackend) {
+    // Details and History run this too, with the default mode: theirs put
+    // the live meter in it as they opened (a Train fight then went on with no
+    // time limit and everyone's damage). The meter and Settings set it.
+    if (syncBackend && window.A2_VIEW !== "details" && window.A2_VIEW !== "history") {
       window.javaBridge?.setTargetSelection?.(this.targetSelection);
     }
     if (previousSelection !== this.targetSelection) {
@@ -5812,7 +5884,14 @@ class DpsApp {
     this.targetMenuOpen = false;
 
     const choose = (mode) => {
+      const wasTrain = this.targetSelection === "trainTargets";
       this.setTargetSelection(mode, { persist: true, syncBackend: true, reason: "target menu" });
+      // Into Train mode with a time limit: the timed fight starts from 0:00 at
+      // your first hit, so the last mode's rows and timer go (the backend
+      // has cleared the dummies too).
+      if (mode === "trainTargets" && !wasTrain && this.trainTimeCapMs(mode) > 0) {
+        this.resetAll({ callBackend: false });
+      }
       this.renderTargetMenu();
       if (!this.isCollapse) this.fetchDps();
     };
@@ -6379,6 +6458,7 @@ class DpsApp {
     const choices = {
       defaultMeterMode: "defaultMeterMode",
       trainSelectionMode: "trainSelectionMode",
+      trainTimeLimitMs: "trainTimeLimit",
       allTargetsWindowMs: "allTargetsWindow",
       updateRateMs: "updateRate",
       meterAnchor: "meterAnchor",
@@ -6926,6 +7006,15 @@ class DpsApp {
     const names = Object.keys(saved);
     for (const old of names.slice(0, Math.max(0, names.length - 20))) delete saved[old];
     this.safeSetStorage(this.storageKeys.odyleLast, JSON.stringify(saved));
+  }
+
+  // How much the ping moves, in its tooltip: the footer has no room for it
+  // (#164).
+  updateJitter(ms) {
+    if (!this.pingEl) return;
+    this.pingEl.title = typeof ms === "number"
+      ? this.i18n?.format?.("footerMenu.jitter", { ms: ms.toFixed(1) }, `Jitter: ${ms.toFixed(1)} ms`) ?? `Jitter: ${ms.toFixed(1)} ms`
+      : "";
   }
 
   updatePing(pushedMs) {

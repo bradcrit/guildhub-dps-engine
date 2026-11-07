@@ -301,7 +301,7 @@
     "sort": "Ordenar",
     "sortNewest": "Más recientes",
     "sortFastest": "Victoria más rápida",
-    "sortPartyDps": "DPS del grupo",
+    "sortTotalDps": "DPS total",
     "sortMyDps": "Tu DPS",
     "sortRecent": "Más recientes",
     "sortTier": "Nivel de mazmorra",
@@ -310,6 +310,7 @@
     "pb": "Marca",
     "pbTip": "Una de tus mejores marcas",
     "party": "Grupo",
+    "allPlayers": "Todos los jugadores",
     "you": "Tú",
     "totalDamage": "Daño total",
     "finalBoss": "Jefe final",
@@ -385,6 +386,7 @@
     "showDpsSuffix": "Añadir /s al DPS",
     "autoHideMeter": "Ocultar cuando AION2 no está activo",
     "hideWhenGameClosed": "Ocultar mientras AION2 está cerrado",
+    "closeWithGame": "Cerrar el medidor al cerrar AION2",
     "hideWhenSolo": "Mostrar solo en grupo",
     "hideOutOfCombat": {
       "label": "Ocultar fuera de combate",
@@ -595,6 +597,12 @@
         "highestDamage": "Mayor daño"
       }
     },
+    "trainTimeLimit": {
+      "label": "Límite de tiempo de entrenamiento",
+      "options": {
+        "off": "Sin límite"
+      }
+    },
     "showSupporterColors": "Mostrar colores de mecenas",
     "showSupporterColorsHint": "Los nombres de los mecenas se muestran en dorado. Solo estético — no cambia ninguna cifra.",
     "account": {
@@ -656,6 +664,7 @@
       "barTexture": "Un diseño sobre las barras del medidor. Un agradecimiento por apoyar A2 Tools.",
       "textureOffset": "Cada barra empieza su textura en un punto distinto, para que no se vean todas iguales.",
       "trainingMode": "En modo entrenamiento, qué muñecos muestra la ventana de detalles: todos juntos o solo el que más golpeas.",
+      "trainTimeLimit": "En el modo Entrenamiento, los golpes a los muñecos cuentan durante este tiempo tras el primero. Después el medidor se detiene hasta que pulses Actualizar, que reinicia el tiempo.",
       "allTargetsWindow": "En el modo Todos los objetivos, el medidor suma cada objetivo golpeado dentro de este tiempo antes del último golpe.",
       "updateRate": "Cada cuánto se actualizan los números del medidor. Más rápido muestra los golpes antes pero usa más CPU.",
       "partyPresence": "Los miembros del grupo que también usan A2Tools ven una pequeña etiqueta A2 junto a tu nombre, y tú ves la suya. Cualquiera del grupo que use A2Tools puede verla, así que sabrá que usas un medidor de terceros. Solo se envían hashes de nombres de personaje y servidores.",
@@ -666,6 +675,7 @@
       "showMeter": "Desactivado: solo se ven tus plugins. El medidor sigue registrando combates y subiéndolos en segundo plano. Vuelve a mostrarlo aquí, con el atajo de mostrar/ocultar o con el botón del medidor en una ventana de plugin.",
       "clearOnZone": "Cuándo desaparece el último combate del medidor tras un cambio de zona. Todos los combates quedan en el Historial igualmente.",
       "hideWhenGameClosed": "El medidor se oculta mientras el juego no está abierto y vuelve cuando se inicia.",
+      "closeWithGame": "El medidor se cierra solo unos 10 segundos después de cerrar AION2. Si se abre antes que el juego, lo espera.",
       "hideWhenSolo": "El medidor se oculta mientras no estás en un grupo y vuelve cuando te unes a uno. El atajo de mostrar/ocultar lo sigue mostrando.",
       "hideOutOfCombat": "El medidor se oculta tras este tiempo fuera de combate y vuelve con el siguiente golpe. Sigue visible mientras Ajustes, Historial o Detalles están abiertos, o el ratón está encima.",
       "runAsAdmin": "Necesario para mostrar los FPS del juego. Windows lo pedirá cada vez que se inicie el medidor.",
@@ -740,6 +750,7 @@
       "permsTitle": "Puede:",
       "permFps": "Mostrar los FPS del juego (en Windows, el medidor pide ejecutarse como administrador para ello)",
       "permDeathRecap": "Cuando un jugador te mata: quién era y el daño que te hizo",
+      "permLootRolls": "Ver el botín por dados: el objeto, quién sacó cuánto y quién lo ganó",
       "permScreenshot": "Hacer capturas de su propia ventana, al portapapeles y a tu carpeta de capturas",
       "testHint": "Versiones tempranas para que cualquiera las pruebe, firmadas como las demás. Pueden cambiar o tener detalles sin pulir: cuéntanos lo que encuentres.",
       "testTitle": "Plugins de prueba",
@@ -836,6 +847,10 @@
     "all": "Todos los objetivos",
     "identifying": "Identificándote...",
     "train": "Muñeco de entrenamiento",
+    "trainLimitReached": "Límite de tiempo alcanzado",
+    "timed": "Límite: {time}",
+    "timedSeconds": "{n} s",
+    "timedMinutes": "{n} min",
     "boss": "Objetivos jefe"
   },
   "classes": {
@@ -971,6 +986,7 @@
     "ttk": "Tiempo estimado para matar",
     "partyTotal": "Total del grupo",
     "odyle": "Energía de Odyle",
-    "ping": "Ping"
+    "ping": "Ping",
+    "jitter": "Fluctuación: {ms} ms"
   }
 }

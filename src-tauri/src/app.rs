@@ -313,7 +313,8 @@ fn auto_hide_now(app: &tauri::AppHandle) {
         return;
     }
     let Some(window) = app.get_webview_window("main") else { return };
-    let front = platform::window_detector::is_aion2_foreground() || window.is_focused().unwrap_or(false);
+    let front = platform::window_detector::is_aion2_foreground() || window.is_focused().unwrap_or(false)
+        || crate::plugins::configuration_focused(app);
     let hidden = !window.is_visible().unwrap_or(true)
         || window.is_minimized().unwrap_or(false)
         || platform::window::is_hidden_in_place(&window);
@@ -995,6 +996,9 @@ fn dps_rate_ms(settings: &Settings) -> u64 {
 
 /// The All Targets time range (Settings), in milliseconds.
 const ALL_TARGETS_WINDOW_KEY: &str = "dpsMeter.allTargetsWindowMs";
+/// Train time limit (Settings → Advanced), in ms: hits on training dummies
+/// count for this long after the player's first one, until the refresh. 0: none.
+const TRAIN_TIME_LIMIT_KEY: &str = "dpsMeter.trainTimeLimitMs";
 const METER_ANCHOR_KEY: &str = "dpsMeter.meterAnchor";
 const WINDOW_HEIGHT_KEY: &str = "window.h";
 
@@ -1180,6 +1184,9 @@ fn update_settings(
         if key == ALL_TARGETS_WINDOW_KEY {
             apply_all_targets_window(&state, &value);
         }
+        if key == TRAIN_TIME_LIMIT_KEY {
+            state.data_storage.set_train_limit_ms(value.trim().parse().unwrap_or(0));
+        }
         if key == METER_ANCHOR_KEY {
             platform::window::set_main_anchor(platform::meter_anchor::Anchor::from_setting(Some(&value)));
         }
@@ -1339,6 +1346,7 @@ fn bind_local_nickname(state: tauri::State<'_, AppState>, actor_id: i64, nicknam
 fn reset_combat(app: tauri::AppHandle, state: tauri::State<'_, AppState>) {
     save_fights_before_reset(&app);
     state.dps_calculator.lock().restart_target_selection(true);
+    state.data_storage.restart_train_limit();
     // Don't reset port detector or ping — keep the network connection alive.
     // Clear combat data, and only the names a loose scan guessed: the game
     // does not send the others again until everyone respawns.
@@ -1432,6 +1440,36 @@ async fn get_available_devices() -> Vec<String> {
 fn set_manual_device(state: tauri::State<'_, AppState>, device: String) {
     let dev = if device.trim().is_empty() { None } else { Some(device) };
     state.port_detector.set_preferred_device(dev);
+}
+
+/// "Close the meter when AION2 closes": the meter quits once the game, seen
+/// open since the meter started, has stayed closed for CLOSE_AFTER_MS. Never
+/// before the game is first seen, so a meter started ahead of the game waits
+/// for it; and not at a blink of its window (a crash and relaunch, a loading
+/// screen on a slow PC).
+#[derive(Default)]
+struct CloseWithGame {
+    seen_open: bool,
+    closed_since: Option<i64>,
+}
+
+impl CloseWithGame {
+    const CLOSE_AFTER_MS: i64 = 10_000;
+
+    /// Whether to quit now, the game open or not at `now_ms`.
+    fn due(&mut self, game_open: bool, enabled: bool, now_ms: i64) -> bool {
+        if game_open {
+            self.seen_open = true;
+            self.closed_since = None;
+            return false;
+        }
+        if !enabled || !self.seen_open {
+            self.closed_since = None;
+            return false;
+        }
+        let since = *self.closed_since.get_or_insert(now_ms);
+        now_ms - since >= Self::CLOSE_AFTER_MS
+    }
 }
 
 #[tauri::command]
@@ -3747,9 +3785,34 @@ pub fn run() {
             {
                 let flag = app_data_dir.join("dev-quit");
                 let _ = std::fs::remove_file(&flag);
+                // And feed the packets of the capture a `dev-replay` file
+                // names to the parser, at the time they arrive (`TIMESTAMP|
+                // STREAM|HEX` lines, one packet each): to see a feature's UI
+                // play out without the game.
+                let replay = app_data_dir.join("dev-replay");
+                let _ = std::fs::remove_file(&replay);
                 let handle = app.handle().clone();
                 std::thread::spawn(move || loop {
                     std::thread::sleep(Duration::from_millis(500));
+                    if let Ok(path) = std::fs::read_to_string(&replay) {
+                        let _ = std::fs::remove_file(&replay);
+                        if let (Ok(text), Some(state)) = (std::fs::read_to_string(path.trim()), handle.try_state::<AppState>()) {
+                            let mut processor = crate::capture::stream_processor::StreamProcessor::new(
+                                state.data_storage.clone(),
+                                state.skill_lookup.clone(),
+                                state.npc_lookup.clone(),
+                            );
+                            let packets: Vec<Vec<u8>> = text
+                                .lines()
+                                .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+                                .filter_map(|l| decode_replay_hex(l.splitn(3, '|').nth(2)?.trim()))
+                                .collect();
+                            for data in &packets {
+                                processor.consume_stream(data);
+                            }
+                            tracing::info!("dev-replay: {} packets from {}", packets.len(), path.trim());
+                        }
+                    }
                     if flag.exists() {
                         let _ = std::fs::remove_file(&flag);
                         tracing::info!("dev-quit: quitting");
@@ -3842,6 +3905,9 @@ pub fn run() {
             let _ = new_install;
             if let Some(ms) = settings.get(ALL_TARGETS_WINDOW_KEY).and_then(|v| v.trim().parse::<i64>().ok()) {
                 dps_calculator.set_all_targets_window_ms(ms);
+            }
+            if let Some(ms) = settings.get(TRAIN_TIME_LIMIT_KEY).and_then(|v| v.trim().parse::<i64>().ok()) {
+                data_storage.set_train_limit_ms(ms);
             }
 
             // Load logging settings from saved state
@@ -4136,6 +4202,9 @@ pub fn run() {
                 let mut hidden_closed = false;
                 // Hide while AION2 is closed or while solo, as last checked.
                 let mut closed_or_solo = false;
+                // Close with the game (Settings): whether it has been seen
+                // open this run, and since when it has been closed.
+                let mut close_with = CloseWithGame::default();
                 // Out of combat (#106): the setting last seen, and when the
                 // wait began (the meter started, the setting changed, the
                 // player showed the meter, or a Settings/History/Details
@@ -4161,6 +4230,10 @@ pub fn run() {
                             if last_ping != Some(ping as u64) || tick_count % 4 == 0 {
                                 last_ping = Some(ping as u64);
                                 let _ = handle.emit("ping-update", ping);
+                                // For the ping's tooltip.
+                                if let Some(jitter) = state.ping_tracker.current_jitter_ms() {
+                                    let _ = handle.emit("ping-jitter", (jitter * 10.0).round() / 10.0);
+                                }
                             }
                         }
 
@@ -4192,7 +4265,13 @@ pub fn run() {
                         // hit; no keybind needed (#106, a headless stream).
                         let on = |key: &str| state.settings.get(key).as_deref() == Some("true");
                         if tick_count % 4 == 0 {
-                            let closed = on("dpsMeter.hideWhenGameClosed") && !platform::window_detector::find_aion2_window();
+                            let game_open = platform::window_detector::find_aion2_window();
+                            if close_with.due(game_open, on("dpsMeter.closeWithGame"), crate::clock::now_ms()) {
+                                tracing::info!("AION2 closed: closing the meter with it (Settings)");
+                                quit_app(handle.clone());
+                                return;
+                            }
+                            let closed = on("dpsMeter.hideWhenGameClosed") && !game_open;
                             let solo = on("dpsMeter.hideWhenSolo") && state.data_storage.get_party_members().len() < 2;
                             closed_or_solo = closed || solo;
                         }
@@ -4226,7 +4305,8 @@ pub fn run() {
                                 } else if wanted
                                     && !(on("dpsMeter.autoHideMeter")
                                         && !platform::window_detector::is_aion2_foreground()
-                                        && !window.is_focused().unwrap_or(false))
+                                        && !window.is_focused().unwrap_or(false)
+                                        && !crate::plugins::configuration_focused(&handle))
                                 {
                                     // Hidden by the player meanwhile, it stays
                                     // so; with another program in front and
@@ -4257,7 +4337,8 @@ pub fn run() {
                         if auto_hide {
                             if let Some(window) = handle.get_webview_window("main") {
                                 let aion_fg = platform::window_detector::is_aion2_foreground();
-                                let is_self_fg = window.is_focused().unwrap_or(false);
+                                let is_self_fg = window.is_focused().unwrap_or(false)
+                                    || crate::plugins::configuration_focused(&handle);
                                 let is_visible = window.is_visible().unwrap_or(true);
                                 let is_minimized = window.is_minimized().unwrap_or(false);
                                 if tick_count % 4 == 0 {
@@ -4320,7 +4401,7 @@ pub fn run() {
                             let front = platform::window::front_is_ours_or_game();
                             if dock_on_top != Some(front) {
                                 if let Some(dock) = handle.get_webview_window(crate::plugins::dock::LABEL) {
-                                    let _ = dock.set_always_on_top(front);
+                                    platform::window::set_on_top_without_showing(&dock, front);
                                     dock_on_top = Some(front);
                                 }
                             }
@@ -4634,6 +4715,27 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_meter_closes_only_after_the_game_it_saw_has_stayed_closed() {
+        let mut c = super::CloseWithGame::default();
+        let after = super::CloseWithGame::CLOSE_AFTER_MS;
+        // Started before the game: waits for it, however long.
+        assert!(!c.due(false, true, 0));
+        assert!(!c.due(false, true, 10 * after));
+        assert!(!c.due(true, true, 11 * after));
+        // Closed, then back within the wait (a relaunch): stays.
+        assert!(!c.due(false, true, 12 * after));
+        assert!(!c.due(true, true, 12 * after + after / 2));
+        // Closed for the whole wait: quits.
+        assert!(!c.due(false, true, 13 * after));
+        assert!(!c.due(false, true, 14 * after - 1));
+        assert!(c.due(false, true, 14 * after));
+        // The option off: never.
+        let mut off = super::CloseWithGame::default();
+        assert!(!off.due(true, false, 0));
+        assert!(!off.due(false, false, 100 * after));
+    }
+
     // Updates are an online build's: the offline one has no updater.
     #[cfg(feature = "online")]
     #[test]

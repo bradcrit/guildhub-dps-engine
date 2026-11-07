@@ -170,6 +170,7 @@ impl DpsCalculator {
             self.last_damage_gen = -1;
         }
         self.target_selection_mode = mode;
+        self.data_storage.set_train_mode(mode == TargetSelectionMode::TrainTargets);
     }
 
     pub fn set_all_targets_window_ms(&mut self, ms: i64) {
@@ -312,6 +313,8 @@ impl DpsCalculator {
                 self.npc_lookup.is_boss(code) && !self.npc_lookup.is_training_dummy(code)
             });
         dps_data.target_is_boss = target_is_boss;
+        let train_limit_reached = self.data_storage.train_limit_reached();
+        dps_data.train_limit_reached = train_limit_reached;
         let target_mob_code = if self.current_target != 0 {
             self.data_storage.mob_code(self.current_target).unwrap_or(0)
         } else {
@@ -372,6 +375,7 @@ impl DpsCalculator {
                 snapshot.target_current_hp = target_current_hp;
                 snapshot.target_stagger_pct = target_stagger_pct;
                 snapshot.target_is_boss = target_is_boss;
+                snapshot.train_limit_reached = train_limit_reached;
                 snapshot.target_mob_code = target_mob_code;
                 snapshot.dungeon_id = dps_data.dungeon_id;
                 let mut snap = snapshot.clone();
@@ -610,9 +614,15 @@ impl DpsCalculator {
         // Heal data: per-actor totals windowed to the fight
         let heal_totals = self.data_storage.get_heal_totals_in_window(fight_start, fight_end);
         let mut resolved_heals: HashMap<i32, (i64, i64)> = HashMap::new();
+        // Under a Train time limit the fight is the player's alone: no one
+        // else's heals either.
+        let own_only = (self.target_selection_mode == TargetSelectionMode::TrainTargets
+            && self.data_storage.train_limit_on())
+        .then(|| self.data_storage.local_player_id().map(|id| id as i32));
         for (&actor_id, &(heal, effective)) in &heal_totals {
             let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
             if raw_uid <= 0 { continue; }
+            if own_only.is_some_and(|me| me != Some(raw_uid)) { continue; }
             let nickname = resolve_nickname(raw_uid, &nickname_data, &summon_data);
             let uid = *canonical.get(&nickname).unwrap_or(&raw_uid);
             let uid = *orphan_to_owner.get(&uid).unwrap_or(&uid);
@@ -797,7 +807,10 @@ impl DpsCalculator {
     fn finalize_rows(&self, dps_data: &mut DpsData) {
         dps_data.party_generation = self.data_storage.party_generation();
         (dps_data.zone_generation, dps_data.instance_generation) = self.data_storage.zone_generations();
-        self.add_party_rows(dps_data);
+        // Under a Train time limit the fight is the player's alone.
+        if !(self.target_selection_mode == TargetSelectionMode::TrainTargets && self.data_storage.train_limit_on()) {
+            self.add_party_rows(dps_data);
+        }
         self.mark_supporters(dps_data);
     }
 
@@ -1338,7 +1351,8 @@ impl DpsCalculator {
 
             let id = format!("auto_{}_{}", target_id, target_data.first_damage_time);
 
-            let is_train = self.npc_lookup.is_training_dummy(mob_code);
+            // One known by its HP alone has no NPC code to say so.
+            let is_train = self.npc_lookup.is_training_dummy(mob_code) || self.data_storage.is_dummy(target_id);
             let buffs = crate::combat::fight_buffs::for_fight(
                 &self.data_storage,
                 target_id,
@@ -1878,9 +1892,14 @@ impl DpsCalculator {
         // (same nickname/orphan resolution as damage). Reuses DetailSkillEntry:
         // dmg = heal amount, time = tick count, is_dot = HoT.
         let mut heal_map: HashMap<(i32, i32), DetailSkillEntry> = HashMap::new();
+        // Under a Train time limit a dummy fight is the player's alone: no one
+        // else's heals (the saved fight's players come from these too).
+        let own_only = (self.data_storage.train_limit_on() && self.data_storage.is_dummy(target_id))
+            .then(|| self.data_storage.local_player_id().map(|id| id as i32));
         for (&actor_id, skills) in &self.data_storage.get_heal_snapshot() {
             let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
             if raw_uid <= 0 { continue; }
+            if own_only.is_some_and(|me| me != Some(raw_uid)) { continue; }
             let remapped = *orphan_to_owner.get(&raw_uid).unwrap_or(&raw_uid);
             let nickname = resolve_nickname(remapped, &nickname_data, &summon_data);
             let uid = *canonical.get(&nickname).unwrap_or(&remapped);

@@ -22,19 +22,6 @@ const createHistoryUI = ({ onOpenFight } = {}) => {
   const filterPlayerLabel = filterPlayerEl?.querySelector(".historyClassDropdownLabel");
   const filterPlayerMenu = filterPlayerEl?.querySelector(".historyClassDropdownMenu");
 
-  // Map from the Korean class name stored in fight records → stable enum key used for i18n
-  const JOB_KEY_MAP = {
-    "검성": "GLADIATOR",
-    "수호성": "TEMPLAR",
-    "궁성": "RANGER",
-    "살성": "ASSASSIN",
-    "마도성": "SORCERER",
-    "치유성": "CLERIC",
-    "정령성": "ELEMENTALIST",
-    "호법성": "CHANTER",
-    "권성": "FIGHTER",
-  };
-
   // Class-filter icons that exist as assets (Korean class names). Guarding on
   // this set avoids requesting a missing file on every render (which spammed
   // "asset not found" for classes without an icon).
@@ -139,11 +126,7 @@ const createHistoryUI = ({ onOpenFight } = {}) => {
     return `${Math.round(n)}`;
   };
 
-  const getJobLabel = (job) => {
-    const key = JOB_KEY_MAP[job];
-    if (!key) return job;
-    return t(`classes.${key}`, key);
-  };
+  const getJobLabel = (job) => i18n?.getClassName?.(job) ?? job;
 
   const setClassDropdownOpen = (open) => {
     classDropdownOpen = open;
@@ -158,6 +141,7 @@ const createHistoryUI = ({ onOpenFight } = {}) => {
           ? `<img src="./assets/${job}.png" alt="" class="historyClassDropdownIcon" onerror="this.style.display='none'">`
           : "";
         filterPlayerLabel.innerHTML = `${img}${getJobLabel(job)}`;
+        i18n?.setClassTooltip?.(filterPlayerLabel.querySelector("img"), job);
       } else {
         filterPlayerLabel.textContent = t("history.filterPlayer", "All classes");
       }
@@ -258,7 +242,7 @@ const createHistoryUI = ({ onOpenFight } = {}) => {
       sortEl.replaceChildren(...[
         ["newest", t("history.sortNewest", "Newest")],
         ["fastest", t("history.sortFastest", "Fastest kill")],
-        ["partyDps", t("history.sortPartyDps", "Party DPS")],
+        ["partyDps", t("history.sortTotalDps", "Total DPS")],
         ["myDps", t("history.sortMyDps", "Your DPS")],
       ].map(([v, label]) => option(v, label, v === sortBy)));
     }
@@ -284,6 +268,7 @@ const createHistoryUI = ({ onOpenFight } = {}) => {
           const img = document.createElement("img");
           img.src = `./assets/${job}.png`;
           img.alt = "";
+          i18n?.setClassTooltip?.(img, job);
           img.className = "historyClassDropdownIcon";
           img.onerror = () => { img.style.display = "none"; };
           opt.appendChild(img);
@@ -559,7 +544,11 @@ const createHistoryUI = ({ onOpenFight } = {}) => {
         el.append(`${label} `, b);
         return el;
       };
-      metaEl.appendChild(stat("historyRowParty", t("history.party", "Party"), partyDps(fight)));
+      // All damage on the target the meter saw: the party's in a dungeon,
+      // anyone's around in the open world, where a solo fight read as
+      // "Party" (#157).
+      const total = Number(fight.dungeonId) > 0 ? t("history.party", "Party") : t("history.allPlayers", "All players");
+      metaEl.appendChild(stat("historyRowParty", total, partyDps(fight)));
       if (Number(fight.myDamage) > 0 && youIn(fight)) {
         const mine = stat("historyRowMine", t("history.you", "You"), myDps(fight));
         const share = Number(fight.totalDamage) > 0 ? Math.round(Number(fight.myDamage) * 100 / Number(fight.totalDamage)) : 0;
@@ -585,13 +574,14 @@ const createHistoryUI = ({ onOpenFight } = {}) => {
       if (!job) return;
       const wrap = document.createElement("span");
       wrap.className = "historyIconWrap";
-      wrap.setAttribute("data-tip", getJobLabel(job));
+      wrap.setAttribute("data-tip", "");
       const img = document.createElement("img");
       img.src = `./assets/${job}.png`;
       img.alt = job;
       img.className = "historyRowClassIcon";
       img.onerror = () => { wrap.style.display = "none"; };
       wrap.appendChild(img);
+      i18n?.setClassTooltip?.(wrap, job);
       iconsEl.appendChild(wrap);
     });
 
@@ -1048,7 +1038,7 @@ const createHistoryUI = ({ onOpenFight } = {}) => {
     if (!CLASS_ICON_JOBS.has(job)) return [];
     const img = document.createElement("img");
     img.src = `./assets/${job}.png`;
-    img.alt = getJobLabel(job);
+    i18n?.setClassTooltip?.(img, job);
     img.className = "historyBestClass";
     return [img];
   };

@@ -135,6 +135,8 @@ function place(w) {
         if (main) overlayHeight = placed ? keptHeight : 0;
         if (!placed) return;
         w.frameGeometry = r;
+        // A widget's size as last seen, for a resize to keep its top left.
+        var widgetSize = Math.round(w.frameGeometry.width) + "x" + Math.round(w.frameGeometry.height), resizedAt = 0;
         // Moved by a resize while held: back to its place, at its new size.
         // Never against the player's own move or resize.
         var until = Date.now() + HOLD_MS;
@@ -156,14 +158,33 @@ function place(w) {
                 top = Math.round(now.y);
                 // The player sized it: its edge is kept from this height.
                 if (main && !mainGrown) keptHeight = overlayHeight = seen;
+                // Or moved it: its top left is kept from here.
+                if (!main) {
+                    r = { x: Math.round(now.x), y: top };
+                    widgetSize = Math.round(now.width) + "x" + seen;
+                }
             });
         }
         w.frameGeometryChanged.connect(function () {
             if (held || userMove || w.move || w.resize) return;
             var now = w.frameGeometry;
             if (!main) {
-                if (Date.now() > until) return;
-                if (Math.round(now.x) === r.x && Math.round(now.y) === r.y) return;
+                var nx = Math.round(now.x), ny = Math.round(now.y);
+                var size = Math.round(now.width) + "x" + Math.round(now.height);
+                // Held, it stays at its place. After, a move by KWin alone is
+                // its place now, but a resize keeps its top left: KWin keeps
+                // a resized window's centre, and a plugin sizes its widget
+                // again as the game tells it more (Cooldowns once the class
+                // and its skills come, long after the hold when the game was
+                // just started): the buffs slid onto the skills (#177).
+                // (The move can come as a change of its own just after.)
+                if (size !== widgetSize) resizedAt = Date.now();
+                widgetSize = size;
+                if (nx === r.x && ny === r.y) return;
+                if (Date.now() > until && Date.now() - resizedAt > 500) {
+                    r = { x: nx, y: ny };
+                    return;
+                }
                 held = true;
                 w.frameGeometry = { x: r.x, y: r.y, width: now.width, height: now.height };
                 held = false;
@@ -312,6 +333,49 @@ pub fn places_own_windows() -> bool {
 /// then be hidden for good and shown again at its place.
 pub fn kwin_places_windows() -> bool {
     PLACING.load(Ordering::Relaxed) && PLACES.get().is_some() && !X11_IN_WAYLAND.load(Ordering::Relaxed)
+}
+
+/// Whether the meter's windows can be hidden for good on Hyprland. It places a
+/// window again each time one is mapped, and under XWayland the meter places
+/// its own again (`places_own_windows`), so `hide_in_place` hides for real
+/// there. Concealing it instead leaves it on screen: Hyprland keeps drawing a
+/// window left mapped at `_NET_WM_WINDOW_OPACITY` 0.
+pub fn hyprland_places_windows() -> bool {
+    super::process::is_hyprland()
+}
+
+/// Keep where a window is now, for one hidden for good that the meter has to
+/// put back itself: through the store KWin's script fills (#76), so a window
+/// is placed the same way on both (KWin says where a window was left, Hyprland
+/// is asked by `hide_in_place` before the window goes).
+pub fn save_place(window: &tauri::WebviewWindow) {
+    let (Ok(title), Ok(at), Ok(size)) = (window.title(), window.outer_position(), window.outer_size()) else {
+        return;
+    };
+    // A window mapped but not placed yet has no size (and sits at 0,0): kept,
+    // that place would move it to the corner on the show.
+    if size.width == 0 || size.height == 0 {
+        return;
+    }
+    save_place_at(&title, (at.x, at.y, size.width as i32, size.height as i32));
+}
+
+/// `save_place` without the window, for the store alone.
+fn save_place_at(title: &str, rect: Rect) {
+    if let Some(places) = PLACES.get() {
+        (places.save)(title, rect);
+    }
+}
+
+/// Where a window belongs, as the meter last kept it (#76).
+pub fn place_of(window: &tauri::WebviewWindow) -> Option<(i32, i32)> {
+    place_of_title(&window.title().ok()?)
+}
+
+/// `place_of` without the window, for the store alone.
+fn place_of_title(title: &str) -> Option<(i32, i32)> {
+    let (x, y, _, _) = PLACES.get().and_then(|places| (places.load)(title))?;
+    Some((x, y))
 }
 
 /// The edge the overlay keeps on KDE Wayland, where the script keeps it. A
@@ -572,6 +636,27 @@ pub fn watch(on_change: impl Fn() + Send + Sync + 'static) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_place_kept_for_a_window_comes_back_from_the_store() {
+        // hide_in_place keeps where a Hyprland window was in the store KWin's
+        // script fills (#76), and the show after asks it back: the same store,
+        // so a window is placed alike on both.
+        static KEPT: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Rect>>> = OnceLock::new();
+        let kept = KEPT.get_or_init(Default::default);
+        if PLACES.get().is_none() {
+            let _ = PLACES.set(Places {
+                save: Box::new(|title, rect| {
+                    kept.lock().unwrap_or_else(|p| p.into_inner()).insert(title.to_string(), rect);
+                }),
+                load: Box::new(|title| kept.lock().unwrap_or_else(|p| p.into_inner()).get(title).copied()),
+            });
+        }
+        save_place_at("A2Tools DPS Meter", (400, 300, 398, 55));
+        assert_eq!(place_of_title("A2Tools DPS Meter"), Some((400, 300)));
+        // A window the store never heard of is left where the compositor put it.
+        assert_eq!(place_of_title("Settings"), None);
+    }
 
     #[test]
     fn spectacle_is_known_by_its_class() {

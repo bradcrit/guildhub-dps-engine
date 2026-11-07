@@ -301,7 +301,7 @@
     "sort": "Sortieren",
     "sortNewest": "Neueste",
     "sortFastest": "Schnellster Sieg",
-    "sortPartyDps": "Gruppen-DPS",
+    "sortTotalDps": "Gesamt-DPS",
     "sortMyDps": "Dein DPS",
     "sortRecent": "Neueste",
     "sortTier": "Verliesstufe",
@@ -310,6 +310,7 @@
     "pb": "PB",
     "pbTip": "Einer deiner Bestwerte",
     "party": "Gruppe",
+    "allPlayers": "Alle Spieler",
     "you": "Du",
     "totalDamage": "Gesamtschaden",
     "finalBoss": "Endboss",
@@ -385,6 +386,7 @@
     "showDpsSuffix": "/s an DPS anhängen",
     "autoHideMeter": "Ausblenden, wenn AION2 nicht im Vordergrund ist",
     "hideWhenGameClosed": "Ausblenden, wenn AION2 geschlossen ist",
+    "closeWithGame": "Meter mit AION2 schließen",
     "hideWhenSolo": "Nur in einer Gruppe anzeigen",
     "hideOutOfCombat": {
       "label": "Außerhalb des Kampfes ausblenden",
@@ -595,6 +597,12 @@
         "highestDamage": "Höchster Schaden"
       }
     },
+    "trainTimeLimit": {
+      "label": "Trainingszeitlimit",
+      "options": {
+        "off": "Kein Limit"
+      }
+    },
     "showSupporterColors": "Unterstützerfarben anzeigen",
     "showSupporterColorsHint": "Namen von Unterstützern erscheinen golden. Rein kosmetisch — es ändert keine Zahl.",
     "account": {
@@ -656,6 +664,7 @@
       "barTexture": "Ein Muster auf den Balken des Meters. Ein Dankeschön für die Unterstützung von A2 Tools.",
       "textureOffset": "Jeder Balken beginnt seine Textur an einer anderen Stelle, damit nicht alle gleich aussehen.",
       "trainingMode": "Im Trainingsmodus: welche Puppen das Detailfenster zeigt – alle zusammen oder nur die, die du am stärksten triffst.",
+      "trainTimeLimit": "Im Trainingsmodus zählen Treffer auf Trainingspuppen so lange nach deinem ersten. Danach hält das Meter an, bis du auf Aktualisieren drückst, was die Zeit neu startet.",
       "allTargetsWindow": "Im Modus „Alle Ziele“ zählt das Meter alle Ziele, die innerhalb dieser Zeit vor dem letzten Treffer getroffen wurden.",
       "updateRate": "Wie oft sich die Zahlen des Meters aktualisieren. Schneller zeigt Treffer früher, braucht aber mehr CPU.",
       "partyPresence": "Gruppenmitglieder, die auch A2Tools nutzen, sehen ein kleines A2 neben deinem Namen und du ihres. Jeder in deiner Gruppe mit A2Tools sieht es und weiß damit, dass du ein Drittanbieter-Meter nutzt. Gesendet werden nur Hashes von Charakternamen und Servern.",
@@ -666,6 +675,7 @@
       "showMeter": "Aus: Nur deine Plugins sind zu sehen. Das Meter liest im Hintergrund weiter Kämpfe mit und lädt hoch. Zurückholen kannst du es hier, mit dem Ein-/Ausblenden-Hotkey oder mit dem Meter-Knopf an einem Plugin-Fenster.",
       "clearOnZone": "Wann der letzte Kampf nach einem Zonenwechsel aus dem Meter verschwindet. Jeder Kampf bleibt so oder so im Verlauf.",
       "hideWhenGameClosed": "Das Meter wird ausgeblendet, solange das Spiel nicht läuft, und erscheint wieder, wenn es startet.",
+      "closeWithGame": "Das Meter schließt sich etwa 10 Sekunden nach AION2 selbst. Vor dem Spiel gestartet, wartet es auf das Spiel.",
       "hideWhenSolo": "Das Meter wird ausgeblendet, solange du in keiner Gruppe bist, und erscheint wieder, wenn du einer beitrittst. Die Tastenkombination zum Ein-/Ausblenden holt es trotzdem hervor.",
       "hideOutOfCombat": "Das Meter wird ausgeblendet, wenn du so lange nicht im Kampf warst, und erscheint mit dem nächsten Treffer wieder. Solange Einstellungen, Verlauf oder Details offen sind oder die Maus darüber ist, bleibt es sichtbar.",
       "runAsAdmin": "Nötig, um die Bildrate des Spiels anzuzeigen. Windows fragt bei jedem Start des Meters nach.",
@@ -740,6 +750,7 @@
       "permsTitle": "Es darf:",
       "permFps": "Die Bildrate des Spiels anzeigen (unter Windows bittet das Meter dafür, als Administrator zu laufen)",
       "permDeathRecap": "Nachdem dich ein Spieler getötet hat: wer es war und welchen Schaden er dir zugefügt hat",
+      "permLootRolls": "Würfel-Beute sehen: den Gegenstand, wer was gewürfelt hat und wer ihn bekommen hat",
       "permScreenshot": "Bildschirmfotos des eigenen Fensters machen, in die Zwischenablage und deinen Screenshot-Ordner",
       "testHint": "Frühe Versionen zum Ausprobieren für alle, signiert wie die anderen. Sie können sich noch ändern oder Ecken und Kanten haben: Sag uns, was dir auffällt.",
       "testTitle": "Test-Plugins",
@@ -836,6 +847,10 @@
     "all": "Alle Ziele",
     "identifying": "Identifiziere dich...",
     "train": "Trainingspuppe",
+    "trainLimitReached": "Zeitlimit erreicht",
+    "timed": "Zeitlimit: {time}",
+    "timedSeconds": "{n} Sek.",
+    "timedMinutes": "{n} Min.",
     "boss": "Boss-Ziele"
   },
   "classes": {
@@ -971,6 +986,7 @@
     "ttk": "Geschätzte Kill-Zeit",
     "partyTotal": "Gruppensumme",
     "odyle": "Odyle-Energie",
-    "ping": "Ping"
+    "ping": "Ping",
+    "jitter": "Jitter: {ms} ms"
   }
 }

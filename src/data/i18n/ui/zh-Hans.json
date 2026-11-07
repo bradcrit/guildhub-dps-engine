@@ -306,7 +306,7 @@
     "sort": "排序",
     "sortNewest": "最新",
     "sortFastest": "最快击杀",
-    "sortPartyDps": "队伍 DPS",
+    "sortTotalDps": "总 DPS",
     "sortMyDps": "你的 DPS",
     "sortRecent": "最新",
     "sortTier": "副本阶级",
@@ -315,6 +315,7 @@
     "pb": "最佳",
     "pbTip": "你的个人最佳之一",
     "party": "队伍",
+    "allPlayers": "所有玩家",
     "you": "你",
     "totalDamage": "总伤害",
     "finalBoss": "最终首领",
@@ -385,6 +386,7 @@
     "showDpsSuffix": "DPS 后显示 /s",
     "autoHideMeter": "AION2 不在前台时隐藏",
     "hideWhenGameClosed": "AION2 关闭时隐藏",
+    "closeWithGame": "AION2 关闭时一并关闭计量器",
     "hideWhenSolo": "仅在队伍中显示",
     "hideOutOfCombat": {
       "label": "脱离战斗时隐藏",
@@ -595,6 +597,12 @@
         "highestDamage": "最高伤害"
       }
     },
+    "trainTimeLimit": {
+      "label": "训练时间限制",
+      "options": {
+        "off": "不限制"
+      }
+    },
     "showSupporterColors": "显示赞助者颜色",
     "showSupporterColorsHint": "赞助者的名字显示为金色。仅为外观，不会改变任何数值。",
     "account": {
@@ -656,6 +664,7 @@
       "barTexture": "为计量条加上纹理，感谢您对 A2 Tools 的支持。",
       "textureOffset": "每条的纹理从不同位置开始，让各条看起来不一样。",
       "trainingMode": "训练模式下详情窗口显示哪些木桩：全部一起，或只显示你打得最多的那个。",
+      "trainTimeLimit": "训练模式下，只记录你第一次攻击后这段时间内对训练假人的攻击。之后计量器会停止，直到按下刷新，时间才会重新开始。",
       "allTargetsWindow": "全部目标模式下，计量器汇总最后一次命中前这段时间内命中的所有目标。",
       "updateRate": "统计数字多久刷新一次。越快越早显示伤害，但占用更多 CPU。",
       "partyPresence": "同样使用 A2Tools 的队友会在你的名字旁看到小小的 A2 标记，你也会看到他们的。队伍中任何使用 A2Tools 的人都看得到，因此会知道你使用第三方计量器。只会发送角色名称与服务器的哈希值。",
@@ -666,6 +675,7 @@
       "showMeter": "关闭：只显示插件。统计仍在后台记录战斗并上传。可在此处、用显示/隐藏快捷键，或插件窗口上的统计按钮重新显示。",
       "clearOnZone": "切换区域后，何时从统计中清除上一场战斗。所有战斗都会保留在历史记录中。",
       "hideWhenGameClosed": "游戏未运行时隐藏计量器，游戏启动后再次显示。",
+      "closeWithGame": "AION2 关闭约 10 秒后，计量器会自动关闭。若比游戏先启动，会等待游戏开启。",
       "hideWhenSolo": "不在队伍中时隐藏计量器，加入队伍后再次显示。显示/隐藏快捷键仍可随时打开它。",
       "hideOutOfCombat": "脱离战斗达到该时长后隐藏计量器，下一次命中时再次显示。设置、历史记录或详情窗口打开时，或鼠标停在计量器上时不会隐藏。",
       "runAsAdmin": "显示游戏帧率需要此项。每次启动计量器时 Windows 都会询问。",
@@ -740,6 +750,7 @@
       "permsTitle": "可以:",
       "permFps": "显示游戏帧率（在 Windows 上，计量器会为此请求以管理员身份运行）",
       "permDeathRecap": "被玩家击杀后：对方是谁，以及对你造成的伤害",
+      "permLootRolls": "查看掷骰分配的战利品：物品、谁掷出多少点，以及谁获得了它",
       "permScreenshot": "截取自身窗口的截图，到剪贴板和你的截图文件夹",
       "testHint": "任何人都可以试用的早期版本，和其他插件一样经过签名。它们可能会变化或还不完善：发现问题请告诉我们。",
       "testTitle": "测试插件",
@@ -836,6 +847,10 @@
     "all": "所有目标",
     "identifying": "正在识别你...",
     "train": "训练用稻草人",
+    "trainLimitReached": "已达时间限制",
+    "timed": "限时：{time}",
+    "timedSeconds": "{n}秒",
+    "timedMinutes": "{n}分钟",
     "boss": "首领目标"
   },
   "classes": {
@@ -971,6 +986,7 @@
     "ttk": "预计击杀时间",
     "partyTotal": "队伍总计",
     "odyle": "奥德能量",
-    "ping": "延迟"
+    "ping": "延迟",
+    "jitter": "抖动：{ms} 毫秒"
   }
 }

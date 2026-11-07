@@ -52,15 +52,51 @@ pub fn bring_forward(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Do not finish a delayed Open over an application the user switched to.
+pub fn user_focus_unchanged(before: Option<isize>) -> bool {
+    before.is_some() && before == front_window()
+}
+
+/// An explicit configuration Open may take focus if the same window is
+/// still in front. Do not use tao's set_focus here: its failed foreground
+/// request falls back to synthesizing Alt, which can reach the game.
+pub fn activate_from_user(window: &tauri::WebviewWindow, before: Option<isize>) {
+    let Some(hwnd) = hwnd_of(window) else { return };
+    unsafe {
+        if user_focus_unchanged(before) && IsWindowVisible(hwnd).as_bool()
+            && !IsIconic(hwnd).as_bool()
+        {
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+}
+
 /// Bring the overlay back on top without taking focus from the game.
 pub fn show_on_top_without_focus(window: &tauri::WebviewWindow) {
     let Some(hwnd) = hwnd_of(window) else { return };
     unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // A focus-hidden tool may be maximized or snapped. Keep that size;
+        // only a minimized window needs its normal placement restored.
+        let shown = if IsIconic(hwnd).as_bool() { SW_SHOWNOACTIVATE } else { SW_SHOWNA };
+        let _ = ShowWindow(hwnd, shown);
         let _ = SetWindowPos(
             hwnd, Some(HWND_TOPMOST),
             0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+/// Turn a window's always-on-top on or off without showing it: tao's
+/// `set_always_on_top` puts back the visible style it remembers, so a dock
+/// hidden natively came back on the next switch (talyaseen, #166).
+pub fn set_on_top_without_showing(window: &tauri::WebviewWindow, on_top: bool) {
+    let Some(hwnd) = hwnd_of(window) else { return };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd, Some(if on_top { HWND_TOPMOST } else { HWND_NOTOPMOST }),
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 }

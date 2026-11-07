@@ -77,6 +77,9 @@ pub struct StreamProcessor {
     pending_compact_skill_context: Option<PendingCompactSkillContext>,
     /// When set, override the timestamp on all created packets (for replay mode).
     override_timestamp: Option<i64>,
+    /// The game's bytes out of a tunnel's envelope, for a connection that has
+    /// one (`capture::tunnel`).
+    tunnel: super::tunnel::Unwrapper,
 }
 
 /// The `42 36` flag of an entity leaving the world, a spirit unsummoned among
@@ -95,6 +98,7 @@ impl StreamProcessor {
             dot_damage_skill_ids: HashSet::new(), // loaded lazily
             pending_compact_skill_context: None,
             override_timestamp: None,
+            tunnel: Default::default(),
         }
     }
 
@@ -120,6 +124,18 @@ impl StreamProcessor {
     /// Parse as many complete packets as possible from the buffer.
     /// Returns the number of bytes consumed.
     pub fn consume_stream(&mut self, buffer: &[u8]) -> usize {
+        // A tunnelled connection: the game's bytes are framed out of its
+        // envelope, and the envelope bytes it used are what is consumed.
+        if let Some(used) = self.tunnel.feed(buffer) {
+            let game = self.tunnel.game().to_vec();
+            let framed = self.consume_game(&game);
+            self.tunnel.consumed(framed);
+            return used;
+        }
+        self.consume_game(buffer)
+    }
+
+    fn consume_game(&mut self, buffer: &[u8]) -> usize {
         // Framing lives in `capture::framing` so the Evidence Slice builder can
         // split a capture the same way this does. See that module.
         let framing = super::framing::walk(buffer);
@@ -335,6 +351,10 @@ impl StreamProcessor {
         // Who holds the Abyss artifacts (with the Abyss map, and on entry).
         if let Some(state) = crate::capture::abyss_artifacts::parse(packet) {
             self.data_storage.note_abyss_artifacts(state);
+        }
+        // Dice Roll loot: an item rolled for, each roll, and who won it.
+        if let Some(roll) = crate::capture::loot_rolls::parse(packet) {
+            self.data_storage.note_loot_roll(roll);
         }
         // The Supply Requests boards (at login), for Profiteer.
         if let Some(boards) = crate::capture::supply_requests::parse(packet) {
@@ -595,7 +615,7 @@ impl StreamProcessor {
         }
     }
 
-    // ===== KINAH TODAY AND ABYSS POINTS (A5 FF, A6 FF, A9 FF) =====
+    // ===== KINAH TODAY AND ABYSS POINTS (A5 FF, A6 FF, A9 FF, AB FF) =====
 
     /// The Kinah gained today and the week's Abyss Points, for plugins. At a
     /// login or transfer the Abyss Points come just before the list and
@@ -626,6 +646,18 @@ impl StreamProcessor {
             // Abyss Points this week and the week's limit: `<points u64>
             // <limit u64>`.
             Some([0xA9, 0xFF]) if body.len() == 16 => {
+                let points = u64::from_le_bytes(body[..8].try_into().unwrap());
+                let limit = u64::from_le_bytes(body[8..].try_into().unwrap());
+                if (1..=1_000_000_000).contains(&limit) && points <= limit {
+                    let now = self.override_timestamp.unwrap_or_else(crate::clock::now_ms);
+                    self.data_storage.set_abyss_points(points, limit, now);
+                }
+            }
+            // Since the game's 2026-10-29 build the Abyss Points come as `ab`,
+            // not `a9` (its `a9` is two bytes now): the same `<points u64>
+            // <limit u64>`, at a login and with every gain (132456 of
+            // 2500000, then 133369 for the 913 the game said, 2026-11-02).
+            Some([0xAB, 0xFF]) if body.len() == 16 => {
                 let points = u64::from_le_bytes(body[..8].try_into().unwrap());
                 let limit = u64::from_le_bytes(body[8..].try_into().unwrap());
                 if (1..=1_000_000_000).contains(&limit) && points <= limit {
@@ -1926,6 +1958,7 @@ impl StreamProcessor {
             if !(1..=299_999_999).contains(&exact_skill_code) {
                 break;
             }
+            exact_skill_code = i64::from(hit_skill_id(exact_skill_code as i32));
 
             // A 7-digit skill is an NPC's: a monster hitting a player. Its
             // damage is what the player took (DataStorage::append_damage); it
@@ -2335,7 +2368,7 @@ impl StreamProcessor {
             if self.is_known_skill_code(candidate) {
                 return Some(PendingCompactSkillContext {
                     actor_id: actor_info.value,
-                    skill_raw: self.normalize_skill_id(candidate),
+                    skill_raw: self.normalize_skill_id(hit_skill_id(candidate)),
                 });
             }
         }
@@ -2372,6 +2405,53 @@ impl StreamProcessor {
 }
 
 // ===== FREE FUNCTIONS =====
+
+/// Hit records filed under one skill's id that another skill dealt. A
+/// Cleric's Judgment Thunder at level 16 has the Specialty "Activates Divine
+/// Punishment 1 extra time": that extra Divine Punishment comes as a
+/// Judgment Thunder record ending in 7 (17040257 with Specialties 2 and 5),
+/// about 50 ms after the first Divine Punishment (17050250), while
+/// Judgment Thunder's own hits end in 0 (17040250). On a Training Scarecrow
+/// the game's Combat Analysis shows 33 Judgment Thunder hits for 214,718 and
+/// 66 Divine Punishment hits for 474,534; the records carry 66 under
+/// 1704xxxx (33 ending in 0, 33 in 7) and 33 under 1705xxxx for 237,200, and
+/// 237,200 + the 7s = 474,534. At level 15 there are no 7s and the two
+/// match the game as they are (#175).
+const EXTRA_HITS: [ExtraHit; 1] = [ExtraHit {
+    family: JUDGMENT_THUNDER,
+    last_digit: 7,
+    dealt_by: DIVINE_PUNISHMENT,
+}];
+
+const JUDGMENT_THUNDER: i32 = 17_040_000;
+const DIVINE_PUNISHMENT: i32 = 17_050_000;
+
+/// A record of `family` ending in `last_digit` is a hit of `dealt_by`.
+struct ExtraHit {
+    family: i32,
+    last_digit: i32,
+    dealt_by: i32,
+}
+
+/// A skill id in a hit record is the skill's family (17040000, Judgment
+/// Thunder) plus four digits: the Specialties picked, then one digit for
+/// which of the skill's records it is (17040250: Specialties 2 and 5, the
+/// skill's own hit). `SKILL_FAMILY` steps from one family to the next,
+/// `RECORD_DIGIT` is the last digit's place.
+const SKILL_FAMILY: i32 = 10_000;
+const RECORD_DIGIT: i32 = 10;
+
+/// A hit record's skill id as the skill that dealt it: the record's own,
+/// except for an `EXTRA_HITS` record, which takes its skill's family with
+/// the record's Specialty digits (17040257 is 17050250).
+fn hit_skill_id(raw: i32) -> i32 {
+    let family = raw - raw % SKILL_FAMILY;
+    let last_digit = raw % RECORD_DIGIT;
+    EXTRA_HITS
+        .iter()
+        .find(|extra| extra.family == family && extra.last_digit == last_digit)
+        .map_or(raw, |extra| extra.dealt_by + raw % SKILL_FAMILY - last_digit)
+}
 
 /// The skill code a hit record's code is shown under: its family's
 /// (12090243, Punishment, is 12090000) unless the table names it apart.
@@ -5140,6 +5220,25 @@ mod tests {
         assert!(list.shop_limits.is_empty() && list.crafts.is_empty());
     }
 
+    /// The Abyss Points as the game sends them since 2026-10-29: `ab`, at a
+    /// login and with each gain (2026-11-02, Nullception: 132456, then
+    /// 133369 for the 913 the game said).
+    #[test]
+    fn abyss_points_from_the_ab_record() {
+        let (storage, mut p) = processor();
+        let now = 1_793_000_000_000;
+        p.set_override_timestamp(Some(now));
+        storage.set_local_identity_from_game(1030, Some("Main".into()));
+        p.parse_perfect_packet(&hex("13abff6805020000000000a025260000000000"));
+        storage.set_local_identity_from_game(1030, Some("Main".into()));
+        assert_eq!(storage.abyss_points_at(now), Some((132_456, 2_500_000)));
+        // A gain: no self record follows, so it counts after the hold.
+        p.set_override_timestamp(Some(now + 5_000));
+        p.parse_perfect_packet(&hex("13abfff908020000000000a025260000000000"));
+        assert_eq!(storage.abyss_points_at(now + 5_000), Some((132_456, 2_500_000)));
+        assert_eq!(storage.abyss_points_at(now + 8_000), Some((133_369, 2_500_000)));
+    }
+
     /// Kinah gained today at a login, then a pickup; the week's Abyss Points
     /// and limit (2026-10-25, Nullception). A login's wait for the self
     /// record; a reset since gives 0.
@@ -5450,6 +5549,21 @@ mod tests {
         let mut names: Vec<_> = storage.get_party_members().into_keys().collect();
         names.sort();
         assert_eq!(names, ["Bradcrit", "xlWinnie"]);
+    }
+
+    /// Judgment Thunder's extra Divine Punishment (a record ending in 7)
+    /// goes to Divine Punishment, Specialty digits kept; Judgment Thunder's
+    /// own hits, Divine Punishment's and every other skill keep their ids
+    /// (#175).
+    #[test]
+    fn judgment_thunders_extra_divine_punishment_is_divine_punishment() {
+        assert_eq!(hit_skill_id(17_040_257), 17_050_250);
+        assert_eq!(hit_skill_id(17_040_007), 17_050_000);
+        assert_eq!(hit_skill_id(17_040_250), 17_040_250, "Judgment Thunder");
+        assert_eq!(hit_skill_id(17_050_250), 17_050_250, "Divine Punishment");
+        assert_eq!(hit_skill_id(17_350_247), 17_350_247, "Condemnation");
+        assert_eq!(hit_skill_id(12_090_243), 12_090_243, "Punishment");
+        assert_eq!(hit_skill_id(30_000_007), 30_000_007);
     }
 
     fn skill_of(storage: &DataStorage, target: i32, actor: i32, skill: i32) -> SkillCombatData {
