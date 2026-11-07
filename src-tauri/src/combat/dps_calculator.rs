@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::combat::data_storage::{DataStorage, PartyMember, TargetCombatData};
+use crate::combat::data_storage::{DataStorage, PartyMember, TargetCombatData, OPEN_WORLD_BOSS_IDLE_MS};
 use crate::combat::ping_tracker::PingTracker;
 use crate::entity::details_context::*;
 use crate::entity::dps_data::DpsData;
@@ -102,6 +102,11 @@ pub struct DpsCalculator {
     /// `DataStorage::party_placeholders_wanted` at the last computed snapshot:
     /// the party rows go when it turns false, ten minutes after the roster.
     last_party_rows: bool,
+    /// When the boss Boss mode shows goes from it (clock ms): outside a
+    /// dungeon, `OPEN_WORLD_BOSS_IDLE_MS` after its last hit. `i64::MAX`
+    /// when nothing shown times out. The snapshot is computed again then,
+    /// with no new damage to ask for it.
+    boss_shown_until: i64,
     /// The open-world boss being fought (entity, first hit of this fight) and
     /// its HP when this meter first saw the fight, the start of what Others
     /// counts (`world_boss_rows`).
@@ -135,6 +140,7 @@ impl DpsCalculator {
             last_damage_gen: -1,
             last_names_gen: 0,
             last_party_rows: false,
+            boss_shown_until: i64::MAX,
             world_boss_start: None,
             target_selection_mode: TargetSelectionMode::BossTargets,
             last_known_local_id: None,
@@ -186,6 +192,7 @@ impl DpsCalculator {
         self.last_dps_snapshot = None;
         self.saved_boss_targets.clear();
         self.last_damage_gen = -1;
+        self.boss_shown_until = i64::MAX;
         if clear_damage {
             self.data_storage.flush();
         }
@@ -223,6 +230,7 @@ impl DpsCalculator {
         if current_gen == self.last_damage_gen
             && names_gen == self.last_names_gen
             && party_rows == self.last_party_rows
+            && crate::clock::now_ms() < self.boss_shown_until
             && self.last_dps_snapshot.is_some()
         {
             let mut snap = self.last_dps_snapshot.as_ref().unwrap().clone();
@@ -242,6 +250,25 @@ impl DpsCalculator {
         let mut dps_data = DpsData::new();
         dps_data.local_player_id = current_local_id;
         dps_data.dungeon_id = self.data_storage.current_dungeon_id();
+
+        // The last hit on a boss of ours: in the open world the party rows
+        // stay that long after it (`party_placeholders_wanted`).
+        let mob_data = self.data_storage.get_mob_data();
+        let boss_ids: Vec<i32> = combat_data.keys()
+            .filter(|tid| mob_data.get(tid).is_some_and(|&code| self.npc_lookup.is_boss(code)))
+            .copied()
+            .collect();
+        if !boss_ids.is_empty() {
+            let us = self.our_side();
+            let last_boss_hit = boss_ids.iter()
+                .filter_map(|tid| combat_data.get(tid))
+                .filter(|td| self.fight_is_ours(td, &us, false))
+                .map(|td| td.last_damage_time)
+                .max();
+            if let Some(at) = last_boss_hit {
+                self.data_storage.note_boss_hit(at);
+            }
+        }
 
         // Decide target
         let (target_ids, target_name, tracking_id) = self.decide_target(&combat_data, &summon_data);
@@ -864,6 +891,7 @@ impl DpsCalculator {
         summon_data: &HashMap<i32, i32>,
     ) -> (HashSet<i32>, String, i32) {
         let mob_data = self.data_storage.get_mob_data();
+        self.boss_shown_until = i64::MAX;
 
         match self.target_selection_mode {
             TargetSelectionMode::MostDamage => {
@@ -895,10 +923,17 @@ impl DpsCalculator {
                 // others fought out of your sight took the meter for hours
                 // after, a row of `#id`s for players never spawned near you
                 // (2026-10-08, Centurion Demiros).
+                //
+                // Outside a dungeon a boss goes `OPEN_WORLD_BOSS_IDLE_MS`
+                // after its last hit: nothing else clears it there while you
+                // farm mobs in the same zone (2026-11-07).
                 let us = self.our_side();
+                let open_world = self.data_storage.current_dungeon_id() == 0;
+                let now = crate::clock::now_ms();
                 let boss_targets: Vec<_> = combat_data.iter()
                     .filter(|&(&tid, td)| {
                         mob_data.get(&tid).is_some_and(|&mob_code| self.npc_lookup.is_boss(mob_code))
+                            && (!open_world || now - td.last_damage_time < OPEN_WORLD_BOSS_IDLE_MS)
                             && self.fight_is_ours(td, &us, false)
                     })
                     .map(|(&tid, _)| tid)
@@ -907,6 +942,10 @@ impl DpsCalculator {
                 if let Some(&best) = boss_targets.iter()
                     .max_by_key(|&&tid| combat_data.get(&tid).map(|td| td.last_damage_time).unwrap_or(0))
                 {
+                    if open_world {
+                        let last_hit = combat_data.get(&best).map(|td| td.last_damage_time).unwrap_or(now);
+                        self.boss_shown_until = last_hit.saturating_add(OPEN_WORLD_BOSS_IDLE_MS);
+                    }
                     let name = self.resolve_target_name(best);
                     (HashSet::from([best]), name, best)
                 } else {
@@ -2060,6 +2099,20 @@ mod tests {
     use super::*;
     use crate::entity::damage_packet::ParsedDamagePacket;
 
+    /// The clock pinned near the hits these tests make (a few seconds after
+    /// 1970): in the open world Boss mode drops a boss five minutes after its
+    /// last hit, and the wall clock is decades past them. Undone on drop.
+    struct PinnedClock;
+    impl Drop for PinnedClock {
+        fn drop(&mut self) {
+            crate::clock::set_override(None);
+        }
+    }
+    fn pin_clock(ms: i64) -> PinnedClock {
+        crate::clock::set_override(Some(ms));
+        PinnedClock
+    }
+
     fn hit(actor: i32, target: i32, at: i64) -> ParsedDamagePacket {
         let mut p = ParsedDamagePacket::new();
         p.set_actor_id(actor);
@@ -2428,6 +2481,7 @@ mod tests {
     /// instance; open-world mobs one-shot after leaving).
     #[test]
     fn boss_mode_never_shows_a_trash_mob() {
+        let _clock = pin_clock(10_000);
         let open_world = Arc::new(DataStorage::new());
         open_world.set_local_player_id(Some(2259));
         open_world.append_damage(hit(2259, 50_000, 1_000));
@@ -2478,6 +2532,7 @@ mod tests {
     /// the boss it is yours, with everyone on it.
     #[test]
     fn boss_mode_shows_a_boss_only_once_you_or_your_party_hit_it() {
+        let _clock = pin_clock(10_000);
         let storage = Arc::new(DataStorage::new());
         storage.set_local_player_id(Some(7983));
         let mut calc = boss_meter(&storage);
@@ -2510,6 +2565,7 @@ mod tests {
     /// the boss lost since the meter first saw the fight, less those rows.
     #[test]
     fn a_world_boss_shows_others_from_the_hp_it_lost() {
+        let _clock = pin_clock(10_000);
         use crate::combat::data_storage::PartyMember;
         let storage = Arc::new(DataStorage::new());
         storage.set_local_player_id(Some(7983));
@@ -2596,7 +2652,26 @@ mod tests {
     }
 
     #[test]
+    fn boss_mode_drops_an_open_world_boss_five_minutes_after_its_last_hit() {
+        let clock = |ms| crate::clock::set_override(Some(ms));
+        let _clock = pin_clock(10_000);
+        let storage = Arc::new(DataStorage::new());
+        storage.set_local_player_id(Some(7983));
+        let mut calc = boss_meter(&storage);
+        storage.append_damage(hit(7983, 44_090, 2_000));
+        storage.append_damage(hit(7983, 44_090, 9_000));
+        assert_eq!(calc.get_dps().target_id, 44_090);
+        // Mobs only from here: the boss stays for five minutes...
+        clock(9_000 + 5 * 60 * 1000 - 1);
+        assert_eq!(calc.get_dps().target_id, 44_090);
+        // ...and goes then, with no new damage to recompute for.
+        clock(9_000 + 5 * 60 * 1000);
+        assert_eq!(calc.get_dps().target_id, 0);
+    }
+
+    #[test]
     fn boss_mode_shows_a_party_members_boss() {
+        let _clock = pin_clock(10_000);
         use crate::combat::data_storage::PartyMember;
         let storage = Arc::new(DataStorage::new());
         storage.set_local_player_id(Some(7983));

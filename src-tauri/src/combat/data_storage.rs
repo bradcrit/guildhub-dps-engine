@@ -42,6 +42,10 @@ const ZONE_RESET_DEBOUNCE_MS: i64 = 4_000;
 /// How long party members who have not fought stay on the meter after the
 /// last roster. See `DataStorage::party_placeholders_wanted`.
 const PARTY_PLACEHOLDER_MS: i64 = 10 * 60 * 1000;
+/// Outside a dungeon: how long a boss fight, and the party rows, stay on the
+/// meter after the last hit on a boss (or the last roster). Someone farming
+/// mobs after a field boss saw the boss party for two hours (2026-11-07).
+pub const OPEN_WORLD_BOSS_IDLE_MS: i64 = 5 * 60 * 1000;
 /// A "no longer in a party" record this soon after the party ended is about
 /// that same party. See `DataStorage::note_party_left`.
 const PARTY_LEFT_AFTER_END_MS: i64 = 10 * 1000;
@@ -790,6 +794,8 @@ struct Inner {
     /// The party's places, from its last roster (`note_party_size`).
     party_size: Option<usize>,
     party_placeholders_hidden: bool,
+    /// The last hit on a boss of ours (`note_boss_hit`), clock ms.
+    last_boss_hit_ms: i64,
     /// The party key of the last roster that had you in it; `None` outside a
     /// party. See `is_other_party`.
     own_party_key: Option<u32>,
@@ -1077,6 +1083,7 @@ impl DataStorage {
                 self_in_roster: false,
                 damage_since_roster_bind: 0,
                 party_placeholders_hidden: false,
+                last_boss_hit_ms: NEVER_MS,
                 current_dungeon_id: 0,
                 roster_dungeon_id: 0,
                 current_map_id: None,
@@ -3518,10 +3525,25 @@ impl DataStorage {
     /// resets). These rows are for the start of a run: they show for
     /// `PARTY_PLACEHOLDER_MS` after the last roster, and a manual reset clears
     /// them until the next one. Members who fight are shown regardless.
+    /// Outside a dungeon they go `OPEN_WORLD_BOSS_IDLE_MS` after the last
+    /// roster or the last hit on a boss, whichever came later.
     pub fn party_placeholders_wanted(&self) -> bool {
         let inner = self.inner.read();
-        !inner.party_placeholders_hidden
-            && now_ms() - inner.party_roster_at_ms < PARTY_PLACEHOLDER_MS
+        let now = now_ms();
+        if inner.party_placeholders_hidden || now - inner.party_roster_at_ms >= PARTY_PLACEHOLDER_MS {
+            return false;
+        }
+        inner.current_dungeon_id > 0
+            || now - inner.party_roster_at_ms.max(inner.last_boss_hit_ms) < OPEN_WORLD_BOSS_IDLE_MS
+    }
+
+    /// A boss of ours was last hit at `at_ms` (clock ms): the party rows stay
+    /// in the open world (see `party_placeholders_wanted`).
+    pub fn note_boss_hit(&self, at_ms: i64) {
+        let mut inner = self.inner.write();
+        if at_ms > inner.last_boss_hit_ms {
+            inner.last_boss_hit_ms = at_ms;
+        }
     }
 
     /// The player reset the meter: stop showing party members who have not
@@ -4976,6 +4998,24 @@ mod tests {
         s.inner.write().party_roster_at_ms -= 15 * 60 * 1000;
         assert!(!s.party_placeholders_wanted());
         assert_eq!(s.get_party_members().len(), 2, "the roster itself is kept, for combat power");
+    }
+
+    #[test]
+    fn outside_a_dungeon_the_party_goes_five_minutes_after_the_last_boss_hit() {
+        let s = DataStorage::new();
+        let party = || vec![("Prenses".into(), member(2)), ("adam".into(), member(3))];
+        s.set_party_roster(party(), true);
+        // Six minutes on, in the open world, no boss since: gone.
+        s.inner.write().party_roster_at_ms -= 6 * 60 * 1000;
+        assert!(!s.party_placeholders_wanted());
+        // A boss hit a minute ago keeps them.
+        s.note_boss_hit(now_ms() - 60 * 1000);
+        assert!(s.party_placeholders_wanted());
+        s.inner.write().last_boss_hit_ms -= 5 * 60 * 1000;
+        assert!(!s.party_placeholders_wanted());
+        // In a dungeon the ten minutes after the roster hold.
+        s.inner.write().current_dungeon_id = 600_000;
+        assert!(s.party_placeholders_wanted());
     }
 
     /// A meter started mid-game: the fights go under the server learnt for

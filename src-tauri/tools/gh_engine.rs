@@ -155,7 +155,10 @@
 //! on them (`{"abnormal","name","icon","endsAt","totalMs","stacks",
 //! "cleansable"}`, as `skills`' buffs), the ones a party member can take off
 //! first — `cleansable` learnt from other players' skills taking them off
-//! (`<data-dir>/cleansable.json`).
+//! (`<data-dir>/cleansable.json`). `listed`: whether the meter lists the
+//! party before a fight — false after ↻ until the next roster, ten minutes
+//! after the last roster, and outside a dungeon five minutes after the last
+//! roster or the last hit on a boss.
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -697,7 +700,9 @@ impl Engine {
                 })
             })
             .collect();
-        serde_json::json!({ "members": members }).to_string()
+        // `listed`: whether the meter lists the party before a fight (see
+        // `party_placeholders_wanted`) — the members stay here either way.
+        serde_json::json!({ "members": members, "listed": self.storage.party_placeholders_wanted() }).to_string()
     }
 
     fn save(&self, records: Vec<FightRecord>) {
@@ -844,6 +849,10 @@ impl Engine {
         self.save_all_fights();
         self.calculator.lock().restart_target_selection(true);
         self.storage.forget_guessed_nicknames();
+        // Upstream's reset does this too: the party who have not fought go
+        // until the next roster. Left out, ↻ changed nothing on an empty
+        // meter that listed a party (2026-11-07).
+        self.storage.hide_party_placeholders();
     }
 
     /// Who you are playing, as far as the game has said, and your Odyle
