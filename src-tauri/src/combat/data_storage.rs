@@ -591,6 +591,43 @@ const SIGHT_STALE: f32 = 30_000.0;
 /// distances are kept with the mobs', under the negated object code
 /// (`object_sight_key`), up to this far (cm).
 const OBJECT_SIGHT_MAX_RADIUS: f32 = 25_000.0;
+/// The other players in sight leave it (`47 36`) at a distance kept under
+/// this key, as a mob's under its code.
+const PLAYER_SIGHT_KEY: i32 = -2_000_000_000;
+/// An object coming into range (`34 36`) is this far from you, by its code
+/// — kept under `object_enter_key`. Not right after a map load (everything
+/// in range comes at once then, ENTER_AFTER_LOAD_MS) nor one that just came
+/// to be (a fresh cube, `created`).
+const ENTER_AFTER_LOAD_MS: i64 = 5_000;
+/// Your spot from everything at once (`region_estimate`): each object, mob and
+/// player in range says you are within its code's distance of it (the
+/// largest kept, p90, plus REGION_SLACK cm); each that left or came in the
+/// last REGION_EVENT_MS says you were on its ring then, widened by running
+/// since (RUN_CM_PER_MS); the spot told last says you are within
+/// TOLD_CM + MAX_CM_PER_MS a ms of it. The spot is the middle of where the
+/// fewest of these are broken, the accuracy how far that area reaches.
+/// Reads only codes with REGION_MIN_LEARNT distances, and at least
+/// REGION_MIN_CHECKS of them; gives up when more than a quarter disagree.
+const REGION_SLACK: f32 = 800.0;
+const REGION_EVENT_MS: i64 = 10_000;
+const REGION_EVENTS_KEPT: usize = 64;
+const REGION_MIN_LEARNT: usize = 3;
+const REGION_MIN_CHECKS: usize = 2;
+/// The grid the area is looked for on: this many cells a side at most, none under 1 m.
+const REGION_CELLS: f32 = 48.0;
+const REGION_MIN_STEP: f32 = 100.0;
+/// Its accuracy is never under this (cm), and grows by REGION_BROKEN_CM for
+/// each check the area breaks (2026-11-07 22:33: ±5 m said, 32 m off, with one broken).
+const REGION_MIN_CM: f32 = 1_000.0;
+const REGION_BROKEN_CM: f32 = 2_000.0;
+/// Running (~5 m/s, `capture::positions`), and a mount at its fastest (cm a ms).
+const RUN_CM_PER_MS: f32 = 0.5;
+const MAX_CM_PER_MS: f32 = 2.5;
+/// A spot the game told (or the object you gather at) is this exact (cm)…
+const TOLD_CM: f32 = 300.0;
+/// …a guess from one mob or object leaving sight (`note_left_sight`) about
+/// this (positions_scan: median 53 m off).
+const RING_GUESS_CM: f32 = 5_000.0;
 /// The passive HP regen everyone gets ("Restore HP"), not a heal anyone cast.
 const PASSIVE_REGEN_SKILL: i32 = 1_900_001;
 /// While it is fought and its HP holds, the same HP goes again this often:
@@ -611,6 +648,30 @@ pub struct HiddenCube {
     pub age_ms: Option<i64>,
     /// Someone is opening it: Some(true) you, Some(false) someone else.
     pub opening_by_you: Option<bool>,
+}
+
+/// Your spot as best known (`DataStorage::self_fix`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelfFix {
+    pub pos: Position,
+    /// How long ago the game told your spot (ms) — None: never, or longer
+    /// than asked for.
+    pub age_ms: Option<i64>,
+    /// Not the spot told: a guess (`note_left_sight`) or what's in range
+    /// (`region_estimate`).
+    pub guessed: bool,
+    /// How far off it may be (m): the spot told grows with its age, running.
+    pub accuracy_m: f32,
+}
+
+/// Something that left sight or came into range lately, for `region_estimate`.
+#[derive(Debug, Clone, Copy)]
+struct SightEvent {
+    /// Its distance's key in `sight_radii`: an NPC code, `object_sight_key`,
+    /// `object_enter_key` (came into range) or PLAYER_SIGHT_KEY.
+    key: i32,
+    pos: Position,
+    at: i64,
 }
 
 /// A Hidden Cube kept while in range.
@@ -644,13 +705,162 @@ fn push_boss_event(inner: &mut Inner, event: BossEvent) {
 
 /// See `DataStorage::self_estimate`.
 fn self_estimate(inner: &Inner, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
+    self_fix(inner, self_max_age_ms).map(|f| (f.pos, f.age_ms, f.guessed))
+}
+
+/// See `DataStorage::self_fix`: the spot told, the guess from the last
+/// one leaving sight, or what's in range — whichever is the most exact.
+fn self_fix(inner: &Inner, self_max_age_ms: i64) -> Option<SelfFix> {
     let now = now_ms();
-    let (me, age) = inner.self_position.map(|(pos, at)| (pos, now - at))?;
-    let told_age = (age <= self_max_age_ms).then_some(age);
-    // A guess moved on lately stays past the told spot's age: it follows you.
-    match inner.self_guess.filter(|(_, at)| now - at <= self_max_age_ms) {
-        Some((guess, _)) => Some((guess, told_age, true)),
-        None => told_age.map(|age| (me, Some(age), false)),
+    let told = inner.self_position.map(|(pos, at)| (pos, now - at));
+    let told_age = told.and_then(|(_, age)| (age <= self_max_age_ms).then_some(age));
+    let told_cm = told.map_or(f32::MAX, |(_, age)| TOLD_CM + age.max(0) as f32 * RUN_CM_PER_MS);
+    let mut best: Option<(Position, f32, bool)> = told.filter(|_| told_age.is_some()).map(|(pos, _)| (pos, told_cm, false));
+    // A guess moved on lately stays past the told spot's age: it follows you —
+    // once the spot told is older than its own accuracy (2026-11-07 22:33:
+    // 76 m off 4 s after a spot told).
+    if let Some((guess, _)) = inner.self_guess.filter(|(_, at)| now - at <= self_max_age_ms) {
+        if best.is_none_or(|(_, b, _)| RING_GUESS_CM < b) {
+            best = Some((guess, RING_GUESS_CM, true));
+        }
+    }
+    if let Some((pos, cm)) = region_estimate(inner, now) {
+        if best.is_none_or(|(_, b, _)| cm < b) {
+            best = Some((pos, cm, true));
+        }
+    }
+    best.map(|(pos, cm, guessed)| SelfFix { pos, age_ms: told_age, guessed, accuracy_m: cm / 100.0 })
+}
+
+/// The distances kept under `key` (cm): the smallest (p10) and the largest
+/// (p90) — None until REGION_MIN_LEARNT.
+fn sight_band(inner: &Inner, key: i32) -> Option<(f32, f32)> {
+    let kept = inner.sight_radii.get(&key).filter(|k| k.len() >= REGION_MIN_LEARNT)?;
+    let mut v: Vec<f32> = kept.iter().copied().collect();
+    v.sort_by(f32::total_cmp);
+    let at = |q: f32| v[((v.len() - 1) as f32 * q).round() as usize];
+    Some((at(0.1), at(0.9)))
+}
+
+/// Your spot from what's in range now and what came and went lately (see
+/// REGION_SLACK): the spot and how far off it may be (cm).
+fn region_estimate(inner: &Inner, now: i64) -> Option<(Position, f32)> {
+    // (spot, nearest cm, farthest cm)
+    let mut checks: Vec<(Position, f32, f32)> = Vec::new();
+    let within = |key: i32| sight_band(inner, key).map(|(_, far)| far + REGION_SLACK);
+    for &(code, pos) in inner.objects_in_range.values() {
+        if let Some(far) = within(object_sight_key(code)) {
+            checks.push((pos, 0.0, far));
+        }
+    }
+    for (id, &code) in &inner.mobs_in_sight {
+        if let (Some(&pos), Some(far)) = (inner.entity_positions.get(id), within(code)) {
+            checks.push((pos, 0.0, far));
+        }
+    }
+    if let Some(far) = within(PLAYER_SIGHT_KEY) {
+        checks.extend(inner.players_in_sight.iter().filter_map(|id| inner.entity_positions.get(id)).map(|&pos| (pos, 0.0, far)));
+    }
+    for e in inner.sight_events.iter().filter(|e| now - e.at <= REGION_EVENT_MS) {
+        if let Some((near, far)) = sight_band(inner, e.key) {
+            let drift = (now - e.at).max(0) as f32 * RUN_CM_PER_MS + REGION_SLACK;
+            checks.push((e.pos, (near - drift).max(0.0), far + drift));
+        }
+    }
+    if checks.len() < REGION_MIN_CHECKS {
+        return None;
+    }
+    let z = inner.self_position.map_or(checks[0].0.z, |(p, _)| p.z);
+    if let Some((told, at)) = inner.self_position {
+        checks.push((told, 0.0, TOLD_CM + (now - at).max(0) as f32 * MAX_CM_PER_MS));
+    }
+    // Where to look: inside the bounds that all but a fifth of the checks set.
+    let n = checks.len();
+    let skip = n / 5;
+    let bound = |mut v: Vec<f32>, low: bool| {
+        v.sort_by(f32::total_cmp);
+        if low { v[n - 1 - skip] } else { v[skip] }
+    };
+    let x0 = bound(checks.iter().map(|c| c.0.x - c.2).collect(), true);
+    let x1 = bound(checks.iter().map(|c| c.0.x + c.2).collect(), false);
+    let y0 = bound(checks.iter().map(|c| c.0.y - c.2).collect(), true);
+    let y1 = bound(checks.iter().map(|c| c.0.y + c.2).collect(), false);
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    let step = ((x1 - x0).max(y1 - y0) / REGION_CELLS).max(REGION_MIN_STEP);
+    let mut fewest = usize::MAX;
+    let mut cells: Vec<(f32, f32)> = Vec::new();
+    let mut y = y0 + step / 2.0;
+    while y < y1 {
+        let mut x = x0 + step / 2.0;
+        while x < x1 {
+            let broken = checks
+                .iter()
+                .filter(|(p, near, far)| {
+                    let d = ((p.x - x).powi(2) + (p.y - y).powi(2)).sqrt();
+                    d < *near || d > *far
+                })
+                .count();
+            if broken < fewest {
+                fewest = broken;
+                cells.clear();
+            }
+            if broken == fewest {
+                cells.push((x, y));
+            }
+            x += step;
+        }
+        y += step;
+    }
+    if cells.is_empty() || fewest * 4 > n {
+        return None;
+    }
+    let (sx, sy) = cells.iter().fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
+    let (cx, cy) = (sx / cells.len() as f32, sy / cells.len() as f32);
+    let reach = cells.iter().map(|(x, y)| ((x - cx).powi(2) + (y - cy).powi(2)).sqrt()).fold(0.0, f32::max);
+    // Never surer than the distances' slack; each check it breaks says it may be off by as much again.
+    let accuracy = (reach + step).max(REGION_MIN_CM) + fewest as f32 * REGION_BROKEN_CM;
+    Some((Position { x: cx, y: cy, z }, accuracy))
+}
+
+/// Something left sight or came into range: kept for `region_estimate`.
+fn push_sight_event(inner: &mut Inner, key: i32, pos: Position) {
+    let at = now_ms();
+    inner.sight_events.push_back(SightEvent { key, pos, at });
+    while inner.sight_events.len() > REGION_EVENTS_KEPT || inner.sight_events.front().is_some_and(|e| at - e.at > REGION_EVENT_MS) {
+        inner.sight_events.pop_front();
+    }
+}
+
+/// Learn how far from you `key` is at `spot` while your spot is fresh
+/// (SIGHT_LEARN_MAX_AGE_MS) — true when it was (learnt, or too far to).
+fn learn_sight(inner: &mut Inner, key: i32, spot: Position) -> bool {
+    let Some((me, at)) = inner.self_position else { return false };
+    if now_ms() - at > SIGHT_LEARN_MAX_AGE_MS {
+        return false;
+    }
+    let d = me.metres_to(&spot) * 100.0;
+    if d <= sight_max_radius(key) {
+        let kept = inner.sight_radii.entry(key).or_default();
+        kept.push_back(d);
+        if kept.len() > SIGHT_KEPT {
+            kept.pop_front();
+        }
+        inner.sight_radii_seq += 1;
+    }
+    true
+}
+
+/// An object of `code` came into range at `spot` (see ENTER_AFTER_LOAD_MS).
+fn note_came_in(inner: &mut Inner, code: u32, spot: Position, created_ms: Option<i64>) {
+    let now = now_ms();
+    if now - inner.map_loaded_ms <= ENTER_AFTER_LOAD_MS || created_ms.is_some_and(|at| now - at <= ENTER_AFTER_LOAD_MS) {
+        return;
+    }
+    let key = object_enter_key(code);
+    if !learn_sight(inner, key, spot) {
+        push_sight_event(inner, key, spot);
     }
 }
 
@@ -667,7 +877,12 @@ fn note_at_object(inner: &mut Inner, id: i32) {
 /// The key an object's out-of-range distance is kept under in `sight_radii`
 /// (apart from the NPC codes there).
 fn object_sight_key(code: u32) -> i32 {
-    -(code.min(i32::MAX as u32) as i32)
+    -(code.min(999_999_999) as i32)
+}
+
+/// …and its come-into-range distance.
+fn object_enter_key(code: u32) -> i32 {
+    object_sight_key(code) - 1_000_000_000
 }
 
 /// The farthest a distance kept under `key` can be (cm).
@@ -679,19 +894,11 @@ fn sight_max_radius(key: i32) -> f32 {
 /// its distance while your spot is fresh, else move your guess onto it.
 /// An object going out of range comes here too (`object_sight_key`).
 fn note_left_sight(inner: &mut Inner, code: i32, spot: Position) {
-    let Some((me, at)) = inner.self_position else { return };
-    if now_ms() - at <= SIGHT_LEARN_MAX_AGE_MS {
-        let d = me.metres_to(&spot) * 100.0;
-        if d <= sight_max_radius(code) {
-            let kept = inner.sight_radii.entry(code).or_default();
-            kept.push_back(d);
-            if kept.len() > SIGHT_KEPT {
-                kept.pop_front();
-            }
-            inner.sight_radii_seq += 1;
-        }
+    if learn_sight(inner, code, spot) {
         return;
     }
+    push_sight_event(inner, code, spot);
+    let Some((me, _)) = inner.self_position else { return };
     let Some(kept) = inner.sight_radii.get(&code) else { return };
     let mut sorted: Vec<f32> = kept.iter().copied().collect();
     sorted.sort_by(f32::total_cmp);
@@ -879,6 +1086,10 @@ struct Inner {
     /// Every object in range: entity -> (code, spot), and the codes logged on
     /// this map — to find an object's code from a log (`note_object`).
     objects_in_range: HashMap<i32, (u32, Position)>,
+    /// What left sight or came into range in the last REGION_EVENT_MS (`region_estimate`).
+    sight_events: VecDeque<SightEvent>,
+    /// When the last map load came (ms) — ENTER_AFTER_LOAD_MS.
+    map_loaded_ms: i64,
     object_codes_logged: HashSet<u32>,
     /// Power-scalar values observed per actor in its damage records. A summon
     /// inherits its owner's, so this links the two when no spawn packet (and
@@ -1142,6 +1353,8 @@ impl DataStorage {
                 hidden_cubes: HashMap::new(),
                 cubes_opened: 0,
                 objects_in_range: HashMap::new(),
+                sight_events: VecDeque::new(),
+                map_loaded_ms: 0,
                 object_codes_logged: HashSet::new(),
                 actor_power_scalars: HashMap::new(),
                 hostile_target_ids: HashSet::new(),
@@ -1302,8 +1515,11 @@ impl DataStorage {
     pub fn note_nearby_despawn(&self, id: i32) {
         self.nearby.lock().despawn(id);
         let mut inner = self.inner.write();
-        inner.entity_positions.remove(&id);
-        inner.players_in_sight.remove(&id);
+        let spot = inner.entity_positions.remove(&id);
+        // A player leaving sight: you are as far from them as players go (`note_left_sight`).
+        if let Some(spot) = spot.filter(|_| inner.players_in_sight.remove(&id)) {
+            note_left_sight(&mut inner, PLAYER_SIGHT_KEY, spot);
+        }
     }
 
     /// Your faction, from your self record.
@@ -1378,6 +1594,7 @@ impl DataStorage {
         let away = |pos: &Position| me.map_or("your spot unknown".to_string(), |me| format!("{:.0} m away", me.metres_to(pos)));
         match record {
             ObjectRecord::InRange(id, code, pos, created_ms) => {
+                note_came_in(&mut inner, code, pos, created_ms);
                 if is_hidden_cube(code) {
                     // Every cube, so a log tells whether the game sent it.
                     let age = created_ms.map_or(String::new(), |at| format!(", there for {} s", (now_ms() - at).max(0) / 1000));
@@ -1469,6 +1686,11 @@ impl DataStorage {
     /// and whether this is a guess from mobs leaving sight.
     pub fn self_estimate(&self, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
         self_estimate(&self.inner.read(), self_max_age_ms)
+    }
+
+    /// Your spot as best known, with how far off it may be (`SelfFix`).
+    pub fn self_fix(&self, self_max_age_ms: i64) -> Option<SelfFix> {
+        self_fix(&self.inner.read(), self_max_age_ms)
     }
 
     /// The NPC code of the mob you are fighting: the one in sight you hit
@@ -3589,6 +3811,8 @@ impl DataStorage {
         // an entity that is gone.
         inner.loot_identity.scope_counts.clear();
         let from = inner.current_map_id.replace(map_id);
+        inner.map_loaded_ms = now_ms();
+        inner.sight_events.clear();
         inner.mobs_in_sight.clear();
         inner.players_in_sight.clear();
         inner.entity_positions.clear();
@@ -5063,18 +5287,21 @@ mod tests {
         at(500);
         storage.note_out_of_sight(1);
         assert_eq!(at(500), Some(((100_000, 0), Some(500), false)));
-        // Your spot 8 s old: another 777 leaves sight, you're 40 m from it.
+        // Your spot 8 s old: another 777 leaves sight, you're 40 m from it —
+        // the guess, once the spot told is less sure than it (~9 s).
         mob(2, 777, 100_000.0, 10_000.0);
         at(8_000);
         storage.note_out_of_sight(2);
-        assert_eq!(at(8_000), Some(((100_000, 6_000), Some(8_000), true)));
+        assert_eq!(at(8_000), Some(((100_000, 0), Some(8_000), false)));
+        assert_eq!(at(10_000), Some(((100_000, 6_000), Some(10_000), true)));
+        at(8_000);
         assert!(!storage.mobs_in_sight(60_000).contains_key(&777));
         // A code not learnt yet, or a spot far off (old): nothing.
         mob(3, 888, 100_000.0, 20_000.0);
         mob(4, 777, 900_000.0, 0.0);
         storage.note_out_of_sight(3);
         storage.note_out_of_sight(4);
-        assert_eq!(at(8_000), Some(((100_000, 6_000), Some(8_000), true)));
+        assert_eq!(at(10_000), Some(((100_000, 6_000), Some(10_000), true)));
         // The told spot too old, the guess not (moved at 8 s): the guess, no age.
         assert_eq!(at(61_000), Some(((100_000, 6_000), None, true)));
         // Both too old: nothing; your spot told again: no guess.
@@ -5094,6 +5321,7 @@ mod tests {
         next.note_spotted(Spotted::Entity(5, spot(100_000.0, 10_000.0)));
         crate::clock::set_override(Some(8_000));
         next.note_out_of_sight(5);
+        crate::clock::set_override(Some(10_000));
         assert_eq!(next.self_estimate(60_000).map(|(p, ..)| p.y.round() as i32), Some(6_000));
         // What was loaded isn't new: nothing to write back.
         assert_eq!(next.sight_radii_since(0), None);

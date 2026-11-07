@@ -104,12 +104,15 @@
 //! (`capture::positions`, `DataStorage::self_estimate`), else null; `posAge`
 //! (ms) is how old the spot the game told is (null: none, or more than
 //! SELF_POS_MAX_AGE_MS ago), `pos` (`{"x","y"}`) your spot on the ground in
-//! metres, to the nearest 10 (null: unknown) — the pet tracker tells from it
+//! metres, to the nearest 2 (null: unknown) — the pet tracker tells from it
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
 //! since, by the mobs and objects that left sight (`DataStorage::self_estimate`)
 //! — tens of metres off; kept while it keeps moving, past the told spot's
 //! SELF_POS_MAX_AGE_MS (`posAge` null then). Gathering (opening) an object
-//! tells your spot: its own. Each npc has `spots` too, `[x, y]` in metres (to the
+//! tells your spot: its own. A guess is also the middle of where everything
+//! in range and what came and went lately puts you (`DataStorage::self_fix`).
+//! `posAccuracy`: how far off `pos` may be (m, to 5): a guess's own, a spot
+//! told's when told (3 m, to 5) — the app grows it by running since `posAge`. Each npc has `spots` too, `[x, y]` in metres (to the
 //! nearest MOB_SPOT_STEP_M) of each of them whose spot the game told; `kills`
 //! (`[{"npc","x","y","at"}]`) are the mobs in sight that died in the last
 //! MOB_KILLS_SHOWN_MS, where (same metres) and when (unix ms) — the pet
@@ -217,6 +220,8 @@ const MOB_KILLS_SHOWN_MS: i64 = 60_000;
 const TARGET_HIT_MS: i64 = 15_000;
 /// Distances (`npcs`) from your spot while it is at most this old.
 const SELF_POS_MAX_AGE_MS: i64 = 60_000;
+/// A spot the game told is this exact (m): `posAccuracy` while not guessed.
+const TOLD_ACCURACY_M: f32 = 3.0;
 /// Distances (`cubes`) from your spot while it is at most this old: off a
 /// fight the game tells your spot only every few seconds.
 const CUBE_POS_MAX_AGE_MS: i64 = 5_000;
@@ -743,13 +748,18 @@ impl Engine {
             .map(|(npc, p, at)| serde_json::json!({ "npc": npc, "x": metres(p.x), "y": metres(p.y), "at": at }))
             .collect();
         let target = self.storage.my_target(TARGET_HIT_MS);
-        let me = self.storage.self_estimate(SELF_POS_MAX_AGE_MS);
+        let me = self.storage.self_fix(SELF_POS_MAX_AGE_MS);
         // In whole seconds, so the event isn't new every second for nothing.
-        let pos_age = me.and_then(|(_, age, _)| age).map(|age| age / 1000 * 1000);
-        // Your spot on the ground in metres, to the nearest 10 (else the event is new at every step).
-        let pos = me.map(|(p, ..)| serde_json::json!({ "x": (p.x / 1000.0).round() as i64 * 10, "y": (p.y / 1000.0).round() as i64 * 10 }));
-        let guessed = me.is_some_and(|(_, _, guessed)| guessed);
-        serde_json::json!({ "npcs": npcs, "kills": kills, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed }).to_string()
+        let pos_age = me.and_then(|f| f.age_ms).map(|age| age / 1000 * 1000);
+        // Your spot on the ground in metres, to the nearest 2 (else the event is new at every step).
+        let pos = me.map(|f| serde_json::json!({ "x": (f.pos.x / 200.0).round() as i64 * 2, "y": (f.pos.y / 200.0).round() as i64 * 2 }));
+        let guessed = me.is_some_and(|f| f.guessed);
+        // How far off it may be, to 5 m — the spot told's without its age (the app grows that itself).
+        let accuracy = me.map(|f| {
+            let m = if f.guessed { f.accuracy_m } else { TOLD_ACCURACY_M };
+            ((m / 5.0).ceil() as i64 * 5).max(5)
+        });
+        serde_json::json!({ "npcs": npcs, "kills": kills, "target": target, "posAge": pos_age, "pos": pos, "posGuessed": guessed, "posAccuracy": accuracy }).to_string()
     }
 
     /// The Hidden Cubes in range (see the top of this file).
