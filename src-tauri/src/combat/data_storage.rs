@@ -586,6 +586,11 @@ const SIGHT_KEPT: usize = 15;
 /// A mob leaving sight farther than its distance plus this (cm) from your
 /// guess has an old spot, and tells nothing.
 const SIGHT_STALE: f32 = 30_000.0;
+/// Objects (gathering spots, chests …) go out of range the same way, only
+/// farther — 60–166 m in two captures of 2026-11-07, by its code. Their
+/// distances are kept with the mobs', under the negated object code
+/// (`object_sight_key`), up to this far (cm).
+const OBJECT_SIGHT_MAX_RADIUS: f32 = 25_000.0;
 /// The passive HP regen everyone gets ("Restore HP"), not a heal anyone cast.
 const PASSIVE_REGEN_SKILL: i32 = 1_900_001;
 /// While it is fought and its HP holds, the same HP goes again this often:
@@ -639,20 +644,45 @@ fn push_boss_event(inner: &mut Inner, event: BossEvent) {
 
 /// See `DataStorage::self_estimate`.
 fn self_estimate(inner: &Inner, self_max_age_ms: i64) -> Option<(Position, Option<i64>, bool)> {
-    let (me, age) = inner.self_position.map(|(pos, at)| (pos, now_ms() - at)).filter(|(_, age)| *age <= self_max_age_ms)?;
-    Some(match inner.self_guess {
-        Some(guess) => (guess, Some(age), true),
-        None => (me, Some(age), false),
-    })
+    let now = now_ms();
+    let (me, age) = inner.self_position.map(|(pos, at)| (pos, now - at))?;
+    let told_age = (age <= self_max_age_ms).then_some(age);
+    // A guess moved on lately stays past the told spot's age: it follows you.
+    match inner.self_guess.filter(|(_, at)| now - at <= self_max_age_ms) {
+        Some((guess, _)) => Some((guess, told_age, true)),
+        None => told_age.map(|age| (me, Some(age), false)),
+    }
+}
+
+/// You start or finish gathering (opening) object `id`: you stand at it —
+/// the game's gathering reach is a few metres — so its spot is yours, as if
+/// told (`capture::objects` `38 36` / `3A 36`).
+fn note_at_object(inner: &mut Inner, id: i32) {
+    if let Some(&(_, pos)) = inner.objects_in_range.get(&id) {
+        inner.self_position = Some((pos, now_ms()));
+        inner.self_guess = None;
+    }
+}
+
+/// The key an object's out-of-range distance is kept under in `sight_radii`
+/// (apart from the NPC codes there).
+fn object_sight_key(code: u32) -> i32 {
+    -(code.min(i32::MAX as u32) as i32)
+}
+
+/// The farthest a distance kept under `key` can be (cm).
+fn sight_max_radius(key: i32) -> f32 {
+    if key < 0 { OBJECT_SIGHT_MAX_RADIUS } else { SIGHT_MAX_RADIUS }
 }
 
 /// A mob of `code` at `spot` left sight (see SIGHT_LEARN_MAX_AGE_MS): learn
 /// its distance while your spot is fresh, else move your guess onto it.
+/// An object going out of range comes here too (`object_sight_key`).
 fn note_left_sight(inner: &mut Inner, code: i32, spot: Position) {
     let Some((me, at)) = inner.self_position else { return };
     if now_ms() - at <= SIGHT_LEARN_MAX_AGE_MS {
         let d = me.metres_to(&spot) * 100.0;
-        if d <= SIGHT_MAX_RADIUS {
+        if d <= sight_max_radius(code) {
             let kept = inner.sight_radii.entry(code).or_default();
             kept.push_back(d);
             if kept.len() > SIGHT_KEPT {
@@ -666,13 +696,13 @@ fn note_left_sight(inner: &mut Inner, code: i32, spot: Position) {
     let mut sorted: Vec<f32> = kept.iter().copied().collect();
     sorted.sort_by(f32::total_cmp);
     let radius = sorted[sorted.len() / 2];
-    let from = inner.self_guess.unwrap_or(me);
+    let from = inner.self_guess.map_or(me, |(guess, _)| guess);
     let away = from.metres_to(&spot) * 100.0;
     if away > radius + SIGHT_STALE || away < 1.0 {
         return;
     }
     let f = radius / away;
-    inner.self_guess = Some(Position { x: spot.x + (from.x - spot.x) * f, y: spot.y + (from.y - spot.y) * f, z: me.z });
+    inner.self_guess = Some((Position { x: spot.x + (from.x - spot.x) * f, y: spot.y + (from.y - spot.y) * f, z: me.z }, now_ms()));
 }
 
 pub struct DataStorage {
@@ -828,10 +858,12 @@ struct Inner {
     my_last_hit: Option<(i32, i64)>,
     /// Your last known spot and when it was told (`capture::positions`).
     self_position: Option<(Position, i64)>,
-    /// Your spot as guessed since it was told (`note_left_sight`); None
-    /// until a mob leaves sight, and again once your spot is told.
-    self_guess: Option<Position>,
-    /// How far from you each NPC code leaves sight (cm), the last
+    /// Your spot as guessed since it was told (`note_left_sight`), and when
+    /// it last moved; None until a mob leaves sight, and again once your
+    /// spot is told.
+    self_guess: Option<(Position, i64)>,
+    /// How far from you each NPC code leaves sight (cm) — an object's under
+    /// its negated code (`object_sight_key`) — the last
     /// SIGHT_KEPT times (`note_left_sight`), and a count that moves with each
     /// (kept across sessions by the caller: `sight_radii_since`).
     sight_radii: HashMap<i32, VecDeque<f32>>,
@@ -1360,6 +1392,9 @@ impl DataStorage {
             }
             ObjectRecord::Opening(id, actor) => {
                 let by_you = inner.local_player_id == Some(actor as i64);
+                if by_you {
+                    note_at_object(&mut inner, id);
+                }
                 if let Some(cube) = inner.hidden_cubes.get_mut(&id) {
                     cube.opening = Some((actor, by_you));
                     tracing::info!("Hidden Cube {id} being opened by {}", if by_you { "you".to_string() } else { format!("entity {actor}") });
@@ -1367,6 +1402,9 @@ impl DataStorage {
             }
             ObjectRecord::Opened(id, actor, item) => {
                 let by_you = inner.local_player_id == Some(actor as i64);
+                if by_you {
+                    note_at_object(&mut inner, id);
+                }
                 // The key says a cube even where its code isn't known (yet).
                 if item == HIDDEN_CUBE_KEY && by_you {
                     inner.cubes_opened += 1;
@@ -1378,6 +1416,10 @@ impl DataStorage {
             }
             ObjectRecord::Gone(id, used) => {
                 let object = inner.objects_in_range.remove(&id);
+                // Out of range: you are as far from it as its code goes (`note_left_sight`).
+                if let Some((code, pos)) = object.filter(|_| !used) {
+                    note_left_sight(&mut inner, object_sight_key(code), pos);
+                }
                 if inner.hidden_cubes.remove(&id).is_some() {
                     tracing::info!("Hidden Cube {id} gone ({})", if used { "opened" } else { "out of range" });
                 } else if let Some((code, pos)) = object.filter(|_| used) {
@@ -3161,7 +3203,7 @@ impl DataStorage {
     pub fn set_sight_radii(&self, radii: HashMap<i32, Vec<f32>>) {
         let mut inner = self.inner.write();
         for (code, d) in radii {
-            let d: VecDeque<f32> = d.into_iter().filter(|d| d.is_finite() && (0.0..=SIGHT_MAX_RADIUS).contains(d)).collect();
+            let d: VecDeque<f32> = d.into_iter().filter(|d| d.is_finite() && (0.0..=sight_max_radius(code)).contains(d)).collect();
             let skip = d.len().saturating_sub(SIGHT_KEPT);
             if d.len() > skip {
                 inner.sight_radii.insert(code, d.into_iter().skip(skip).collect());
@@ -4958,6 +5000,51 @@ mod tests {
     }
 
     #[test]
+    fn gathering_and_objects_out_of_range_tell_your_spot() {
+        let storage = DataStorage::new();
+        let spot = |x: f32, y: f32| Position { x, y, z: 15_000.0 };
+        let at = |ms: i64| {
+            crate::clock::set_override(Some(ms));
+            storage.self_estimate(60_000).map(|(p, age, guessed)| ((p.x.round() as i32, p.y.round() as i32), age, guessed))
+        };
+        storage.set_local_player_id(Some(14159));
+        crate::clock::set_override(Some(0));
+        storage.note_spotted(Spotted::You(spot(100_000.0, 0.0)));
+        // Your spot fresh: an Odyle spot (code 4100001) goes out of range 60 m off.
+        storage.note_object(ObjectRecord::InRange(70, 4_100_001, spot(106_000.0, 0.0), None));
+        at(500);
+        storage.note_object(ObjectRecord::Gone(70, false));
+        assert_eq!(at(500), Some(((100_000, 0), Some(500), false)));
+        // 20 s later another goes out of range: 60 m from it, toward where you were.
+        storage.note_object(ObjectRecord::InRange(71, 4_100_001, spot(100_000.0, 20_000.0), None));
+        at(20_000);
+        storage.note_object(ObjectRecord::Gone(71, false));
+        assert_eq!(at(20_000), Some(((100_000, 14_000), Some(20_000), true)));
+        // Someone else gathering, or one used up: nothing.
+        storage.note_object(ObjectRecord::InRange(72, 4_100_001, spot(300_000.0, 0.0), None));
+        storage.note_object(ObjectRecord::Opening(72, 999));
+        storage.note_object(ObjectRecord::Gone(72, true));
+        assert_eq!(at(20_000), Some(((100_000, 14_000), Some(20_000), true)));
+        // You gather one 90 s on: you stand at it, told.
+        storage.note_object(ObjectRecord::InRange(73, 4_100_002, spot(150_000.0, 30_000.0), None));
+        assert_eq!(at(90_000), None);
+        storage.note_object(ObjectRecord::Opening(73, 14159));
+        assert_eq!(at(90_000), Some(((150_000, 30_000), Some(0), false)));
+        // Done 3 s on: told again.
+        at(93_000);
+        storage.note_object(ObjectRecord::Opened(73, 14159, 0));
+        assert_eq!(at(93_000), Some(((150_000, 30_000), Some(0), false)));
+        // Kept apart from the NPC codes, and loaded back.
+        let (_, radii) = storage.sight_radii_since(0).unwrap();
+        assert_eq!(radii.get(&-4_100_001), Some(&vec![6_000.0]));
+        let next = DataStorage::new();
+        next.set_sight_radii(HashMap::from([(-4_100_001, vec![16_600.0]), (777, vec![16_600.0])]));
+        assert_eq!(next.sight_radii_since(0), None);
+        assert_eq!(next.inner.read().sight_radii.keys().copied().collect::<Vec<_>>(), vec![-4_100_001]);
+        crate::clock::set_override(None);
+    }
+
+    #[test]
     fn a_mob_leaving_sight_tells_how_far_you_are_from_it() {
         let storage = DataStorage::new();
         let spot = |x: f32, y: f32| Position { x, y, z: 15_000.0 };
@@ -4988,10 +5075,12 @@ mod tests {
         storage.note_out_of_sight(3);
         storage.note_out_of_sight(4);
         assert_eq!(at(8_000), Some(((100_000, 6_000), Some(8_000), true)));
-        // Too old to tell from: nothing; your spot told again: no guess.
-        assert_eq!(at(61_000), None);
+        // The told spot too old, the guess not (moved at 8 s): the guess, no age.
+        assert_eq!(at(61_000), Some(((100_000, 6_000), None, true)));
+        // Both too old: nothing; your spot told again: no guess.
+        assert_eq!(at(69_000), None);
         storage.note_spotted(Spotted::You(spot(100_000.0, 9_000.0)));
-        assert_eq!(at(61_000), Some(((100_000, 9_000), Some(0), false)));
+        assert_eq!(at(69_000), Some(((100_000, 9_000), Some(0), false)));
 
         // Kept for the next session: it guesses from the start.
         let (seq, radii) = storage.sight_radii_since(0).unwrap();

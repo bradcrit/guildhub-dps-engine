@@ -106,8 +106,10 @@
 //! SELF_POS_MAX_AGE_MS ago), `pos` (`{"x","y"}`) your spot on the ground in
 //! metres, to the nearest 10 (null: unknown) — the pet tracker tells from it
 //! that you left an area. `posGuessed`: `pos` is moved off the told spot
-//! since, by the mobs that left sight (`DataStorage::self_estimate`) — tens
-//! of metres off. Each npc has `spots` too, `[x, y]` in metres (to the
+//! since, by the mobs and objects that left sight (`DataStorage::self_estimate`)
+//! — tens of metres off; kept while it keeps moving, past the told spot's
+//! SELF_POS_MAX_AGE_MS (`posAge` null then). Gathering (opening) an object
+//! tells your spot: its own. Each npc has `spots` too, `[x, y]` in metres (to the
 //! nearest MOB_SPOT_STEP_M) of each of them whose spot the game told; `kills`
 //! (`[{"npc","x","y","at"}]`) are the mobs in sight that died in the last
 //! MOB_KILLS_SHOWN_MS, where (same metres) and when (unix ms) — the pet
