@@ -128,7 +128,12 @@
     "difficulty": "normal"
   },
   "600082": {
-    "name": "Abyssal Forge: Ludra"
+    "name": "Abyssal Forge: Ludra",
+    "difficulty": "normal"
+  },
+  "600083": {
+    "name": "Abyssal Forge: Ludra",
+    "difficulty": "hard"
   },
   "600091": {
     "name": "Ferocious Horn Den",
