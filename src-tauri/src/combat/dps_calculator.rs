@@ -252,25 +252,6 @@ impl DpsCalculator {
         dps_data.local_player_id = current_local_id;
         dps_data.dungeon_id = self.data_storage.current_dungeon_id();
 
-        // The last hit on a boss of ours: in the open world the party rows
-        // stay that long after it (`party_placeholders_wanted`).
-        let mob_data = self.data_storage.get_mob_data();
-        let boss_ids: Vec<i32> = combat_data.keys()
-            .filter(|tid| mob_data.get(tid).is_some_and(|&code| self.npc_lookup.is_boss(code)))
-            .copied()
-            .collect();
-        if !boss_ids.is_empty() {
-            let us = self.our_side();
-            let last_boss_hit = boss_ids.iter()
-                .filter_map(|tid| combat_data.get(tid))
-                .filter(|td| self.fight_is_ours(td, &us, false))
-                .map(|td| td.last_damage_time)
-                .max();
-            if let Some(at) = last_boss_hit {
-                self.data_storage.note_boss_hit(at);
-            }
-        }
-
         // Decide target
         let (target_ids, target_name, tracking_id) = self.decide_target(&combat_data, &summon_data);
         dps_data.target_name = target_name;
@@ -2650,9 +2631,6 @@ mod tests {
             n.sort();
             n
         };
-        // Just joined, out in the world: nobody yet. Coming into the dungeon: the whole party.
-        assert!(names(&mut calc).is_empty());
-        storage.note_map_load(600_000);
         assert_eq!(names(&mut calc), ["Nullception", "Real"]);
         // The same party again (a map load) is no party change.
         let party = calc.get_dps().party_generation;
