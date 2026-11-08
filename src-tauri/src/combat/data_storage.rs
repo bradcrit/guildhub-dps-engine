@@ -25,6 +25,12 @@ use crate::entity::summon_resolver;
 const RESOURCE_ENTITIES_KEPT: usize = 512;
 /// Maximum idle gap before a fight is considered ended and a new one begins.
 const IDLE_RESET_MS: i64 = 30_000;
+/// A dungeon boss at this share of its max HP or more is back: it reset. Not
+/// 100: the first hits of the next pull may land before its HP is read.
+const BOSS_BACK_PERCENT: i64 = 98;
+/// ...and only if the fight took this share of its HP, so the start of a pull
+/// (still near full, its damage about all of the fight) never counts as one.
+const BOSS_RESET_MIN_DAMAGE_PERCENT: i64 = 5;
 /// Instance changes remembered for `run_started_at` — far more than a fight
 /// saved late (the 30 s save, the 75 s settle) can lie back.
 const INSTANCE_ENTRIES_KEPT: usize = 16;
@@ -1192,6 +1198,9 @@ struct Inner {
     held_dot_ticks: HashMap<(i32, i32), Vec<ParsedDamagePacket>>,
     /// Whether the current combat segment has any boss damage
     has_boss_in_segment: bool,
+    /// A zone reset `note_zone_change` held back for a standing boss: done
+    /// once the map turns out to be another (`note_map_load`).
+    zone_reset_held: bool,
     current_target: i32,
 
     /// The address of the game server the locked connection reads from.
@@ -1391,6 +1400,7 @@ impl DataStorage {
                 train_limit_hit: false,
                 held_dot_ticks: HashMap::new(),
                 has_boss_in_segment: false,
+                zone_reset_held: false,
                 current_target: 0,
                 game_host: None,
                 host_server: 0,
@@ -2035,6 +2045,18 @@ impl DataStorage {
             let inner = self.inner.read();
             if inner.target_combat.is_empty() {
                 return false; // nothing to clear
+            }
+        }
+        // A boss still hurt: you teleported or got up within the fight, during
+        // a mechanic with no hit in the lull (Ketu, xlWinnie's kill, 2026-11-08:
+        // one fight saved as two). Its reset ends it (`set_mob_current_hp`),
+        // another map `note_map_load`.
+        {
+            let mut inner = self.inner.write();
+            if inner.target_combat.keys().any(|&target| boss_still_standing(&inner, target)) {
+                inner.zone_reset_held = true;
+                tracing::info!("Zone change with a boss standing: its fight goes on");
+                return false;
             }
         }
         self.last_zone_reset_ms.store(now, Ordering::Relaxed);
@@ -3855,6 +3877,15 @@ impl DataStorage {
             tracing::debug!("Map {map_id}: dungeon {} -> {dungeon}", inner.current_dungeon_id);
             inner.current_dungeon_id = dungeon;
         }
+        // You left with the boss standing: the zone reset held back is due.
+        let left = from.is_some_and(|from| from != map_id) && std::mem::take(&mut inner.zone_reset_held);
+        drop(inner);
+        if left {
+            self.last_zone_reset_ms.store(now_ms(), Ordering::Relaxed);
+            self.run_before_reset();
+            self.flush_combat_only();
+            self.combat_reset_requested.store(true, Ordering::Relaxed);
+        }
     }
 
     /// The dungeon a party roster names. Taken as the player's only when no
@@ -4137,6 +4168,12 @@ impl DataStorage {
         }
         // A player in sight's HP: their death, for your kills.
         self.nearby.lock().player_hp(id, i64::from(hp), now_ms());
+        // A boss of a fight back to full: it reset, the next hit starts a new
+        // one. The fight so far is saved first; the hook reads this storage.
+        if self.boss_reset_by(id, hp) {
+            self.run_before_reset();
+            self.inner.write().target_combat.remove(&id);
+        }
         let mut inner = self.inner.write();
         inner.mob_current_hp.insert(id, hp);
         if hp == 1 {
@@ -4197,6 +4234,26 @@ impl DataStorage {
                 }
             }
         }
+    }
+
+    /// Whether `hp` is a dungeon boss coming back to full after a real part of
+    /// its HP went. Everyone dead isn't asked: a party all at 0 HP for a second
+    /// got up and won (aion2-combat-meter's capture); the boss's HP says it.
+    fn boss_reset_by(&self, id: i32, hp: i32) -> bool {
+        let inner = self.inner.read();
+        if !is_dungeon_boss(&inner, id) {
+            return false;
+        }
+        let (Some(&before), Some(&max), Some(fight)) =
+            (inner.mob_current_hp.get(&id), inner.mob_hp_data.get(&id), inner.target_combat.get(&id))
+        else {
+            return false;
+        };
+        let max = i64::from(max);
+        max > 0
+            && hp > before
+            && i64::from(hp) * 100 >= max * BOSS_BACK_PERCENT
+            && fight.total_damage * 100 >= max * BOSS_RESET_MIN_DAMAGE_PERCENT
     }
 
     /// Whether `id` behaved as a training dummy does: its HP stopped at 1 and
@@ -4357,6 +4414,7 @@ impl DataStorage {
         inner.hostile_target_ids.clear();
         inner.dead_entity_ids.clear();
         inner.has_boss_in_segment = false;
+        inner.zone_reset_held = false;
         inner.mob_hp_data.clear();
         inner.mob_current_hp.clear();
         inner.hp_floored_ids.clear();
@@ -4529,6 +4587,27 @@ fn end_train_fight(inner: &mut Inner) {
     }
 }
 
+/// A boss of the instance you're in: no dummy, not dead.
+fn is_dungeon_boss(inner: &Inner, id: i32) -> bool {
+    inner.current_dungeon_id > 0
+        && inner.boss_entity_ids.contains(&id)
+        && !inner.training_dummy_ids.contains(&id)
+        && !inner.hp_reset_dummy_ids.contains(&id)
+        && !inner.dead_entity_ids.contains(&id)
+}
+
+/// A dungeon boss whose HP is known and short of full: its fight isn't over,
+/// however long nobody hit it. With its HP unknown the old rules hold.
+fn boss_still_standing(inner: &Inner, id: i32) -> bool {
+    if !is_dungeon_boss(inner, id) {
+        return false;
+    }
+    match (inner.mob_current_hp.get(&id), inner.mob_hp_data.get(&id)) {
+        (Some(&hp), Some(&max)) => hp > 0 && i64::from(hp) * 100 < i64::from(max) * BOSS_BACK_PERCENT,
+        _ => false,
+    }
+}
+
 /// Count one damage record into its target's and actor's aggregates.
 fn apply_damage(inner: &mut Inner, pdp: &ParsedDamagePacket) {
     let skill_code = pdp.skill_code();
@@ -4536,15 +4615,18 @@ fn apply_damage(inner: &mut Inner, pdp: &ParsedDamagePacket) {
     let target_id = pdp.target_id();
     let timestamp = pdp.timestamp();
     let packet_id = pdp.id();
+    let boss_standing = boss_still_standing(inner, target_id);
 
     // Get or create target combat data
     let target_data = inner.target_combat.entry(target_id).or_insert_with(|| {
         TargetCombatData::new(target_id, timestamp)
     });
 
-    // Idle reset check (30s gap)
+    // Idle reset check (30s gap). Not for a boss still hurt: a long mechanic
+    // saved one fight as two (Ketu's kill showed 46m of its 85m, 2026-11-08).
     if target_data.last_damage_time > 0
         && timestamp - target_data.last_damage_time > IDLE_RESET_MS
+        && !boss_standing
     {
         tracing::info!("Idle reset: target {} — gap {}ms", target_id,
             timestamp - target_data.last_damage_time);
@@ -5662,6 +5744,96 @@ mod tests {
         s.append_nickname(303, "Cleric");
         s.append_nickname_authoritative(404, "Cleric");
         assert!(!s.get_combat_snapshot()[&900].actors.contains_key(&404));
+    }
+
+    /// A storage in a dungeon with boss 900 of 1000 HP, hit down to `hp`.
+    fn boss_fight(hp: i32) -> DataStorage {
+        let s = DataStorage::new();
+        s.set_current_dungeon(600082);
+        s.note_map_load(600082);
+        s.register_boss(900);
+        s.append_mob_hp(900, 1000);
+        s.set_mob_current_hp(900, 1000);
+        crate::clock::set_override(Some(1_000));
+        s.append_damage(hit(5, 900, 1_000, 1000 - hp, false));
+        s.set_mob_current_hp(900, hp);
+        s
+    }
+
+    fn fought(s: &DataStorage) -> i64 {
+        s.get_combat_snapshot_light().get(&900).map_or(0, |t| t.total_damage)
+    }
+
+    #[test]
+    fn a_long_mechanic_does_not_split_a_standing_bosss_fight() {
+        let s = boss_fight(600);
+        crate::clock::set_override(Some(33_000));
+        s.append_damage(hit(5, 900, 33_000, 600, false));
+        crate::clock::set_override(None);
+        assert_eq!(fought(&s), 1000, "32 s without a hit, the boss at 60%: one fight");
+    }
+
+    #[test]
+    fn a_boss_with_its_hp_unknown_still_idles_out() {
+        let s = DataStorage::new();
+        s.set_current_dungeon(600082);
+        s.note_map_load(600082);
+        s.register_boss(900);
+        crate::clock::set_override(Some(1_000));
+        s.append_damage(hit(5, 900, 1_000, 400, false));
+        crate::clock::set_override(Some(33_000));
+        s.append_damage(hit(5, 900, 33_000, 100, false));
+        crate::clock::set_override(None);
+        assert_eq!(fought(&s), 100);
+    }
+
+    #[test]
+    fn a_teleport_does_not_end_a_standing_bosss_fight() {
+        let s = boss_fight(600);
+        crate::clock::set_override(Some(20_000));
+        assert!(!s.note_zone_change(), "a revive or teleport in the run");
+        assert_eq!(fought(&s), 400);
+        crate::clock::set_override(None);
+    }
+
+    #[test]
+    fn a_boss_back_to_full_starts_a_new_fight() {
+        let s = boss_fight(600);
+        crate::clock::set_override(Some(20_000));
+        s.set_mob_current_hp(900, 1000);
+        assert_eq!(fought(&s), 0, "it reset: a wipe");
+        s.append_damage(hit(5, 900, 21_000, 50, false));
+        s.set_mob_current_hp(900, 950);
+        crate::clock::set_override(None);
+        assert_eq!(fought(&s), 50);
+    }
+
+    #[test]
+    fn a_pull_near_full_hp_is_no_reset() {
+        let s = boss_fight(990);
+        s.set_mob_current_hp(900, 995);
+        crate::clock::set_override(None);
+        assert_eq!(fought(&s), 10, "a heal at the start of a pull");
+    }
+
+    #[test]
+    fn leaving_with_the_boss_standing_ends_its_fight() {
+        let s = boss_fight(600);
+        crate::clock::set_override(Some(20_000));
+        assert!(!s.note_zone_change());
+        s.note_map_load(1);
+        crate::clock::set_override(None);
+        assert_eq!(fought(&s), 0, "another map: the held reset happens");
+    }
+
+    #[test]
+    fn a_map_load_of_the_same_map_keeps_the_fight() {
+        let s = boss_fight(600);
+        crate::clock::set_override(Some(20_000));
+        assert!(!s.note_zone_change());
+        s.note_map_load(600082);
+        crate::clock::set_override(None);
+        assert_eq!(fought(&s), 400, "a revive in the run loads the same map");
     }
 
     #[test]
