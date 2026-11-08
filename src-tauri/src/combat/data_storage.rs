@@ -951,6 +951,8 @@ pub struct DataStorage {
     death_recaps: Mutex<DeathRecaps>,
     /// Dice Roll loot as read (`capture::loot_rolls`), for plugins.
     loot_rolls: Mutex<crate::capture::loot_rolls::LootRolls>,
+    /// Flight power as read (`capture::flight_power`), for the FP timer.
+    flight_powers: Mutex<crate::capture::flight_power::FlightPowers>,
 }
 
 /// The timeline and when it was last pruned.
@@ -1430,6 +1432,7 @@ impl DataStorage {
             resources_self: Mutex::new(None),
             death_recaps: Mutex::new(DeathRecaps::default()),
             loot_rolls: Mutex::new(Default::default()),
+            flight_powers: Mutex::new(Default::default()),
         }
     }
 
@@ -3357,6 +3360,17 @@ impl DataStorage {
     /// next time; None when there are none.
     pub fn death_recaps_since(&self, seq: u64) -> Option<(u64, Vec<death_recap::DeathRecap>)> {
         self.death_recaps.lock().since(seq)
+    }
+
+    /// A flight power reading (`capture::flight_power`).
+    pub fn note_flight_power(&self, reading: crate::capture::flight_power::Reading) {
+        self.flight_powers.lock().note(reading, crate::clock::now_ms());
+    }
+
+    /// Your flight power, once the game has sent it.
+    pub fn flight_power(&self) -> Option<crate::capture::flight_power::FlightPower> {
+        let me = i32::try_from(self.local_player_id()?).ok()?;
+        self.flight_powers.lock().of(me)
     }
 
     /// A Dice Roll packet read, kept for plugins.
@@ -5868,6 +5882,32 @@ mod tests {
         s.append_damage(hit(1454, 500, 3_760_002, 1, true));
         s.append_damage(hit(1454, 500, 3_780_000, 100, false));
         assert_eq!(totals(&s, 500), (100, 60_000), "nothing after it");
+        crate::clock::set_override(None);
+    }
+
+    /// After the time runs out on the clock, the refresh (as `reset_combat`
+    /// does it) starts a new timed fight at the next hit.
+    #[test]
+    fn after_the_time_runs_out_the_refresh_starts_again() {
+        let s = DataStorage::new();
+        s.set_local_player_id(Some(1454));
+        s.register_training_dummy(500);
+        s.set_train_limit_ms(30_000);
+        s.set_train_mode(true);
+        s.append_damage(hit(1454, 500, 1_000, 100, false));
+        crate::clock::set_override(Some(40_000));
+        assert!(s.train_limit_reached());
+        s.append_damage(hit(1454, 500, 45_000, 100, false));
+        s.flush();
+        s.forget_guessed_nicknames();
+        s.hide_party_placeholders();
+        s.restart_train_limit();
+        crate::clock::set_override(Some(50_000));
+        assert!(!s.train_limit_reached());
+        s.append_damage(hit(1454, 500, 50_000, 100, false));
+        s.append_damage(hit(1454, 500, 55_000, 100, false));
+        assert!(!s.train_limit_reached());
+        assert_eq!(totals(&s, 500), (200, 5_000));
         crate::clock::set_override(None);
     }
 
