@@ -161,9 +161,9 @@
 //! "cleansable"}`, as `skills`' buffs), the ones a party member can take off
 //! first — `cleansable` learnt from other players' skills taking them off
 //! (`<data-dir>/cleansable.json`). `listed`: whether the meter lists the
-//! party before a fight — false after ↻ until the next roster, ten minutes
-//! after the last roster, and outside a dungeon five minutes after the last
-//! roster or the last hit on a boss.
+//! party before a fight — in a dungeon ten minutes from coming in or the last
+//! roster (↻ ends that until the next of those), outside one only within five
+//! minutes of a hit on a boss.
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,

@@ -2650,6 +2650,9 @@ mod tests {
             n.sort();
             n
         };
+        // Just joined, out in the world: nobody yet. Coming into the dungeon: the whole party.
+        assert!(names(&mut calc).is_empty());
+        storage.note_map_load(600_000);
         assert_eq!(names(&mut calc), ["Nullception", "Real"]);
         // The same party again (a map load) is no party change.
         let party = calc.get_dps().party_generation;

@@ -1038,6 +1038,8 @@ struct Inner {
     /// When the last roster arrived, and whether its members who have not
     /// fought should still get rows. See `party_placeholders_wanted`.
     party_roster_at_ms: i64,
+    /// When you last came into a dungeon: its party rows show from there too.
+    dungeon_entered_ms: i64,
     /// The party's places, from its last roster (`note_party_size`).
     party_size: Option<usize>,
     party_placeholders_hidden: bool,
@@ -1344,6 +1346,7 @@ impl DataStorage {
                 former_party_members: HashMap::new(),
                 remembered_party: Vec::new(),
                 party_roster_at_ms: 0,
+                dungeon_entered_ms: 0,
                 party_size: None,
                 own_party_key: None,
                 self_in_roster: false,
@@ -3876,6 +3879,11 @@ impl DataStorage {
         if dungeon != inner.current_dungeon_id {
             tracing::debug!("Map {map_id}: dungeon {} -> {dungeon}", inner.current_dungeon_id);
             inner.current_dungeon_id = dungeon;
+            // Coming in: the whole party shows, whenever its roster came and after a reset out there.
+            if dungeon > 0 {
+                inner.dungeon_entered_ms = now_ms();
+                inner.party_placeholders_hidden = false;
+            }
         }
         // You left with the boss standing: the zone reset held back is due.
         let left = from.is_some_and(|from| from != map_id) && std::mem::take(&mut inner.zone_reset_held);
@@ -3957,19 +3965,22 @@ impl DataStorage {
     /// The game sends a roster on every party change, but nothing reliable
     /// when you go off on your own afterwards, so a dungeon party could stay
     /// on the meter long after (a player saw theirs 15 minutes on, through
-    /// resets). These rows are for the start of a run: they show for
-    /// `PARTY_PLACEHOLDER_MS` after the last roster, and a manual reset clears
-    /// them until the next one. Members who fight are shown regardless.
-    /// Outside a dungeon they go `OPEN_WORLD_BOSS_IDLE_MS` after the last
-    /// roster or the last hit on a boss, whichever came later.
+    /// resets). These rows are for the start of a run: in a dungeon they show for
+    /// `PARTY_PLACEHOLDER_MS` after you came in or the last roster, and a manual
+    /// reset clears them until the next of those. Members who fight are shown
+    /// regardless. Outside a dungeon a roster alone shows nobody (forming or
+    /// joining a party isn't a fight): only `OPEN_WORLD_BOSS_IDLE_MS` after a hit
+    /// on a boss, within `PARTY_PLACEHOLDER_MS` of the roster.
     pub fn party_placeholders_wanted(&self) -> bool {
         let inner = self.inner.read();
         let now = now_ms();
-        if inner.party_placeholders_hidden || now - inner.party_roster_at_ms >= PARTY_PLACEHOLDER_MS {
+        if inner.party_placeholders_hidden {
             return false;
         }
-        inner.current_dungeon_id > 0
-            || now - inner.party_roster_at_ms.max(inner.last_boss_hit_ms) < OPEN_WORLD_BOSS_IDLE_MS
+        if inner.current_dungeon_id > 0 {
+            return now - inner.party_roster_at_ms.max(inner.dungeon_entered_ms) < PARTY_PLACEHOLDER_MS;
+        }
+        now - inner.party_roster_at_ms < PARTY_PLACEHOLDER_MS && now.saturating_sub(inner.last_boss_hit_ms) < OPEN_WORLD_BOSS_IDLE_MS
     }
 
     /// A boss of ours was last hit at `at_ms` (clock ms): the party rows stay
@@ -5588,6 +5599,7 @@ mod tests {
     #[test]
     fn party_members_who_have_not_fought_are_shown_for_a_while() {
         let s = DataStorage::new();
+        s.inner.write().current_dungeon_id = 600_000;
         assert!(!s.party_placeholders_wanted(), "no roster yet");
         s.set_party_roster(vec![("Prenses".into(), member(2)), ("adam".into(), member(3))], true);
         assert!(s.party_placeholders_wanted());
@@ -5605,21 +5617,38 @@ mod tests {
     }
 
     #[test]
-    fn outside_a_dungeon_the_party_goes_five_minutes_after_the_last_boss_hit() {
+    fn outside_a_dungeon_a_roster_alone_shows_nobody() {
         let s = DataStorage::new();
-        let party = || vec![("Prenses".into(), member(2)), ("adam".into(), member(3))];
-        s.set_party_roster(party(), true);
-        // Six minutes on, in the open world, no boss since: gone.
-        s.inner.write().party_roster_at_ms -= 6 * 60 * 1000;
-        assert!(!s.party_placeholders_wanted());
-        // A boss hit a minute ago keeps them.
+        s.set_party_roster(vec![("Prenses".into(), member(2)), ("adam".into(), member(3))], true);
+        assert!(!s.party_placeholders_wanted(), "just formed or joined, no fight");
+        // A boss hit a minute ago: the party shows.
         s.note_boss_hit(now_ms() - 60 * 1000);
         assert!(s.party_placeholders_wanted());
         s.inner.write().last_boss_hit_ms -= 5 * 60 * 1000;
         assert!(!s.party_placeholders_wanted());
-        // In a dungeon the ten minutes after the roster hold.
-        s.inner.write().current_dungeon_id = 600_000;
+    }
+
+    #[test]
+    fn coming_into_a_dungeon_shows_the_whole_party() {
+        let s = DataStorage::new();
+        s.set_party_roster(vec![("Prenses".into(), member(2)), ("adam".into(), member(3))], true);
+        // The party formed long ago, and ↻ out in the world.
+        s.inner.write().party_roster_at_ms -= 30 * 60 * 1000;
+        s.hide_party_placeholders();
+        s.note_map_load(600_000);
         assert!(s.party_placeholders_wanted());
+        // Ten minutes in, they've had their chance.
+        s.inner.write().dungeon_entered_ms -= 11 * 60 * 1000;
+        assert!(!s.party_placeholders_wanted());
+        // A reset in there clears them.
+        s.inner.write().dungeon_entered_ms = now_ms();
+        s.hide_party_placeholders();
+        assert!(!s.party_placeholders_wanted());
+        // A new roster shows them again; back outside, nobody.
+        s.set_party_roster(vec![("Prenses".into(), member(2)), ("adam".into(), member(3))], true);
+        assert!(s.party_placeholders_wanted());
+        s.note_map_load(3030);
+        assert!(!s.party_placeholders_wanted());
     }
 
     /// A meter started mid-game: the fights go under the server learnt for
