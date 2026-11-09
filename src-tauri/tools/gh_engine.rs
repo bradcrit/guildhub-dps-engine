@@ -32,7 +32,7 @@
 //! | Route                  | Answer                                          |
 //! |------------------------|-------------------------------------------------|
 //! | `GET  /v1/status`      | version, Npcap, capture, game window            |
-//! | `GET  /v1/dps`         | the meter's current view (`DpsData`, plus `targetDead`, `targetStagger`) |
+//! | `GET  /v1/dps`         | the meter's current view (`DpsData`, plus `targetDead`, `targetStagger`, in a language other than English or German `targetNameEn`) |
 //! | `GET  /v1/self`        | your character, its Odyle energy, entry counts and currencies (`lists`), the ping |
 //! | `GET  /v1/events`      | SSE, see below                                  |
 //! | `GET  /v1/fights`      | saved fights (`FightSummary[]`)                 |
@@ -1325,12 +1325,23 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     // The meter's view, published when it changes.
     {
         let engine = engine.clone();
+        // `targetNameEn`: whatever the language, the parent finds a boss's portrait
+        // by name, in English or German. Not loaded where the name already is one.
+        let npcs_en = (!matches!(args.language.as_str(), "en" | "de"))
+            .then(|| std::fs::read_to_string(args.resources.join("i18n").join("npcs").join("en.json")).ok())
+            .flatten()
+            .map(|text| {
+                let npcs = NpcLookup::new();
+                npcs.load_from_json(&text);
+                Arc::new(npcs)
+            });
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(DPS_RATE);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
                 let calc = engine.clone();
+                let npcs_en = npcs_en.clone();
                 let json = tokio::task::spawn_blocking(move || {
                     let dps = calc.calculator.lock().get_dps();
                     calc.target.store(dps.target_id, Ordering::Relaxed);
@@ -1364,6 +1375,9 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                     if let Some(fields) = view.as_object_mut() {
                         fields.insert("targetDead".into(), dead.into());
                         fields.insert("targetStagger".into(), stagger.unwrap_or_default());
+                        if let Some(npcs) = npcs_en.as_ref().filter(|_| dps.target_mob_code > 0) {
+                            fields.insert("targetNameEn".into(), npcs.get_npc_name(dps.target_mob_code).into());
+                        }
                     }
                     serde_json::to_string(&view).unwrap_or_default()
                 })
