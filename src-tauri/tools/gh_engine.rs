@@ -170,6 +170,9 @@
 //! you are in (0: the open world), `runAt` when it was entered (unix ms,
 //! the fights of that run carry it as `runAt`; 0 when not seen). Your own
 //! loot only: the game says nothing of anyone else's.
+//! `commendation` (`{"open"}`) at once as the Commendations window after a
+//! dungeon opens (true) or closes (false: your vote, or the round's result —
+//! also long after you voted; `capture::commendation`).
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
@@ -187,6 +190,7 @@ use a2tools_dps_meter_lib::capture::boss_map::BossMap;
 use a2tools_dps_meter_lib::capture::captured_payload::CapturedPayload;
 use a2tools_dps_meter_lib::capture::field_bosses::npc_of_map_id;
 use a2tools_dps_meter_lib::capture::game_lists::CURRENCIES;
+use a2tools_dps_meter_lib::capture::commendation::{self, Commendation};
 use a2tools_dps_meter_lib::capture::loot::{Loot, LootReader};
 use a2tools_dps_meter_lib::capture::combat_port_detector::CombatPortDetector;
 use a2tools_dps_meter_lib::capture::pcap_capturer::PcapCapturer;
@@ -1251,7 +1255,13 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         let pets = engine.pets.clone();
         let loot = engine.loot.clone();
         let loot_reader = Mutex::new(LootReader::new());
+        let events = engine.events.clone();
         frame_tap::set(Some(Arc::new(move |packet: &[u8]| {
+            // Not on the SELF_RATE tick: the overlay hides for the window's cursor within a second.
+            if let Some(window) = commendation::read(packet) {
+                let open = window == Commendation::Opened;
+                let _ = events.send(("commendation", serde_json::json!({ "open": open }).to_string()));
+            }
             if let Some(found) = loot_reader.lock().read(packet) {
                 let mut loot = loot.lock();
                 if loot.len() < MAX_PENDING_LOOT {

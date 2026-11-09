@@ -8,6 +8,7 @@ pub mod flight_power;
 pub mod loot_rolls;
 pub mod field_bosses;
 pub mod captured_payload;
+pub mod commendation;
 pub mod evidence_slice;
 pub mod frame_tap;
 pub mod framing;
