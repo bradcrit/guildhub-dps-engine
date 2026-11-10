@@ -348,6 +348,10 @@ impl StreamProcessor {
         if let Some(update) = crate::capture::game_lists::parse(packet) {
             self.data_storage.note_game_list(update);
         }
+        // A ranking table the player opened.
+        if let Some(table) = crate::capture::rankings::parse(packet) {
+            self.data_storage.note_ranking(table);
+        }
         // Who holds the Abyss artifacts (with the Abyss map, and on entry).
         if let Some(state) = crate::capture::abyss_artifacts::parse(packet) {
             self.data_storage.note_abyss_artifacts(state);
@@ -355,6 +359,10 @@ impl StreamProcessor {
         // Flight power, for the FP timer.
         if let Some(reading) = crate::capture::flight_power::parse(packet) {
             self.data_storage.note_flight_power(reading);
+        }
+        // The Black Cloud Merchant's stock, as a tab of the shop is opened.
+        if let Some(market) = crate::capture::black_market::parse(packet) {
+            self.data_storage.note_black_market(market);
         }
         // Dice Roll loot: an item rolled for, each roll, and who won it.
         if let Some(roll) = crate::capture::loot_rolls::parse(packet) {
@@ -667,6 +675,7 @@ impl StreamProcessor {
                 if (1..=1_000_000_000).contains(&limit) && points <= limit {
                     let now = self.override_timestamp.unwrap_or_else(crate::clock::now_ms);
                     self.data_storage.set_abyss_points(points, limit, now);
+                    self.data_storage.note_abyss_points_total(points, now);
                 }
             }
             _ => {}
@@ -1089,6 +1098,9 @@ impl StreamProcessor {
                 self.note_death(data, r);
                 continue;
             }
+            // Another player's death, for your kills and assists.
+            let at = self.override_timestamp.unwrap_or_else(crate::clock::now_ms);
+            self.data_storage.note_player_killed(summon_id, owner_id, at);
             if self.data_storage.is_confirmed_summon(summon_id) {
                 self.data_storage.append_summon(owner_id, summon_id);
             }
@@ -5241,6 +5253,22 @@ mod tests {
         p.parse_perfect_packet(&hex("13abfff908020000000000a025260000000000"));
         assert_eq!(storage.abyss_points_at(now + 5_000), Some((132_456, 2_500_000)));
         assert_eq!(storage.abyss_points_at(now + 8_000), Some((133_369, 2_500_000)));
+    }
+
+    /// The Abyss Points as the game sent them on 2026-11-02 (132,456, then
+    /// 133,369 after a kill whose chat line said 913), and the Abyss map
+    /// loaded just before.
+    #[test]
+    fn abyss_points_gained_and_the_abyss_entered() {
+        let (storage, mut p) = processor();
+        let load = hex("3421360100000014000000b3071a0000000000ebc8504754ba50c700629f460000074300000000000000000000004f0000");
+        p.parse_perfect_packet(&load);
+        p.parse_perfect_packet(&hex("13abff6805020000000000a025260000000000"));
+        p.parse_perfect_packet(&hex("13abff6805020000000000a025260000000000"));
+        p.parse_perfect_packet(&hex("13abfff908020000000000a025260000000000"));
+        let (_, events) = storage.kda_since(0).unwrap();
+        let told: Vec<_> = events.iter().map(|e| (e.amount, e.abyss)).collect();
+        assert_eq!(told, vec![(None, Some(true)), (Some(913), None)]);
     }
 
     /// Kinah gained today at a login, then a pickup; the week's Abyss Points

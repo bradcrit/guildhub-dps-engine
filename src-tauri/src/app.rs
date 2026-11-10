@@ -1096,11 +1096,16 @@ fn hotkey_of(settings: &Settings, key: &str) -> (u32, u32) {
 /// Register the hotkeys from saved settings (or defaults).
 /// Show or hide the meter, and remember it (as Settings → Plugins → Show
 /// the DPS meter does): its keybind and the tray's. Hidden by auto-hide
-/// only, it is shown, as before, and nothing changes.
+/// only, it is shown, as before, and nothing changes. Auto-hide and the
+/// out-of-combat and solo rules minimise it, which Windows still calls
+/// visible: the first press took it for shown and hid it for good, so the
+/// keybind needed two presses to bring it back (2026-11-09).
 pub(crate) fn toggle_meter(app: &tauri::AppHandle) {
     if meter_wanted(app)
         && let Some(window) = app.get_webview_window("main")
-        && (!window.is_visible().unwrap_or(true) || platform::window::is_hidden_in_place(&window))
+        && (!window.is_visible().unwrap_or(true)
+            || window.is_minimized().unwrap_or(false)
+            || platform::window::is_hidden_in_place(&window))
     {
         show_meter_again(app, &window);
         return;
@@ -1240,6 +1245,9 @@ fn get_capture_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
         // When true, characterName is the game's (null = an unnamed tutorial
         // character) and the UI should adopt it rather than push its own.
         "characterNameFromGame": state.data_storage.local_identity_from_self_record(),
+        // The character's server (0 while not known), for what the page keeps
+        // per character: one name can be a character on several servers.
+        "serverId": state.data_storage.own_server(),
     })
 }
 
@@ -4028,6 +4036,8 @@ pub fn run() {
             #[cfg(feature = "online")]
             crate::supply_report::spawn(app.handle().clone());
             #[cfg(feature = "online")]
+            crate::ranking_report::spawn(app.handle().clone());
+            #[cfg(feature = "online")]
             crate::party_presence::spawn(app.handle().clone());
             // A deletion of guest uploads the player asked for that hasn't
             // gone through yet: tried again.
@@ -4261,7 +4271,12 @@ pub fn run() {
                             if last_odyle.as_ref() != Some(&now) || tick_count % 4 == 0 {
                                 let _ = handle.emit(
                                     "odyle-energy",
-                                    serde_json::json!({ "basic": energy.0, "charged": energy.1, "name": now.1 }),
+                                    serde_json::json!({
+                                        "basic": energy.0,
+                                        "charged": energy.1,
+                                        "name": now.1,
+                                        "server": state.data_storage.own_server(),
+                                    }),
                                 );
                                 last_odyle = Some(now);
                             }
@@ -4430,6 +4445,18 @@ pub fn run() {
                                 if let Some(dock) = handle.get_webview_window(crate::plugins::dock::LABEL) {
                                     platform::window::set_on_top_without_showing(&dock, front);
                                     dock_on_top = Some(front);
+                                }
+                            }
+                        }
+
+                        // Another program's on-top window over the game
+                        // (Lossless Scaling's frame generation) comes over the
+                        // meter's windows whenever the game takes the front:
+                        // they go back above it (#184).
+                        if tick_count > 20 && platform::window_detector::is_aion2_foreground() {
+                            for (_, w) in handle.webview_windows() {
+                                if platform::window::rise_over_foreign_topmost(&w) && tick_count % 20 == 0 {
+                                    tracing::debug!("{} raised over another program's on-top window", w.label());
                                 }
                             }
                         }

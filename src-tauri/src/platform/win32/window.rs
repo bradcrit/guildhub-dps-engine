@@ -101,6 +101,85 @@ pub fn set_on_top_without_showing(window: &tauri::WebviewWindow, on_top: bool) {
     }
 }
 
+/// Put an on-top window back above another program's on-top window that has
+/// come over it: Lossless Scaling's frame generation covers the game with
+/// one, raised whenever the game takes the front, and the meter and its
+/// widgets went behind it (#184). Only a window of ours that is shown and on
+/// top, and only when Lossless Scaling's window, shown and on top, lies over
+/// it and covers (nearly) its whole screen. Not any full-screen overlay:
+/// Discord's in-game overlay is one too, see-through, and puts itself back
+/// on top at once, so the two swapped places twice a second (2026-11-09);
+/// nor a window someone pinned over the game. True when it was raised.
+pub fn rise_over_foreign_topmost(window: &tauri::WebviewWindow) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    let Some(hwnd) = hwnd_of(window) else { return false };
+    let topmost = |h: HWND| unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || !topmost(hwnd) {
+            return false;
+        }
+        let mut ours = RECT::default();
+        if GetWindowRect(hwnd, &mut ours).is_err() {
+            return false;
+        }
+        let own_pid = GetCurrentProcessId();
+        let mut above = GetWindow(hwnd, GW_HWNDPREV).ok();
+        // The on-top band is at the top of the order: what is above a window
+        // in it is on top too, and there are only a few.
+        for _ in 0..64 {
+            let Some(other) = above.filter(|h| !h.0.is_null()) else { break };
+            above = GetWindow(other, GW_HWNDPREV).ok();
+            if !IsWindowVisible(other).as_bool() || IsIconic(other).as_bool() || !topmost(other) {
+                continue;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(other, Some(&mut pid));
+            if pid == own_pid {
+                continue;
+            }
+            let mut theirs = RECT::default();
+            if GetWindowRect(other, &mut theirs).is_err() {
+                continue;
+            }
+            let overlaps = theirs.left < ours.right && ours.left < theirs.right
+                && theirs.top < ours.bottom && ours.top < theirs.bottom;
+            if overlaps && covers_its_screen(other, &theirs) && is_lossless_scaling(other) {
+                let _ = SetWindowPos(
+                    hwnd, Some(HWND_TOPMOST),
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether a window is Lossless Scaling's (LosslessScaling.exe).
+fn is_lossless_scaling(hwnd: HWND) -> bool {
+    crate::platform::window_detector::exe_path(hwnd).is_some_and(|path| {
+        let exe = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_ascii_lowercase();
+        exe.starts_with("losslessscaling")
+    })
+}
+
+/// Whether a window's rectangle covers at least 90% of the screen it is on.
+fn covers_its_screen(hwnd: HWND, rect: &windows::Win32::Foundation::RECT) -> bool {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return false;
+    }
+    let m = info.rcMonitor;
+    let area = |l: i32, t: i32, r: i32, b: i32| i64::from((r - l).max(0)) * i64::from((b - t).max(0));
+    let screen = area(m.left, m.top, m.right, m.bottom);
+    let shared = area(rect.left.max(m.left), rect.top.max(m.top), rect.right.min(m.right), rect.bottom.min(m.bottom));
+    screen > 0 && shared * 10 >= screen * 9
+}
+
 /// Hide a window that `show_on_top_without_focus` shows, the same way: Tauri's
 /// own show and hide go through tao, which keeps a visible flag of its own.
 /// A raw show leaves that flag "hidden", so a tao hide after it changed

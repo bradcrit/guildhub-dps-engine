@@ -138,6 +138,12 @@
       if (permission === "events:loot-rolls") {
         return t("settings.plugins.permLootRolls", "See Dice Roll loot: the item, who rolled what, and who won it");
       }
+      if (permission === "events:black-market") {
+        return t("settings.plugins.permBlackMarket", "See the Black Cloud Merchants' stock when you open their shop: the items and their prices");
+      }
+      if (permission === "events:kda") {
+        return t("settings.plugins.permKda", "Count your kills, assists and deaths against players (no names)");
+      }
       if (permission.startsWith("decoder:")) {
         return t("settings.plugins.permDecoder", "Read selected game fields (may include other players): {name}", { name: permission.slice(8) });
       }

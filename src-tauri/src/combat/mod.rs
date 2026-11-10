@@ -2,6 +2,7 @@ pub mod data_storage;
 pub mod death_recap;
 pub mod dps_calculator;
 pub mod fight_buffs;
+pub mod kda;
 pub mod nearby_players;
 pub mod ping_tracker;
 pub mod skill_timers;

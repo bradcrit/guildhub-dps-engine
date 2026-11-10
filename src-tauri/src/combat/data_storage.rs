@@ -8,6 +8,7 @@ use crate::capture::abnormal;
 use crate::capture::game_lists::{EntryCount, ListUpdate};
 use crate::combat::nearby_players::{DeathRecap, KillRecord, NearbyPlayer, NearbyPlayers};
 use crate::combat::death_recap::{self, DeathRecaps};
+use crate::combat::kda::{Kda, KdaEvent, Kind as KdaKind};
 use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow};
 
 use crate::capture::objects::{is_hidden_cube, ObjectRecord, HIDDEN_CUBE_KEY};
@@ -957,8 +958,13 @@ pub struct DataStorage {
     death_recaps: Mutex<DeathRecaps>,
     /// Dice Roll loot as read (`capture::loot_rolls`), for plugins.
     loot_rolls: Mutex<crate::capture::loot_rolls::LootRolls>,
+    /// The Black Cloud Merchant's stock as read (`capture::black_market`),
+    /// for plugins.
+    black_markets: Mutex<crate::capture::black_market::BlackMarkets>,
     /// Flight power as read (`capture::flight_power`), for the FP timer.
     flight_powers: Mutex<crate::capture::flight_power::FlightPowers>,
+    /// Your kills, assists and deaths (see `combat::kda`). Its own lock.
+    kda: Mutex<Kda>,
 }
 
 /// The timeline and when it was last pruned.
@@ -1135,6 +1141,9 @@ struct Inner {
     /// (`capture::supply_requests`), and a count that moves with each.
     supply_requests: Vec<crate::capture::supply_requests::Board>,
     supply_requests_seq: u64,
+    /// Ranking tables the player opened, not yet taken by the reporter
+    /// (`capture::rankings`); a few at most.
+    rankings: Vec<crate::capture::rankings::Ranking>,
     /// Entities whose max HP came from their spawn record, so a percentage of
     /// it can be trusted (a peak seen later may be below the real max).
     spawn_hp_ids: HashSet<i32>,
@@ -1383,6 +1392,7 @@ impl DataStorage {
                 abyss_artifacts_seq: 0,
                 supply_requests: Vec::new(),
                 supply_requests_seq: 0,
+                rankings: Vec::new(),
                 spawn_hp_ids: HashSet::new(),
                 boss_hp_now: HashMap::new(),
                 boss_hp_sent: HashMap::new(),
@@ -1445,7 +1455,9 @@ impl DataStorage {
             resources_self: Mutex::new(None),
             death_recaps: Mutex::new(DeathRecaps::default()),
             loot_rolls: Mutex::new(Default::default()),
+            black_markets: Mutex::new(Default::default()),
             flight_powers: Mutex::new(Default::default()),
+            kda: Mutex::new(Kda::default()),
         }
     }
 
@@ -2769,6 +2781,11 @@ impl DataStorage {
         inner.login_abyss_points = Some((points, limit, at));
     }
 
+    /// The Abyss Points total the game just sent, for the K/D/A feed.
+    pub fn note_abyss_points_total(&self, total: u64, at: i64) {
+        self.kda.lock().abyss_points(total, at);
+    }
+
     /// The week's Abyss Points and limit at `now` (unix ms): 0 points once a
     /// weekly reset has passed since seen.
     pub fn abyss_points_at(&self, now: i64) -> Option<(u64, u64)> {
@@ -3016,6 +3033,12 @@ impl DataStorage {
                 && inner.known_player_ids.contains(&attacker)
             {
                 self.death_recaps.lock().note_hit(attacker, pdp.timestamp(), pdp.total_damage() as i64, skill_code);
+            }
+            // Your own hit on an enemy, for an assist: a heal or buff on
+            // someone in your party is no part of one.
+            let target = summon_resolver::resolve(target_id, &inner.summon_storage);
+            if attacker == me && target_id != me && !in_party(&inner, target) {
+                self.kda.lock().note_my_hit(target, pdp.timestamp());
             }
         }
 
@@ -3378,7 +3401,39 @@ impl DataStorage {
     }
 
     pub fn push_death_recap(&self, recap: death_recap::DeathRecap) {
+        self.kda.lock().died(recap.at);
         self.death_recaps.lock().push(recap);
+    }
+
+    /// The record that names who killed `victim` came at `at`. Counted when
+    /// the victim is a player and the record names you (a kill) or you hit
+    /// them just before (an assist).
+    pub fn note_player_killed(&self, victim: i32, killer: i32, at_ms: i64) -> Option<KdaKind> {
+        let by_me = {
+            let inner = self.inner.read();
+            let me = inner.local_player_id.and_then(|id| i32::try_from(id).ok())?;
+            if victim == me {
+                return None;
+            }
+            let player = inner.known_player_ids.contains(&victim) || self.death_recaps.lock().knows(victim);
+            if !player {
+                // A mob's loot record, unless you had just hit it.
+                if let Some(age) = self.kda.lock().hit_age(victim, at_ms) {
+                    tracing::debug!("KDA: {victim} died {age} ms after your hit, not known as a player");
+                }
+                return None;
+            }
+            killer == me
+        };
+        let kind = self.kda.lock().player_died(victim, by_me, at_ms);
+        tracing::debug!("KDA: player {victim} died, killer {killer}{}: {kind:?}", if by_me { " (you)" } else { "" });
+        kind
+    }
+
+    /// The kills, assists and deaths counted since `seq` was read, and the
+    /// count to ask with next time; None when there are none.
+    pub fn kda_since(&self, seq: u64) -> Option<(u64, Vec<KdaEvent>)> {
+        self.kda.lock().since(seq)
     }
 
     /// The death recaps made since `seq` was read, and the count to ask with
@@ -3408,6 +3463,18 @@ impl DataStorage {
     /// time; None when there are none.
     pub fn loot_rolls_since(&self, seq: u64) -> Option<(u64, Vec<crate::capture::loot_rolls::LootRollEvent>)> {
         self.loot_rolls.lock().since(seq)
+    }
+
+    /// The Black Cloud Merchant's stock, as a tab of the shop was opened.
+    pub fn note_black_market(&self, market: crate::capture::black_market::BlackMarket) {
+        let at = crate::clock::now_ms();
+        self.black_markets.lock().push(crate::capture::black_market::BlackMarketEvent { at, market });
+    }
+
+    /// The stocks read since `seq`, and the count to ask with next time;
+    /// None when there are none.
+    pub fn black_markets_since(&self, seq: u64) -> Option<(u64, Vec<crate::capture::black_market::BlackMarketEvent>)> {
+        self.black_markets.lock().since(seq)
     }
 
     /// The maps opened since `seq` was read (all of them, newest last), and
@@ -3470,6 +3537,22 @@ impl DataStorage {
                 inner.sight_radii.insert(code, d.into_iter().skip(skip).collect());
             }
         }
+    }
+
+    /// A ranking table the player just opened. Only the newest few wait: a
+    /// table opened again replaces the one waiting.
+    pub fn note_ranking(&self, table: crate::capture::rankings::Ranking) {
+        let mut inner = self.inner.write();
+        inner.rankings.retain(|t| (t.table, t.class) != (table.table, table.class));
+        if inner.rankings.len() >= 16 {
+            inner.rankings.remove(0);
+        }
+        inner.rankings.push(table);
+    }
+
+    /// The ranking tables waiting, taken.
+    pub fn take_rankings(&self) -> Vec<crate::capture::rankings::Ranking> {
+        std::mem::take(&mut self.inner.write().rankings)
     }
 
     /// The boards, when told since `seq`: (the new seq, the boards).
@@ -3868,6 +3951,7 @@ impl DataStorage {
         if from != Some(map_id) && inner.self_position.is_some_and(|(_, at)| now_ms() - at > SPOT_BEFORE_LOAD_MS) {
             inner.self_position = None;
         }
+        self.kda.lock().map_loaded(map_id, crate::clock::now_ms());
         inner.zone_generation += 1;
         if !(from.is_some_and(is_open_world_map) && is_open_world_map(map_id)) {
             inner.instance_generation += 1;
@@ -5187,6 +5271,11 @@ fn effective_heal(inner: &mut Inner, target: i32, amount: i64) -> i64 {
     healed
 }
 
+/// Whether `entity` is a member of your party (by the roster's names).
+fn in_party(inner: &Inner, entity: i32) -> bool {
+    inner.nickname_storage.get(&entity).is_some_and(|name| inner.party_members.contains_key(name))
+}
+
 fn is_friendly_action(inner: &Inner, actor_id: i32, target_id: i32) -> bool {
     let resolved_actor = summon_resolver::resolve(actor_id, &inner.summon_storage);
     let resolved_target = summon_resolver::resolve(target_id, &inner.summon_storage);
@@ -5429,6 +5518,20 @@ mod tests {
         // What was loaded isn't new: nothing to write back.
         assert_eq!(next.sight_radii_since(0), None);
         crate::clock::set_override(None);
+    }
+
+    /// Your party's members are told by the roster's names, so a heal on one
+    /// is no hit on an enemy (an assist counts only those).
+    #[test]
+    fn party_members_are_not_enemies() {
+        let s = DataStorage::new();
+        s.set_party_roster(vec![("Ally".into(), PartyMember { slot: 1, ..Default::default() })], true);
+        s.append_nickname_authoritative(500, "Ally");
+        s.append_nickname_authoritative(501, "Stranger");
+        let inner = s.inner.read();
+        assert!(in_party(&inner, 500));
+        assert!(!in_party(&inner, 501));
+        assert!(!in_party(&inner, 502));
     }
 
     #[test]
