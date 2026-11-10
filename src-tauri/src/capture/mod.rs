@@ -14,6 +14,7 @@ pub mod commendation;
 pub mod evidence_slice;
 pub mod frame_tap;
 pub mod framing;
+pub mod gathering;
 pub mod game_lists;
 pub mod loot;
 pub mod net_health;

@@ -588,6 +588,8 @@ const SPOT_BEFORE_LOAD_MS: i64 = 3_000;
 /// Objects used up further from you than this (m) aren't logged: someone
 /// else gathering. Opening one, you stand right at it.
 const USED_OBJECT_LOG_METRES: f32 = 15.0;
+/// Nodes remembered for their gathering rounds (`gathered_nodes`).
+const GATHERED_NODES_KEPT: usize = 16;
 /// The last this many distances per code; the median counts.
 const SIGHT_KEPT: usize = 15;
 /// A mob leaving sight farther than its distance plus this (cm) from your
@@ -1103,6 +1105,9 @@ struct Inner {
     /// Every object in range: entity -> (code, spot), and the codes logged on
     /// this map — to find an object's code from a log (`note_object`).
     objects_in_range: HashMap<i32, (u32, Position)>,
+    /// The nodes you started gathering lately: entity -> code — a round's
+    /// result (`capture::gathering`) can come after the node is gone.
+    gathered_nodes: VecDeque<(i32, u32)>,
     /// What left sight or came into range in the last REGION_EVENT_MS (`region_estimate`).
     sight_events: VecDeque<SightEvent>,
     /// When the last map load came (ms) — ENTER_AFTER_LOAD_MS.
@@ -1376,6 +1381,7 @@ impl DataStorage {
                 hidden_cubes: HashMap::new(),
                 cubes_opened: 0,
                 objects_in_range: HashMap::new(),
+                gathered_nodes: VecDeque::new(),
                 sight_events: VecDeque::new(),
                 map_loaded_ms: 0,
                 object_codes_logged: HashSet::new(),
@@ -1639,6 +1645,13 @@ impl DataStorage {
                 let by_you = inner.local_player_id == Some(actor as i64);
                 if by_you {
                     note_at_object(&mut inner, id);
+                    if let Some(&(code, _)) = inner.objects_in_range.get(&id) {
+                        inner.gathered_nodes.retain(|&(node, _)| node != id);
+                        inner.gathered_nodes.push_back((id, code));
+                        if inner.gathered_nodes.len() > GATHERED_NODES_KEPT {
+                            inner.gathered_nodes.pop_front();
+                        }
+                    }
                 }
                 if let Some(cube) = inner.hidden_cubes.get_mut(&id) {
                     cube.opening = Some((actor, by_you));
@@ -1731,6 +1744,11 @@ impl DataStorage {
             return None;
         }
         inner.mobs_in_sight.get(&entity).copied()
+    }
+
+    /// The code of a node you started gathering lately (`gathered_nodes`).
+    pub fn gathered_node_code(&self, id: i32) -> Option<u32> {
+        self.inner.read().gathered_nodes.iter().rev().find(|&&(node, _)| node == id).map(|&(_, code)| code)
     }
 
     /// The map the last zone load named (`21 36`), None before one.

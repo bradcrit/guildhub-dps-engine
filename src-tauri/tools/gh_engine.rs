@@ -173,6 +173,11 @@
 //! you are in (0: the open world), `runAt` when it was entered (unix ms,
 //! the fights of that run carry it as `runAt`; 0 when not seen). Your own
 //! loot only: the game says nothing of anyone else's.
+//! `gather` (`{"at","outcome","item","count","bonus","node","map"}`) as a
+//! round of your own gathering ends (`capture::gathering`): `outcome`
+//! "plain", "better" (the material a grade up) or "failed" (`item` then the
+//! material it would have been, `count` 0); `count` with the `bonus` on top
+//! in it; `node` the node's object code and `map` the map (null: not known).
 //! `commendation` (`{"open"}`) at once as the Commendations window after a
 //! dungeon opens (true) or closes (false: your vote, or the round's result —
 //! also long after you voted; `capture::commendation`).
@@ -194,6 +199,7 @@ use a2tools_dps_meter_lib::capture::captured_payload::CapturedPayload;
 use a2tools_dps_meter_lib::capture::field_bosses::npc_of_map_id;
 use a2tools_dps_meter_lib::capture::game_lists::CURRENCIES;
 use a2tools_dps_meter_lib::capture::commendation::{self, Commendation};
+use a2tools_dps_meter_lib::capture::gathering::{self, Gathered};
 use a2tools_dps_meter_lib::capture::loot::{Loot, LootReader};
 use a2tools_dps_meter_lib::capture::combat_port_detector::CombatPortDetector;
 use a2tools_dps_meter_lib::capture::pcap_capturer::PcapCapturer;
@@ -460,6 +466,8 @@ struct Engine {
     pets: Arc<Mutex<Vec<(i64, String, serde_json::Value)>>>,
     /// Loot read (`capture::loot`), waiting to be passed on: when read (unix ms), what.
     loot: Arc<Mutex<Vec<(i64, Loot)>>>,
+    /// Gathering rounds read (`capture::gathering`), waiting to be passed on: when read (unix ms), what.
+    gathered: Arc<Mutex<Vec<(i64, Gathered)>>>,
 }
 
 /// What the `skills` event names skills and abnormals with: skill icons by
@@ -838,6 +846,29 @@ impl Engine {
                 let items: Vec<_> = loot.items.iter().map(|&(item, count)| serde_json::json!({ "item": item, "count": count })).collect();
                 let run_at = if dungeon > 0 { self.storage.run_started_at(at) } else { 0 };
                 serde_json::json!({ "at": at, "source": loot.source.as_str(), "dungeon": dungeon, "runAt": run_at, "items": items }).to_string()
+            })
+            .collect()
+    }
+
+    fn take_gather_events(&self) -> Vec<String> {
+        let found = std::mem::take(&mut *self.gathered.lock());
+        let map = self.storage.current_map_id();
+        found
+            .into_iter()
+            .map(|(at, g)| {
+                let node = self.storage.gathered_node_code(g.node);
+                tracing::info!(
+                    "Gathered: {} item {} x{} (bonus {}, node {node:?}, map {map:?})",
+                    g.outcome.as_str(),
+                    g.item,
+                    g.count,
+                    g.bonus
+                );
+                serde_json::json!({
+                    "at": at, "outcome": g.outcome.as_str(), "item": g.item, "count": g.count,
+                    "bonus": g.bonus, "node": node, "map": map,
+                })
+                .to_string()
             })
             .collect()
     }
@@ -1255,6 +1286,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         factions_path: args.data_dir.join("factions.json"),
         pets: Arc::new(Mutex::new(Vec::new())),
         loot: Arc::new(Mutex::new(Vec::new())),
+        gathered: Arc::new(Mutex::new(Vec::new())),
     });
 
     // The pet records and your loot, off every frame the parser reads.
@@ -1268,6 +1300,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
             });
         let pets = engine.pets.clone();
         let loot = engine.loot.clone();
+        let gathered = engine.gathered.clone();
         let loot_reader = Mutex::new(LootReader::new());
         let events = engine.events.clone();
         frame_tap::set(Some(Arc::new(move |packet: &[u8]| {
@@ -1275,6 +1308,12 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
             if let Some(window) = commendation::read(packet) {
                 let open = window == Commendation::Opened;
                 let _ = events.send(("commendation", serde_json::json!({ "open": open }).to_string()));
+            }
+            if let Some(round) = gathering::read(packet) {
+                let mut gathered = gathered.lock();
+                if gathered.len() < MAX_PENDING_LOOT {
+                    gathered.push((a2tools_dps_meter_lib::clock::now_ms(), round));
+                }
             }
             if let Some(found) = loot_reader.lock().read(packet) {
                 let mut loot = loot.lock();
@@ -1517,6 +1556,9 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 }
                 for body in engine.take_loot_events() {
                     let _ = engine.events.send(("loot", body));
+                }
+                for body in engine.take_gather_events() {
+                    let _ = engine.events.send(("gather", body));
                 }
                 // The shop lists don't wait for the server: they're about what's on sale now.
                 for body in engine.take_shop_events(server) {
