@@ -79,6 +79,9 @@
 //! `self` also has your `itemLevel` and `combatPower` (a party roster's, else
 //! your last self record's; null before either), and `map`: the map id of the
 //! last zone load (null before one).
+//! `gathering`: since when you are gathering (unix ms; null when not) —
+//! from your first gathering start until you hit something, teleport or a
+//! party roster grows (`DataStorage::gathering_since`).
 //!
 //! Pets (the game's own records, read as A2Tools' Pet Soul Tracker reads
 //! them; a pet collection is shared by a server's characters): `petList`
@@ -953,6 +956,7 @@ impl Engine {
             "lists": lists,
             "ping": self.ping.current_ping_ms(),
             "map": self.storage.current_map_id(),
+            "gathering": self.storage.gathering_since(),
         })
         .to_string()
     }

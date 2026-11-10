@@ -1108,6 +1108,9 @@ struct Inner {
     /// The nodes you started gathering lately: entity -> code — a round's
     /// result (`capture::gathering`) can come after the node is gone.
     gathered_nodes: VecDeque<(i32, u32)>,
+    /// Since when you are gathering (ms): from your first gathering start
+    /// until you hit something, teleport, or a party roster grows (`gathering_since`).
+    gathering_since: Option<i64>,
     /// What left sight or came into range in the last REGION_EVENT_MS (`region_estimate`).
     sight_events: VecDeque<SightEvent>,
     /// When the last map load came (ms) — ENTER_AFTER_LOAD_MS.
@@ -1382,6 +1385,7 @@ impl DataStorage {
                 cubes_opened: 0,
                 objects_in_range: HashMap::new(),
                 gathered_nodes: VecDeque::new(),
+                gathering_since: None,
                 sight_events: VecDeque::new(),
                 map_loaded_ms: 0,
                 object_codes_logged: HashSet::new(),
@@ -1645,7 +1649,11 @@ impl DataStorage {
                 let by_you = inner.local_player_id == Some(actor as i64);
                 if by_you {
                     note_at_object(&mut inner, id);
-                    if let Some(&(code, _)) = inner.objects_in_range.get(&id) {
+                    if let Some(&(code, _)) = inner.objects_in_range.get(&id).filter(|(code, _)| !is_hidden_cube(*code)) {
+                        if inner.gathering_since.is_none() {
+                            inner.gathering_since = Some(now_ms());
+                            tracing::info!("Gathering started (node {code})");
+                        }
                         inner.gathered_nodes.retain(|&(node, _)| node != id);
                         inner.gathered_nodes.push_back((id, code));
                         if inner.gathered_nodes.len() > GATHERED_NODES_KEPT {
@@ -1744,6 +1752,13 @@ impl DataStorage {
             return None;
         }
         inner.mobs_in_sight.get(&entity).copied()
+    }
+
+    /// Since when you are gathering (unix ms) — None when not: set by your
+    /// first gathering start, ended by your hitting something, a teleport of
+    /// yours (`note_zone_change`) or a party roster bigger than the last.
+    pub fn gathering_since(&self) -> Option<i64> {
+        self.inner.read().gathering_since
     }
 
     /// The code of a node you started gathering lately (`gathered_nodes`).
@@ -2068,6 +2083,9 @@ impl DataStorage {
     /// without ever wiping an in-progress fight. Returns true if it reset.
     pub fn note_zone_change(&self) -> bool {
         let now = now_ms();
+        if self.inner.write().gathering_since.take().is_some() {
+            tracing::info!("Gathering ended: teleport");
+        }
         if now.saturating_sub(self.last_damage_ms.load(Ordering::Relaxed)) < ZONE_RESET_LULL_MS {
             return false; // mid-combat teleport — ignore
         }
@@ -2986,6 +3004,15 @@ impl DataStorage {
         let actor_id = pdp.actor_id();
         let target_id = pdp.target_id();
 
+        if inner.gathering_since.is_some()
+            && pdp.damage() > 0
+            && actor_id != target_id
+            && inner.local_player_id == Some(i64::from(actor_id))
+        {
+            inner.gathering_since = None;
+            tracing::info!("Gathering ended: you hit entity {target_id}");
+        }
+
         // Not damage: a spirit and its owner naming each other.
         if let Some((summon, owner)) = owner_link(skill_code, actor_id, target_id) {
             // Sent only while the spirit is out.
@@ -3808,6 +3835,9 @@ impl DataStorage {
         let mut inner = self.inner.write();
         // A roster of this run: the remembered party is old news.
         inner.remembered_party.clear();
+        if members.len() >= 2 && members.len() > inner.party_members.len().max(1) && inner.gathering_since.take().is_some() {
+            tracing::info!("Gathering ended: party of {}", members.len());
+        }
         let local = inner.local_character_name.as_deref().map(str::trim).unwrap_or_default().to_string();
         if !local.is_empty() && members.iter().any(|(name, _)| name.trim() == local) {
             inner.self_in_roster = true;
@@ -5430,6 +5460,30 @@ mod tests {
         assert_eq!(storage.mob_kills_since(0), vec![(777, spot(12_000.0, -3_000.0), 5_000)]);
         assert!(storage.mob_kills_since(5_001).is_empty());
         assert!(storage.mob_spots().is_empty());
+        crate::clock::set_override(None);
+    }
+
+    #[test]
+    fn gathering_lasts_until_a_teleport() {
+        let storage = DataStorage::new();
+        let spot = Position { x: 1.0, y: 2.0, z: 3.0 };
+        storage.set_local_player_id(Some(14159));
+        crate::clock::set_override(Some(1_000));
+        storage.note_object(ObjectRecord::InRange(80, 4_100_001, spot, None));
+        storage.note_object(ObjectRecord::InRange(81, 1_301_199, spot, None));
+        // Someone else gathering, or you opening a Hidden Cube: not you gathering.
+        storage.note_object(ObjectRecord::Opening(80, 999));
+        storage.note_object(ObjectRecord::Opening(81, 14159));
+        assert_eq!(storage.gathering_since(), None);
+        storage.note_object(ObjectRecord::Opening(80, 14159));
+        assert_eq!(storage.gathering_since(), Some(1_000));
+        assert_eq!(storage.gathered_node_code(80), Some(4_100_001));
+        // The next node keeps the start.
+        crate::clock::set_override(Some(9_000));
+        storage.note_object(ObjectRecord::Opening(80, 14159));
+        assert_eq!(storage.gathering_since(), Some(1_000));
+        storage.note_zone_change();
+        assert_eq!(storage.gathering_since(), None);
         crate::clock::set_override(None);
     }
 
