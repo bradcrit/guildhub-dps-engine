@@ -1041,6 +1041,11 @@ struct Inner {
     /// The party's places, from its last roster (`note_party_size`).
     party_size: Option<usize>,
     party_placeholders_hidden: bool,
+    /// The dungeon you loaded out of into the open world, with its party
+    /// still on (0: none). Its party isn't listed while you stay outside —
+    /// the roster updates of members leaving after the run don't list it
+    /// again. See `party_placeholders_wanted`.
+    left_dungeon_id: i32,
     /// The party key of the last roster that had you in it; `None` outside a
     /// party. See `is_other_party`.
     own_party_key: Option<u32>,
@@ -1347,6 +1352,7 @@ impl DataStorage {
                 self_in_roster: false,
                 damage_since_roster_bind: 0,
                 party_placeholders_hidden: false,
+                left_dungeon_id: 0,
                 current_dungeon_id: 0,
                 roster_dungeon_id: 0,
                 current_map_id: None,
@@ -3796,6 +3802,7 @@ impl DataStorage {
         inner.own_party_key = None;
         inner.self_in_roster = false;
         inner.roster_dungeon_id = 0;
+        inner.left_dungeon_id = 0;
         inner.current_dungeon_id = dungeon_of_map(0, inner.current_map_id);
         drop(inner);
         self.flush_combat_only();
@@ -3872,7 +3879,17 @@ impl DataStorage {
         let dungeon = dungeon_of_map(inner.roster_dungeon_id, Some(map_id));
         if dungeon != inner.current_dungeon_id {
             tracing::debug!("Map {map_id}: dungeon {} -> {dungeon}", inner.current_dungeon_id);
+            // Out of a dungeon into the open world with its party still on:
+            // the run is over, the meter shows its idle card, not the party.
+            if inner.current_dungeon_id != 0 && is_open_world_map(map_id) && !inner.party_members.is_empty() {
+                tracing::info!("Left dungeon {} with the party on: no longer listed", inner.current_dungeon_id);
+                inner.left_dungeon_id = inner.current_dungeon_id;
+                inner.names_generation += 1;
+            }
             inner.current_dungeon_id = dungeon;
+        }
+        if dungeon != 0 {
+            inner.left_dungeon_id = 0;
         }
         // You left with the boss standing: the zone reset held back is due.
         let left = from.is_some_and(|from| from != map_id) && std::mem::take(&mut inner.zone_reset_held);
@@ -3890,6 +3907,10 @@ impl DataStorage {
     pub fn set_current_dungeon(&self, dungeon_id: i32) {
         if dungeon_id > 0 {
             let mut inner = self.inner.write();
+            // A roster for another dungeon: a new run is being formed, list it.
+            if inner.left_dungeon_id != 0 && inner.left_dungeon_id != dungeon_id {
+                inner.left_dungeon_id = 0;
+            }
             inner.roster_dungeon_id = dungeon_id;
             inner.current_dungeon_id = dungeon_of_map(dungeon_id, inner.current_map_id);
         }
@@ -3957,9 +3978,13 @@ impl DataStorage {
     /// resets). These rows are for the start of a run: they show for
     /// `PARTY_PLACEHOLDER_MS` after the last roster, and a manual reset clears
     /// them until the next one. Members who fight are shown regardless.
+    /// After the run, back in the open world, they aren't shown either (see
+    /// `left_dungeon_id`) — some stay in the party for a while, and the
+    /// meter showed them instead of its idle card (2026-11-10).
     pub fn party_placeholders_wanted(&self) -> bool {
         let inner = self.inner.read();
         !inner.party_placeholders_hidden
+            && inner.left_dungeon_id == 0
             && now_ms() - inner.party_roster_at_ms < PARTY_PLACEHOLDER_MS
     }
 
@@ -5584,6 +5609,34 @@ mod tests {
         s.inner.write().party_roster_at_ms -= 15 * 60 * 1000;
         assert!(!s.party_placeholders_wanted());
         assert_eq!(s.get_party_members().len(), 2, "the roster itself is kept, for combat power");
+    }
+
+    #[test]
+    fn a_dungeon_party_is_not_listed_after_the_run() {
+        let s = DataStorage::new();
+        let party = || vec![("Prenses".into(), member(2)), ("adam".into(), member(3)), ("Cem".into(), member(4))];
+        s.note_map_load(1010);
+        s.set_current_dungeon(600021);
+        s.set_party_roster(party(), true);
+        assert!(s.party_placeholders_wanted(), "formed in the open world, before the run");
+        s.note_map_load(600021);
+        assert!(s.party_placeholders_wanted(), "in the dungeon");
+
+        s.note_map_load(1010);
+        assert!(!s.party_placeholders_wanted(), "back out: the idle card");
+        s.set_current_dungeon(600021);
+        s.set_party_roster(party().into_iter().take(2).collect(), true);
+        assert!(!s.party_placeholders_wanted(), "someone left after the run: still not listed");
+        assert_eq!(s.get_party_members().len(), 2, "the roster itself is kept");
+
+        s.set_current_dungeon(600011);
+        s.set_party_roster(party(), true);
+        assert!(s.party_placeholders_wanted(), "queued for another dungeon");
+        s.note_map_load(600011);
+        s.note_map_load(1010);
+        assert!(!s.party_placeholders_wanted());
+        s.note_map_load(600011);
+        assert!(s.party_placeholders_wanted(), "back in for another run");
     }
 
     /// A meter started mid-game: the fights go under the server learnt for
