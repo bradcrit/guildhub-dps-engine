@@ -72,7 +72,10 @@
 //! `kills` your last 50 kills and assists of enemy players, oldest first
 //! (`{"at","name","class","itemLevel","rank","killingBlow","damage","hits","skill",
 //! "total","helpers","abyss"}`: the last hit yours, your damage, hits and top
-//! skill, everyone's damage and how many others hit them, in the 15 s before).
+//! skill, everyone's damage and how many others hit them, in the 15 s before);
+//! `abyssPoints` the Abyss Points you gained lately (`{"at","amount"}`, oldest
+//! first: each rise of the total the game sends, from any source — not the
+//! first total after a start or a character switch).
 //! `self` also has your `itemLevel` and `combatPower` (a party roster's, else
 //! your last self record's; null before either), and `map`: the map id of the
 //! last zone load (null before one).
@@ -197,6 +200,7 @@ use a2tools_dps_meter_lib::capture::pcap_capturer::PcapCapturer;
 use a2tools_dps_meter_lib::combat::capture_dispatcher::CaptureDispatcher;
 use a2tools_dps_meter_lib::combat::data_storage::DataStorage;
 use a2tools_dps_meter_lib::combat::dps_calculator::DpsCalculator;
+use a2tools_dps_meter_lib::combat::kda::Kind as KdaKind;
 use a2tools_dps_meter_lib::combat::ping_tracker::PingTracker;
 use a2tools_dps_meter_lib::combat::data_storage::BossEventKind;
 use a2tools_dps_meter_lib::entity::fight_record::FightRecord;
@@ -1052,7 +1056,17 @@ impl Engine {
                 })
             })
             .collect();
-        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss(), "death": death, "kills": kills }).to_string()
+        // Abyss Points gained (`combat::kda`, upstream 2.0.94): the rises of the total.
+        let abyss_points: Vec<serde_json::Value> = self
+            .storage
+            .kda_since(0)
+            .map(|(_, events)| events)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| (e.kind == KdaKind::Points).then(|| serde_json::json!({ "at": e.at, "amount": e.amount })))
+            .collect();
+        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss(), "death": death, "kills": kills, "abyssPoints": abyss_points })
+            .to_string()
     }
 
     fn status(&self) -> serde_json::Value {
