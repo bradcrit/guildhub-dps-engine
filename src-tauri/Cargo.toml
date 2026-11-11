@@ -1,6 +1,6 @@
 [package]
 name = "a2tools-dps-meter"
-version = "2.0.95"
+version = "2.0.96"
 description = "A2Tools DPS Meter - AION 2 real-time DPS overlay"
 authors = ["taengu"]
 edition = "2024"
@@ -95,6 +95,11 @@ required-features = ["desktop"]
 [[bin]]
 name = "a2t-derive"
 path = "tools/a2t_derive.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "a2t-hits"
+path = "tools/a2t_hits.rs"
 required-features = ["desktop"]
 
 [[bin]]

@@ -454,6 +454,7 @@ mod tests {
             local_actor_id: None,
             killed: None,
             max_hp_from_spawn: None,
+            player_stats: None,
         }
     }
 
