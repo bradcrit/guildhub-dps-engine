@@ -739,32 +739,17 @@ impl StreamProcessor {
         }
     }
 
-    // ===== ZONE CHANGE (23 36) =====
+    // ===== ZONE CHANGE (23 36, 51 96 since 2026-11-11) =====
 
-    /// Self/world teleport packet: `<len varint> 23 36 <entity_id varint = 0> <x><y><z> ...`.
-    /// This fires once on entering a zone/instance (the local player is teleported in)
-    /// and not during combat, so it drives a combat reset — the actual reset is gated
-    /// by a lull + debounce in `note_zone_change`, so an in-combat teleport (a boss
-    /// knockback/pull) never wipes an active fight. The June 2026 +1 opcode shift moved
-    /// the spawn/death family but this position opcode (0x23) is unaffected.
+    /// Self/world teleport packet. This fires once on entering a zone/instance
+    /// (the local player is teleported in) and not during combat, so it drives a
+    /// combat reset — the actual reset is gated by a lull + debounce in
+    /// `note_zone_change`, so an in-combat teleport (a boss knockback/pull) never
+    /// wipes an active fight. See `is_self_teleport` for the layouts.
     fn parse_zone_change_packet(&self, packet: &[u8]) {
-        let length_info = read_varint(packet, 0);
-        if length_info.length < 0 {
-            return;
+        if is_self_teleport(packet) {
+            self.data_storage.note_zone_change();
         }
-        let offset = length_info.length as usize;
-        if offset + 2 >= packet.len() {
-            return;
-        }
-        if packet[offset] != 0x23 || packet[offset + 1] != 0x36 {
-            return;
-        }
-        // entity id 0 == the local player being teleported (a zone load), as opposed
-        // to another entity's routine position update.
-        if packet[offset + 2] != 0x00 {
-            return;
-        }
-        self.data_storage.note_zone_change();
     }
 
     // ===== MAP LOAD (21 36) =====
@@ -2421,6 +2406,32 @@ impl StreamProcessor {
 }
 
 // ===== FREE FUNCTIONS =====
+
+/// Is this the local player's teleport, sent once after each map load?
+///
+/// ```text
+/// until 2026-11-10: <len> 23 36 00 <5 × 00> <x f32> <y f32> <z f32> <u32> <u16>
+/// from 2026-11-11:  <len> 51 96 <u16> <x f32> <y f32> <z f32> <u32> <6 × 00>
+/// ```
+///
+/// The old one: entity id 0 (you), as opposed to another entity's routine
+/// `23 36` position update. NC's patch of 2026-11-11 dropped `23 36`
+/// altogether; `51 96` came in its place, 26 bytes past the length, with the
+/// map load's position, 3 to 4 s after each of the 6 map loads of that
+/// morning's capture and never otherwise. The June 2026 +1 opcode shift left
+/// the old one alone.
+fn is_self_teleport(packet: &[u8]) -> bool {
+    let length_info = read_varint(packet, 0);
+    if length_info.length <= 0 {
+        return false;
+    }
+    let offset = length_info.length as usize;
+    match packet.get(offset..offset + 3) {
+        Some([0x23, 0x36, 0x00]) => true,
+        Some([0x51, 0x96, _]) => packet.len() - offset >= 2 + 2 + 12,
+        _ => false,
+    }
+}
 
 /// Hit records filed under one skill's id that another skill dealt. A
 /// Cleric's Judgment Thunder at level 16 has the Specialty "Activates Divine
@@ -5719,6 +5730,17 @@ mod tests {
         // Back in: the load names the instance.
         load("34213601000000d52709003b1a350000000000f7e646460d7fb0c60080b045409da54200000000000000000000004f0000");
         assert_eq!(storage.current_dungeon_id(), 600021);
+    }
+
+    /// Teleports from the captures of 2026-11-10 (`23 36 00`) and 2026-11-11
+    /// (`51 96`, after NC's patch); another entity's `23 36` is no teleport.
+    #[test]
+    fn self_teleports_old_and_new() {
+        let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+        assert!(is_self_teleport(&hex("1B2336000000000000D98FEF476FA33B470040F64402000000C715")));
+        assert!(is_self_teleport(&hex("1B5196963ECA8DD147C19592470040654400000100000000000000")));
+        assert!(!is_self_teleport(&hex("1B2336A10F0000D98FEF476FA33B470040F64402000000C715")));
+        assert!(!is_self_teleport(&hex("055196963E")), "too short for a position");
     }
 
     #[test]
