@@ -960,6 +960,12 @@ pub struct DataStorage {
     /// The entity id your resources were last read under (`self_resources`):
     /// a zone load gives you a new one, and your values move along with you.
     resources_self: Mutex<Option<i32>>,
+    /// The map load, roster and spawns of the zone you are in (and the one
+    /// you left), for slices (see `entry_ledger`). A boss spawns when the
+    /// party enters; one pulled more than the slice's prelude after that
+    /// (Ludra's runs last up to two hours) had no spawn in its slice, so the
+    /// log service found no boss and refused it (~4,000 a week, 2026-11).
+    entry: Mutex<super::entry_ledger::EntryLedger>,
     /// Who killed you (see `combat::death_recap`). Its own lock, as
     /// `stagger`.
     death_recaps: Mutex<DeathRecaps>,
@@ -1469,6 +1475,7 @@ impl DataStorage {
             skill_timers: Mutex::new(SkillTimers::default()),
             resources: Mutex::new(HashMap::new()),
             resources_self: Mutex::new(None),
+            entry: Mutex::new(Default::default()),
             death_recaps: Mutex::new(DeathRecaps::default()),
             loot_rolls: Mutex::new(Default::default()),
             black_markets: Mutex::new(Default::default()),
@@ -1960,6 +1967,55 @@ impl DataStorage {
         self.abnormals.lock().timeline.fight_stats(start_ms, end_ms)
     }
 
+    /// A framed packet: a map load, roster or spawn is kept for slices
+    /// (`entry_ledger`).
+    pub fn note_entry_packet(&self, packet: &[u8]) {
+        self.entry.lock().note(now_ms(), packet);
+    }
+
+    /// The map loads, rosters and spawns kept for slices.
+    pub fn entry_packets(&self) -> super::entry_ledger::EntryPackets {
+        self.confirm_restored_entry();
+        self.entry.lock().packets(now_ms())
+    }
+
+    /// Read back the ledger a previous run of the meter kept at `path`. It
+    /// waits for the game to name you before it is used (`entry_ledger`).
+    pub fn restore_entry_ledger(&self, path: &std::path::Path) {
+        if let Some(saved) = super::entry_ledger::load(path, now_ms()) {
+            tracing::info!("entry ledger: read back for map {}, entity {}", saved.map_id, saved.local_id);
+            self.entry.lock().restore(saved);
+        }
+    }
+
+    /// The ledger to write, if it changed (`EntryLedger::take_save`).
+    pub fn entry_ledger_to_save(&self) -> Option<Option<super::entry_ledger::Saved>> {
+        self.confirm_restored_entry();
+        let (local_id, roster_dungeon) = {
+            let inner = self.inner.read();
+            (game_local_id(&inner), inner.roster_dungeon_id)
+        };
+        self.entry.lock().take_save(local_id, roster_dungeon)
+    }
+
+    /// Once the game has named you, a ledger read back is this instance's or
+    /// none; this one's also says where you are, when nothing else has yet.
+    fn confirm_restored_entry(&self) {
+        if !self.entry.lock().has_restored() {
+            return;
+        }
+        let Some(local_id) = game_local_id(&self.inner.read()) else { return };
+        let Some(saved) = self.entry.lock().confirm(local_id) else { return };
+        let mut inner = self.inner.write();
+        if inner.current_map_id.is_none() {
+            inner.current_map_id = Some(saved.map_id);
+            if inner.roster_dungeon_id == 0 {
+                inner.roster_dungeon_id = saved.roster_dungeon;
+            }
+            inner.current_dungeon_id = dungeon_of_map(inner.roster_dungeon_id, inner.current_map_id);
+        }
+    }
+
     /// The stat records to put in a slice: the last whole sheet and the
     /// changes since, as framed packets with their capture times.
     pub fn stat_packets(&self) -> Vec<(i64, Vec<u8>)> {
@@ -2416,17 +2472,34 @@ impl DataStorage {
             entity_id,
             inner.local_player_id
         );
-        inner.loot_identity.stats_streak = None;
-        inner.local_player_id = Some(entity_id as i64);
-        inner.loot_identity.local_from_scope = true;
-        inner.loot_identity.local_from_stats = true;
-        inner.loot_identity.applied = false;
-        if inner.local_identity_from_game {
-            // What the game said is about an entity no longer you; the UI's
-            // name may come back, but only as a name, not on this id.
-            inner.local_identity_from_game = false;
-            inner.local_character_name = None;
+        bind_unnamed_self(&mut inner, entity_id);
+        true
+    }
+
+    /// The server's login record (`53 20`) named `entity_id` as you.
+    ///
+    /// It is sent once as you enter the world (login, character switch,
+    /// server transfer), just before the map load: on 2026-11-12 (Global)
+    /// 0.17 s ahead of the `4A 36` records that would have moved you and 8 s
+    /// ahead of the self record. It names no one but you, so one is enough.
+    /// Like the `4A 36` records it carries no name, and the name the game
+    /// last stated may be another character's; the self record that follows
+    /// names this one.
+    /// Returns whether the local identity changed.
+    pub fn note_login_record(&self, entity_id: i32) -> bool {
+        if !(100..=9_999_999).contains(&entity_id) {
+            return false;
         }
+        let mut inner = self.inner.write();
+        if inner.local_player_id == Some(entity_id as i64) {
+            return false;
+        }
+        tracing::info!(
+            "login record: local player -> entity {} (was {:?})",
+            entity_id,
+            inner.local_player_id
+        );
+        bind_unnamed_self(&mut inner, entity_id);
         true
     }
 
@@ -5015,6 +5088,32 @@ fn shop_limits_of(inner: &Inner, now: i64) -> std::collections::BTreeMap<u32, (u
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const WEEK_MS: i64 = 7 * DAY_MS;
+/// Your entity id, when the game stated it: a self record, the `4A 36`
+/// records or the login record. Not one the UI sent back, which after a
+/// restart can be the last session's.
+fn game_local_id(inner: &Inner) -> Option<i64> {
+    (inner.local_identity_from_game || inner.loot_identity.local_from_stats)
+        .then_some(inner.local_player_id)
+        .flatten()
+}
+
+/// You are `entity_id`, by the game's word but without a name: the `4A 36`
+/// records or the login record (`DataStorage::note_self_stats`,
+/// `note_login_record`).
+fn bind_unnamed_self(inner: &mut Inner, entity_id: i32) {
+    inner.loot_identity.stats_streak = None;
+    inner.local_player_id = Some(entity_id as i64);
+    inner.loot_identity.local_from_scope = true;
+    inner.loot_identity.local_from_stats = true;
+    inner.loot_identity.applied = false;
+    if inner.local_identity_from_game {
+        // What the game said is about an entity no longer you; the UI's
+        // name may come back, but only as a name, not on this id.
+        inner.local_identity_from_game = false;
+        inner.local_character_name = None;
+    }
+}
+
 /// How long the Abyss Points the game sent wait for a self record before
 /// they count as the current character's.
 const ABYSS_POINTS_HOLD_MS: i64 = 3_000;
