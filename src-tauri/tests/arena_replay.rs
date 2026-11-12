@@ -1,9 +1,14 @@
-//! Replays a capture of a 1v1 arena match through the stream processor and
-//! checks the match `combat::arena` makes of it.
+//! Replays captures of 1v1 arena matches through the stream processor and
+//! checks the match `combat::arena` makes of them.
 //!
-//! The capture is the user's own of 2026-11-12 (`packets_20261112_194804.txt`):
-//! map 61, against a Gladiator, lost the first round and won the next three.
-//! Skips unless A2_ARENA_CAPTURE names it.
+//! The user's own captures of 2026-11-12 (A2_ARENA_CAPTURE, one path; skips
+//! when unset):
+//! - `packets_20261112_194804.txt`: map 61 against StayHype, a Gladiator —
+//!   lost the first round, won the next three (3:1). The roster came 50 ms
+//!   before the self record.
+//! - `packets_20261112_203716.txt`: map 60 against Freydis, a Gladiator — 3:0.
+//!
+//! Either way the opponent is named by the roster before the first round.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,13 +22,15 @@ use a2tools_dps_meter_lib::i18n::lookup::{NpcLookup, SkillLookup};
 use a2tools_dps_meter_lib::share;
 
 #[test]
-fn the_solo_arena_match_comes_out_three_to_one() {
+fn a_solo_arena_match_reads_as_the_user_saw_it() {
     let Ok(path) = std::env::var("A2_ARENA_CAPTURE") else {
         eprintln!("A2_ARENA_CAPTURE unset; skipping");
         return;
     };
     let storage = Arc::new(DataStorage::new());
     let mut streams: HashMap<String, (StreamProcessor, PacketAccumulator)> = HashMap::new();
+    // Was the opponent known (with a server) before the first round began?
+    let mut named_before_rounds: Option<bool> = None;
     for cap in share::read_capture(std::path::Path::new(&path)).expect("capture") {
         let (processor, acc) = streams.entry(cap.stream.clone()).or_insert_with(|| {
             let p = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
@@ -34,23 +41,36 @@ fn the_solo_arena_match_comes_out_three_to_one() {
         if consumed > 0 {
             acc.discard_bytes(consumed);
         }
+        if named_before_rounds.is_none() {
+            if let Some(m) = storage.arena_matches().first() {
+                if m.opponent.as_ref().is_some_and(|o| o.server.is_some()) || !m.rounds.is_empty() {
+                    named_before_rounds = Some(m.rounds.is_empty());
+                }
+            }
+        }
     }
 
     let matches = storage.arena_matches();
     for m in &matches {
-        eprintln!("{:?} score {:?}", m.opponent, m.score());
+        eprintln!("map {} {:?} score {:?}", m.map, m.opponent, m.score());
         for r in &m.rounds {
             eprintln!("  {:?} dealt {} taken {}", r.winner, r.dealt, r.taken);
         }
     }
     let m = matches.first().expect("a match");
-    assert_eq!(m.map, 61);
     assert_eq!(m.roster.as_ref().map(Vec::len), Some(2), "the roster (19 e3) was read");
     assert!(!m.is_team());
+    assert_eq!(named_before_rounds, Some(true), "the roster named the opponent before the first round");
     let opponent = m.opponent.as_ref().expect("the opponent");
     assert_eq!(opponent.class, Some(JobClass::Gladiator));
-    assert_eq!(m.score(), (3, 1));
-    assert_eq!(m.rounds.iter().map(|r| r.winner).collect::<Vec<_>>(), [Some(Side::Them), Some(Side::Me), Some(Side::Me), Some(Side::Me)]);
+    assert!(opponent.id > 0 && opponent.item_level.is_some(), "their spawn gave the entity and item level");
+    let expected = match m.map {
+        61 => ("StayHype", vec![Some(Side::Them), Some(Side::Me), Some(Side::Me), Some(Side::Me)]),
+        60 => ("Freydis", vec![Some(Side::Me); 3]),
+        other => panic!("an arena map of no capture: {other}"),
+    };
+    assert_eq!(opponent.name, expected.0);
+    assert_eq!(m.rounds.iter().map(|r| r.winner).collect::<Vec<_>>(), expected.1);
     assert!(m.rounds.iter().all(|r| r.dealt > 0 && r.taken > 0));
     assert!(m.left_ms.is_some(), "left for map 1110");
 }

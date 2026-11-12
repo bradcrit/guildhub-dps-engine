@@ -1495,6 +1495,10 @@ impl DataStorage {
         nearby.spawn(id, name, class, item_level, faction, paired, now_ms());
         nearby.set_rank(id, rank);
         nearby.set_server(id, server);
+        if let Some(p) = nearby.player(id).cloned() {
+            drop(nearby);
+            self.arena.lock().player_spawned(&p);
+        }
     }
 
     /// An entity moved or used a skill; only players in sight are kept.
@@ -1547,6 +1551,7 @@ impl DataStorage {
         if self.arena.lock().current().is_none() {
             return;
         }
+        self.settle_arena_opponent();
         let (actor, known_players) = {
             let inner = self.inner.read();
             let resolved = summon_resolver::resolve(actor, &inner.summon_storage);
@@ -1568,10 +1573,26 @@ impl DataStorage {
         tracing::info!("Arena roster: {}", names.join(", "));
         let me = self.local_character_name();
         self.arena.lock().roster(roster, me.as_deref());
+        self.settle_arena_opponent();
+    }
+
+    /// The roster's opponent once your name is known (`ArenaTracker::assign`),
+    /// and their entity when they spawned before it was named.
+    fn settle_arena_opponent(&self) {
+        let me = self.local_character_name();
+        let mut arena = self.arena.lock();
+        if arena.current().is_none() {
+            return;
+        }
+        arena.assign(me.as_deref());
+        if let Some(p) = arena.opponent_without_entity().and_then(|name| self.nearby.lock().player_named(&name).cloned()) {
+            arena.player_spawned(&p);
+        }
     }
 
     /// The 1v1 arena's matches, the newest last (`combat::arena`).
     pub fn arena_matches(&self) -> Vec<crate::combat::arena::ArenaMatch> {
+        self.settle_arena_opponent();
         self.arena.lock().matches().to_vec()
     }
 

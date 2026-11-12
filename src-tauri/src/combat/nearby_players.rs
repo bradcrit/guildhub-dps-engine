@@ -348,6 +348,11 @@ impl NearbyPlayers {
         self.players.get(&id)
     }
 
+    /// A player in sight by name, the latest spawn of it.
+    pub fn player_named(&self, name: &str) -> Option<&NearbyPlayer> {
+        self.players.values().filter(|p| p.name == name).max_by_key(|p| p.last_seen_ms)
+    }
+
     /// A player's server, as their spawn told it (kept when it didn't).
     pub fn set_server(&mut self, id: i32, server: Option<u16>) {
         if let (Some(p), Some(server)) = (self.players.get_mut(&id), server) {
