@@ -7,6 +7,8 @@
 //!   lost the first round, won the next three (3:1). The roster came 50 ms
 //!   before the self record.
 //! - `packets_20261112_203716.txt`: map 60 against Freydis, a Gladiator — 3:0.
+//! - `packets_20261112_224035.txt`: map 61 against kalandra, a Sorcerer —
+//!   lost, lost, won, won, lost (2:3). First to three wins the match.
 //!
 //! Either way the opponent is named by the roster before the first round.
 
@@ -62,15 +64,16 @@ fn a_solo_arena_match_reads_as_the_user_saw_it() {
     assert!(!m.is_team());
     assert_eq!(named_before_rounds, Some(true), "the roster named the opponent before the first round");
     let opponent = m.opponent.as_ref().expect("the opponent");
-    assert_eq!(opponent.class, Some(JobClass::Gladiator));
     assert!(opponent.id > 0 && opponent.item_level.is_some(), "their spawn gave the entity and item level");
-    let expected = match m.map {
-        61 => ("StayHype", vec![Some(Side::Them), Some(Side::Me), Some(Side::Me), Some(Side::Me)]),
-        60 => ("Freydis", vec![Some(Side::Me); 3]),
-        other => panic!("an arena map of no capture: {other}"),
+    let (me, them) = (Some(Side::Me), Some(Side::Them));
+    let (class, rounds) = match opponent.name.as_str() {
+        "StayHype" => (JobClass::Gladiator, vec![them, me, me, me]),
+        "Freydis" => (JobClass::Gladiator, vec![me, me, me]),
+        "kalandra" => (JobClass::Sorcerer, vec![them, them, me, me, them]),
+        other => panic!("an opponent of no capture: {other}"),
     };
-    assert_eq!(opponent.name, expected.0);
-    assert_eq!(m.rounds.iter().map(|r| r.winner).collect::<Vec<_>>(), expected.1);
+    assert_eq!(opponent.class, Some(class));
+    assert_eq!(m.rounds.iter().map(|r| r.winner).collect::<Vec<_>>(), rounds);
     assert!(m.rounds.iter().all(|r| r.dealt > 0 && r.taken > 0));
     assert!(m.left_ms.is_some(), "left for map 1110");
 }
