@@ -314,6 +314,7 @@ impl StreamProcessor {
         self.parse_daily_duty_packet(packet);
         self.parse_shop_and_craft_packet(packet);
         self.parse_kinah_and_abyss_points_packet(packet);
+        self.parse_arena_roster_packet(packet);
         self.parse_stagger_gauge_packet(packet);
         self.parse_self_stats_packet(packet);
         // The desktop meter's capture follows it; a replay has nothing to follow.
@@ -649,6 +650,28 @@ impl StreamProcessor {
     /// Seen on 2026-10-25 (Nullception): the Abyss Points 50659 of 2000000
     /// as the game said, and Kinah 520, 1017, 1534 as it was picked up (the
     /// game: 1534 of its daily 1000000).
+    // ===== ARENA ROSTER (19 E3) =====
+
+    /// The arena's roster as a match starts (`combat::arena::parse_roster`).
+    fn parse_arena_roster_packet(&self, packet: &[u8]) {
+        let length_info = read_varint(packet, 0);
+        if length_info.length <= 0 {
+            return;
+        }
+        let offset = length_info.length as usize;
+        if packet.get(offset..offset + 2) != Some(&[0x19, 0xE3][..]) {
+            return;
+        }
+        let body = packet.get(offset + 2..).unwrap_or_default();
+        match crate::combat::arena::parse_roster(body) {
+            Some(roster) => self.data_storage.note_arena_roster(roster),
+            None => {
+                let hex: String = body.iter().take(64).map(|b| format!("{b:02x}")).collect();
+                tracing::info!("Arena roster: unreadable ({} bytes): {hex}", body.len());
+            }
+        }
+    }
+
     fn parse_kinah_and_abyss_points_packet(&self, packet: &[u8]) {
         let length_info = read_varint(packet, 0);
         if length_info.length <= 0 {

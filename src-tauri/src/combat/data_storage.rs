@@ -7,6 +7,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::capture::abnormal;
 use crate::capture::game_lists::{EntryCount, ListUpdate};
 use crate::combat::nearby_players::{DeathRecap, KillRecord, NearbyPlayer, NearbyPlayers};
+use crate::combat::arena::ArenaTracker;
 use crate::combat::death_recap::{self, DeathRecaps};
 use crate::combat::kda::{Kda, KdaEvent, Kind as KdaKind};
 use crate::combat::stagger::{End, Outcome, StaggerHit, StaggerLog, StaggerWindow};
@@ -947,6 +948,9 @@ pub struct DataStorage {
     /// The players in sight, for the PvP view (`combat::nearby_players`).
     /// Its own lock, as `abnormals`.
     nearby: Mutex<NearbyPlayers>,
+    /// The 1v1 arena's match, round by round (`combat::arena`). Its own
+    /// lock, as `abnormals`.
+    arena: Mutex<ArenaTracker>,
     /// Stagger gauges and their windows (see `combat::stagger`). Its own
     /// lock, as `abnormals`: fed by its own records, read when a fight is
     /// saved.
@@ -1471,6 +1475,7 @@ impl DataStorage {
             on_hit: RwLock::new(None),
             abnormals: Mutex::new(AbnormalLog { timeline: abnormal::Timeline::default(), pruned_ms: NEVER_MS }),
             nearby: Mutex::new(NearbyPlayers::default()),
+            arena: Mutex::new(ArenaTracker::default()),
             stagger: Mutex::new(StaggerLog::default()),
             skill_timers: Mutex::new(SkillTimers::default()),
             resources: Mutex::new(HashMap::new()),
@@ -1509,6 +1514,7 @@ impl DataStorage {
         if damage <= 0 || actor == target {
             return;
         }
+        self.note_arena_hit(me as i32, actor, target, damage);
         let (actor, actor_is_player, party) = {
             let inner = self.inner.read();
             // No PvP in a dungeon: everything between players there is your party's.
@@ -1532,6 +1538,41 @@ impl DataStorage {
         } else {
             nearby.hit_on_player(target, actor, damage as u64, skill, actor_is_player, now_ms());
         }
+    }
+
+    /// A hit for the 1v1 arena (`combat::arena`): between you and a player,
+    /// a summon's as its owner's. Before the dungeon check — what the arena
+    /// counts as is not known.
+    fn note_arena_hit(&self, me: i32, actor: i32, target: i32, damage: i32) {
+        if self.arena.lock().current().is_none() {
+            return;
+        }
+        let (actor, known_players) = {
+            let inner = self.inner.read();
+            let resolved = summon_resolver::resolve(actor, &inner.summon_storage);
+            let actor = if inner.known_player_ids.contains(&resolved) { resolved } else { actor };
+            let other = if actor == me { target } else { actor };
+            (actor, inner.known_player_ids.contains(&other))
+        };
+        if actor == target || (actor != me && target != me) {
+            return;
+        }
+        let other = if actor == me { target } else { actor };
+        let profile = known_players.then(|| self.nearby.lock().player(other).cloned()).flatten();
+        self.arena.lock().hit(me, actor, target, damage as u64, profile.as_ref(), now_ms());
+    }
+
+    /// The arena's roster as a match starts (`19 e3`).
+    pub fn note_arena_roster(&self, roster: Vec<crate::combat::arena::RosterEntry>) {
+        let names: Vec<String> = roster.iter().map(|e| format!("{} ({})", e.name, e.team)).collect();
+        tracing::info!("Arena roster: {}", names.join(", "));
+        let me = self.local_character_name();
+        self.arena.lock().roster(roster, me.as_deref());
+    }
+
+    /// The 1v1 arena's matches, the newest last (`combat::arena`).
+    pub fn arena_matches(&self) -> Vec<crate::combat::arena::ArenaMatch> {
+        self.arena.lock().matches().to_vec()
     }
 
     /// Your faction as known — from your self record, or guessed.
@@ -3494,6 +3535,7 @@ impl DataStorage {
     }
 
     fn note_hp_of(&self, entity_id: i32, hp: i32, max_hp: Option<i32>) {
+        self.arena.lock().hp(entity_id, i64::from(hp), now_ms());
         let mut inner = self.inner.write();
         if let Some(max) = max_hp.filter(|&m| m > 0) {
             inner.party_max_hp.insert(entity_id, max);
@@ -4092,6 +4134,7 @@ impl DataStorage {
     /// what says where the player is; see `dungeon_of_map`.
     pub fn note_map_load(&self, map_id: i32) {
         self.skill_timers.lock().map_load();
+        self.arena.lock().map_loaded(map_id, now_ms());
         // New entity ids: the players in sight are spawned again.
         {
             let mut nearby = self.nearby.lock();

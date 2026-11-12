@@ -75,7 +75,11 @@
 //! skill, everyone's damage and how many others hit them, in the 15 s before);
 //! `abyssPoints` the Abyss Points you gained lately (`{"at","amount"}`, oldest
 //! first: each rise of the total the game sends, from any source — not the
-//! first total after a start or a character switch).
+//! first total after a start or a character switch); `arena` the last arena
+//! match (`{"map","enteredAt","leftAt","finished","team","opponent":{"name",
+//! "class","itemLevel","serverId"},"won","lost","rounds":[{"start","end",
+//! "winner","dealt","taken"}]}`, `winner` "me", "them" or null, `team` a 5v5
+//! with no rounds counted yet) or null before one (`combat::arena`).
 //! `self` also has your `itemLevel` and `combatPower` (a party roster's, else
 //! your last self record's; null before either), and `map`: the map id of the
 //! last zone load (null before one).
@@ -210,6 +214,7 @@ use a2tools_dps_meter_lib::combat::capture_dispatcher::CaptureDispatcher;
 use a2tools_dps_meter_lib::combat::data_storage::DataStorage;
 use a2tools_dps_meter_lib::combat::dps_calculator::DpsCalculator;
 use a2tools_dps_meter_lib::combat::kda::Kind as KdaKind;
+use a2tools_dps_meter_lib::combat::arena::Side;
 use a2tools_dps_meter_lib::combat::ping_tracker::PingTracker;
 use a2tools_dps_meter_lib::combat::data_storage::BossEventKind;
 use a2tools_dps_meter_lib::entity::fight_record::FightRecord;
@@ -1100,8 +1105,41 @@ impl Engine {
             .into_iter()
             .filter_map(|e| (e.kind == KdaKind::Points).then(|| serde_json::json!({ "at": e.at, "amount": e.amount })))
             .collect();
-        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss(), "death": death, "kills": kills, "abyssPoints": abyss_points })
+        serde_json::json!({ "players": players, "abyss": self.storage.in_abyss(), "death": death, "kills": kills, "abyssPoints": abyss_points, "arena": self.arena_json() })
             .to_string()
+    }
+
+    /// The last arena match (`combat::arena`), the one being fought while
+    /// `finished` is false — null before one. A team match (5v5) has no
+    /// rounds: it isn't counted yet.
+    fn arena_json(&self) -> serde_json::Value {
+        let matches = self.storage.arena_matches();
+        let Some(m) = matches.last() else { return serde_json::Value::Null };
+        let (won, lost) = m.score();
+        let side = |s: Option<Side>| match s {
+            Some(Side::Me) => serde_json::json!("me"),
+            Some(Side::Them) => serde_json::json!("them"),
+            None => serde_json::Value::Null,
+        };
+        let rounds: Vec<_> = m
+            .rounds
+            .iter()
+            .map(|r| serde_json::json!({ "start": r.started_ms, "end": r.ended_ms, "winner": side(r.winner), "dealt": r.dealt, "taken": r.taken }))
+            .collect();
+        let opponent = m.opponent.as_ref().map(|o| {
+            serde_json::json!({ "name": o.name, "class": o.class.map(class_key), "itemLevel": o.item_level, "serverId": o.server })
+        });
+        serde_json::json!({
+            "map": m.map,
+            "enteredAt": m.entered_ms,
+            "leftAt": m.left_ms,
+            "finished": m.left_ms.is_some(),
+            "team": m.is_team(),
+            "opponent": opponent,
+            "won": won,
+            "lost": lost,
+            "rounds": rounds,
+        })
     }
 
     fn status(&self) -> serde_json::Value {

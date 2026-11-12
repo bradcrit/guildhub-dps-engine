@@ -343,6 +343,11 @@ impl NearbyPlayers {
         );
     }
 
+    /// A player in sight, of either faction.
+    pub fn player(&self, id: i32) -> Option<&NearbyPlayer> {
+        self.players.get(&id)
+    }
+
     /// A player's server, as their spawn told it (kept when it didn't).
     pub fn set_server(&mut self, id: i32, server: Option<u16>) {
         if let (Some(p), Some(server)) = (self.players.get_mut(&id), server) {

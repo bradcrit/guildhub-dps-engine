@@ -1,3 +1,4 @@
+pub mod arena;
 pub mod data_storage;
 pub mod death_recap;
 pub mod dps_calculator;
