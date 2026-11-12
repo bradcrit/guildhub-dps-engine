@@ -488,7 +488,12 @@ impl StreamProcessor {
         }
         let offset = length_info.length as usize;
         let record = packet.get(offset..);
-        if record == Some(&[0x13, 0x92, 0x00, 0x00][..]) || record == Some(&[0x1D, 0x97, 0x00, 0x00][..]) {
+        // `1f 92 <u8>`: the game dissolved your party — the arena's party of
+        // five as its 5v5 ended (`1f 92 08`, 2026-11-12, the moment your team
+        // was wiped; Kloggzer's PlayerFrames saw it at both arena ends of a
+        // capture). Without it the five stayed in the meter after the arena.
+        let dissolved = matches!(record, Some([0x1F, 0x92, _]));
+        if record == Some(&[0x13, 0x92, 0x00, 0x00][..]) || record == Some(&[0x1D, 0x97, 0x00, 0x00][..]) || dissolved {
             self.data_storage.note_party_left();
         }
     }

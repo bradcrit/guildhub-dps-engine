@@ -73,6 +73,7 @@ fn a_solo_arena_match_reads_as_the_user_saw_it() {
         let deaths = |team| m.players.iter().filter(|p| p.team == team).map(|p| p.deaths).sum::<u32>();
         assert_eq!((deaths(1), deaths(2)), (0, 5));
         assert!(m.players.iter().all(|p| p.dealt > 0 || p.taken > 0));
+        assert!(storage.get_party_members().is_empty(), "the arena's party went with the match (1f 92)");
         return;
     }
     assert_eq!(m.roster.as_ref().map(Vec::len), Some(2), "the roster (19 e3) was read");
