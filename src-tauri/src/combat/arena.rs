@@ -1,5 +1,5 @@
-//! The 1v1 arena (Arena of Solitude): the match against one player, round by
-//! round.
+//! The arena: a 1v1 match against one player, round by round, or a 5v5
+//! between two teams.
 //!
 //! What a capture of one match showed (2026-11-12, a Gladiator, 3:1): the
 //! arena is map 61, loaded again (61 -> 61) between two rounds; both players
@@ -14,8 +14,15 @@
 //! starts (`19 e3`, `parse_roster`) — named, with class and server, before
 //! the first hit; their spawn (`45 36`) adds the entity and item level — or,
 //! without a roster, the first player you hit or who hits you; hits with
-//! anyone else are left out. A roster of more
-//! than one a side is a team match (5v5 on the same maps): not counted yet.
+//! anyone else are left out. First to three rounds wins (3:1, 3:0, 2:3 in the
+//! captures of 2026-11-12).
+//!
+//! A roster of more than one a side is a team match (5v5 on the same maps):
+//! every player of the roster with their damage on the other team, the
+//! damage they took from it and their deaths; a round ends when one team is
+//! all at 0 HP. One round decided the 5v5 of 2026-11-12 (yours wiped in 18 s,
+//! then out of the arena). Players get their entity from their spawn, you
+//! from your own hits.
 //!
 //! The arena maps are aion2maps.com's instance index's `arena_battlefield`
 //! of `ArenaCombat`: 60 Fire Temple Arena, 61 Impetusium Arena (up to 10
@@ -114,6 +121,24 @@ pub struct Opponent {
     pub server: Option<u16>,
 }
 
+/// A player of a team match (from the roster), and what the match did to them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamPlayer {
+    pub name: String,
+    pub team: u8,
+    pub class: Option<JobClass>,
+    pub server: Option<u16>,
+    pub item_level: Option<u32>,
+    /// Their entity — UNKNOWN_ID until they spawned (or, you, hit).
+    pub id: i32,
+    /// Their damage on the other team, and the other team's on them.
+    pub dealt: u64,
+    pub taken: u64,
+    pub deaths: u32,
+    /// At 0 HP now.
+    pub dead: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArenaMatch {
     pub map: i32,
@@ -124,10 +149,14 @@ pub struct ArenaMatch {
     pub rounds: Vec<Round>,
     /// The roster, once the game sent it.
     pub roster: Option<Vec<RosterEntry>>,
+    /// A team match's players, the roster's order — empty in a 1v1.
+    pub players: Vec<TeamPlayer>,
+    /// Your team in a team match, once your name is known.
+    pub my_team: Option<u8>,
 }
 
 impl ArenaMatch {
-    /// More than one a side: a team match, not counted (yet).
+    /// More than one a side: a team match.
     pub fn is_team(&self) -> bool {
         self.roster.as_ref().is_some_and(|r| r.len() > 2)
     }
@@ -163,7 +192,7 @@ impl ArenaTracker {
             }
             self.close(now_ms);
             self.hp.clear();
-            self.matches.push(ArenaMatch { map, entered_ms: now_ms, left_ms: None, opponent: None, rounds: Vec::new(), roster: None });
+            self.matches.push(ArenaMatch { map, entered_ms: now_ms, left_ms: None, opponent: None, rounds: Vec::new(), roster: None, players: Vec::new(), my_team: None });
             while self.matches.len() > MATCHES_KEPT {
                 self.matches.remove(0);
             }
@@ -198,6 +227,21 @@ impl ArenaTracker {
     pub fn assign(&mut self, my_name: Option<&str>) {
         let Some(my_name) = my_name else { return };
         let Some(m) = self.open() else { return };
+        if m.is_team() {
+            let roster = m.roster.clone().unwrap_or_default();
+            if m.players.is_empty() {
+                m.players = roster
+                    .iter()
+                    .map(|e| TeamPlayer { name: e.name.clone(), team: e.team, class: e.class, server: e.server, item_level: None, id: UNKNOWN_ID, dealt: 0, taken: 0, deaths: 0, dead: false })
+                    .collect();
+            }
+            m.my_team = roster.iter().find(|e| e.name == my_name).map(|e| e.team);
+            let me = self.me;
+            if let Some(t) = me.and_then(|me| self.open()?.players.iter_mut().find(|t| t.name == my_name).map(|t| (t, me))) {
+                t.0.id = t.1;
+            }
+            return;
+        }
         let Some(roster) = m.roster.as_ref().filter(|r| r.len() == 2) else { return };
         let mine = roster.iter().find(|e| e.name == my_name).map(|e| e.team);
         let them = roster.iter().find(|e| e.name != my_name && mine.is_none_or(|t| e.team != t)).cloned();
@@ -217,15 +261,26 @@ impl ArenaTracker {
         }
     }
 
-    /// The opponent the roster named whose entity isn't known yet.
-    pub fn opponent_without_entity(&self) -> Option<String> {
-        self.current()?.opponent.as_ref().filter(|o| o.id == UNKNOWN_ID).map(|o| o.name.clone())
+    /// The players the roster named whose entity isn't known yet: the 1v1
+    /// opponent, or a team match's players.
+    pub fn players_without_entity(&self) -> Vec<String> {
+        let Some(m) = self.current() else { return Vec::new() };
+        let mut out: Vec<String> = m.opponent.iter().filter(|o| o.id == UNKNOWN_ID).map(|o| o.name.clone()).collect();
+        out.extend(m.players.iter().filter(|p| p.id == UNKNOWN_ID).map(|p| p.name.clone()));
+        out
     }
 
     /// A player spawned in sight: the opponent the roster named gets their
     /// entity, and their item level.
     pub fn player_spawned(&mut self, p: &NearbyPlayer) {
-        let Some(o) = self.open().and_then(|m| m.opponent.as_mut()) else { return };
+        let Some(m) = self.open() else { return };
+        if let Some(t) = m.players.iter_mut().find(|t| t.name == p.name) {
+            t.id = p.id;
+            t.class = t.class.or(p.class);
+            t.item_level = p.item_level.or(t.item_level);
+            t.server = t.server.or(p.server);
+        }
+        let Some(o) = m.opponent.as_mut() else { return };
         if o.name != p.name {
             return;
         }
@@ -238,6 +293,10 @@ impl ArenaTracker {
     /// `actor` hit `target` for `damage`, one of them you. `other` is what is
     /// known of the other one when they are a player (None: not a player).
     pub fn hit(&mut self, me: i32, actor: i32, target: i32, damage: u64, other: Option<&NearbyPlayer>, now_ms: i64) {
+        if self.current().is_some_and(ArenaMatch::is_team) {
+            self.team_hit(me, actor, target, damage, now_ms);
+            return;
+        }
         if damage == 0 || actor == target || (actor != me && target != me) {
             return;
         }
@@ -288,9 +347,75 @@ impl ArenaTracker {
         }
     }
 
+    /// Your entity in a team match: you never spawn in your own sight.
+    pub fn name_me(&mut self, me: i32, my_name: Option<&str>) {
+        self.me = Some(me);
+        let Some(name) = my_name else { return };
+        if let Some(t) = self.open().and_then(|m| m.players.iter_mut().find(|t| t.name == name)) {
+            t.id = me;
+        }
+    }
+
+    /// A hit in a team match: between two players of different teams it is
+    /// damage dealt and taken, and starts a round while both teams stand.
+    fn team_hit(&mut self, me: i32, actor: i32, target: i32, damage: u64, now_ms: i64) {
+        if damage == 0 || actor == target {
+            return;
+        }
+        let Some(m) = self.open() else { return };
+        let (Some(a), Some(t)) = (m.players.iter().position(|p| p.id == actor), m.players.iter().position(|p| p.id == target)) else { return };
+        if m.players[a].team == m.players[t].team {
+            return;
+        }
+        let standing = |team: u8, players: &[TeamPlayer]| players.iter().any(|p| p.team == team && !p.dead);
+        if m.rounds.last().is_none_or(|r| r.ended_ms.is_some()) {
+            if !(standing(1, &m.players) && standing(2, &m.players)) {
+                return;
+            }
+            m.rounds.push(Round { started_ms: now_ms, ended_ms: None, winner: None, dealt: 0, taken: 0 });
+        }
+        m.players[a].dealt += damage;
+        m.players[t].taken += damage;
+        let round = m.rounds.last_mut().expect("a round");
+        if actor == me {
+            round.dealt += damage;
+        } else if target == me {
+            round.taken += damage;
+        }
+    }
+
+    /// A team match's player at `hp`: 0 is a death, and the round ends when
+    /// a whole team is down — won by the other.
+    fn team_hp(&mut self, entity: i32, hp: i64, now_ms: i64) {
+        let Some(m) = self.open() else { return };
+        let Some(p) = m.players.iter_mut().find(|p| p.id == entity) else { return };
+        if hp > 0 {
+            p.dead = false;
+            return;
+        }
+        if p.dead {
+            return;
+        }
+        p.dead = true;
+        p.deaths += 1;
+        let team = p.team;
+        if m.players.iter().any(|p| p.team == team && !p.dead) {
+            return;
+        }
+        let my_team = m.my_team;
+        if let Some(round) = m.rounds.last_mut().filter(|r| r.ended_ms.is_none()) {
+            round.ended_ms = Some(now_ms);
+            round.winner = my_team.map(|mine| if mine == team { Side::Them } else { Side::Me });
+        }
+    }
+
     /// The HP of a player, as the game sent it: 0 for you or the opponent
     /// ends the round, won by the other.
     pub fn hp(&mut self, entity: i32, hp: i64, now_ms: i64) {
+        if self.current().is_some_and(ArenaMatch::is_team) {
+            self.team_hp(entity, hp, now_ms);
+            return;
+        }
         let me = self.me;
         let Some(m) = self.matches.last_mut().filter(|m| m.left_ms.is_none()) else { return };
         let side = if Some(entity) == me {
@@ -407,14 +532,38 @@ mod tests {
     }
 
     #[test]
-    fn a_team_roster_is_not_counted() {
-        let o = opp();
+    fn a_team_match_counts_every_player_and_ends_with_a_wipe() {
         let mut a = ArenaTracker::default();
         a.map_loaded(60, 0);
-        let roster = (0..10).map(|i| RosterEntry { name: format!("P{i}"), team: 1 + (i % 2) as u8, class: None, server: None }).collect();
-        a.roster(roster, Some("P0"));
-        a.hit(ME, ME, OPP, 1000, Some(&o), 1_000);
-        assert!(a.current().unwrap().rounds.is_empty());
+        // P0 - P4 team 1, P5 - P9 team 2; you are P5 (entity ME).
+        let roster = (0..10).map(|i| RosterEntry { name: format!("P{i}"), team: if i < 5 { 1 } else { 2 }, class: None, server: None }).collect();
+        a.roster(roster, Some("P5"));
+        a.name_me(ME, Some("P5"));
+        for i in (0..10).filter(|&i| i != 5) {
+            let mut p = opp();
+            p.id = 100 + i;
+            p.name = format!("P{i}");
+            a.player_spawned(&p);
+        }
+        assert!(a.players_without_entity().is_empty());
+        a.hit(ME, 100, ME, 500, None, 1_000); // P0 on you
+        a.hit(ME, ME, 101, 300, None, 1_100); // you on P1
+        a.hit(ME, 106, 107, 999, None, 1_200); // P6 on P7: one team, left out
+        a.hit(ME, 104, 108, 700, None, 1_300); // P4 on P8
+        let m = a.current().unwrap();
+        assert_eq!(m.my_team, Some(2));
+        assert_eq!(m.rounds.len(), 1);
+        assert_eq!((m.rounds[0].dealt, m.rounds[0].taken), (300, 500));
+        assert_eq!((m.players[0].dealt, m.players[5].taken, m.players[8].taken, m.players[7].taken), (500, 500, 700, 0));
+        for id in [ME, 106, 107, 108] {
+            a.hp(id, 0, 2_000);
+        }
+        assert!(a.current().unwrap().rounds[0].ended_ms.is_none(), "one of your team stands");
+        a.hp(109, 0, 3_000);
+        let m = a.current().unwrap();
+        assert_eq!(m.rounds[0].winner, Some(Side::Them));
+        assert_eq!(m.score(), (0, 1));
+        assert_eq!(m.players.iter().map(|p| p.deaths).sum::<u32>(), 5);
     }
 
     #[test]

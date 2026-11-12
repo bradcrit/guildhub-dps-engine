@@ -78,8 +78,11 @@
 //! first total after a start or a character switch); `arena` the last arena
 //! match (`{"map","enteredAt","leftAt","finished","team","opponent":{"name",
 //! "class","itemLevel","serverId"},"won","lost","rounds":[{"start","end",
-//! "winner","dealt","taken"}]}`, `winner` "me", "them" or null, `team` a 5v5
-//! with no rounds counted yet) or null before one (`combat::arena`).
+//! "winner","dealt","taken"}],"myTeam","players":[{"name","team","class",
+//! "itemLevel","serverId","dealt","taken","deaths","dead","me"}]}`, `winner`
+//! "me", "them" or null; `team` a 5v5, whose `players` are all ten with their
+//! damage on the other team and from it, `myTeam` yours) or null before one
+//! (`combat::arena`).
 //! `self` also has your `itemLevel` and `combatPower` (a party roster's, else
 //! your last self record's; null before either), and `map`: the map id of the
 //! last zone load (null before one).
@@ -1129,8 +1132,21 @@ impl Engine {
         let opponent = m.opponent.as_ref().map(|o| {
             serde_json::json!({ "name": o.name, "class": o.class.map(class_key), "itemLevel": o.item_level, "serverId": o.server })
         });
+        let me = self.storage.local_character_name();
+        let players: Vec<_> = m
+            .players
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.name, "team": p.team, "class": p.class.map(class_key), "itemLevel": p.item_level, "serverId": p.server,
+                    "dealt": p.dealt, "taken": p.taken, "deaths": p.deaths, "dead": p.dead, "me": me.as_deref() == Some(p.name.as_str()),
+                })
+            })
+            .collect();
         serde_json::json!({
             "map": m.map,
+            "myTeam": m.my_team,
+            "players": players,
             "enteredAt": m.entered_ms,
             "leftAt": m.left_ms,
             "finished": m.left_ms.is_some(),

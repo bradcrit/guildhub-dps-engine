@@ -9,6 +9,8 @@
 //! - `packets_20261112_203716.txt`: map 60 against Freydis, a Gladiator — 3:0.
 //! - `packets_20261112_224035.txt`: map 61 against kalandra, a Sorcerer —
 //!   lost, lost, won, won, lost (2:3). First to three wins the match.
+//! - `packets_20261112_225001.txt`: a 5v5 on map 60, your team (2) wiped in
+//!   one round without a kill.
 //!
 //! Either way the opponent is named by the roster before the first round.
 
@@ -60,6 +62,19 @@ fn a_solo_arena_match_reads_as_the_user_saw_it() {
         }
     }
     let m = matches.first().expect("a match");
+    if m.is_team() {
+        for p in &m.players {
+            eprintln!("  team {} {:14} {:?} IL {:?} id {} dealt {} taken {} deaths {}", p.team, p.name, p.class, p.item_level, p.id, p.dealt, p.taken, p.deaths);
+        }
+        assert_eq!(m.players.len(), 10);
+        assert_eq!(m.my_team, Some(2));
+        assert!(m.players.iter().all(|p| p.id > 0), "everyone's entity known");
+        assert_eq!(m.rounds.iter().map(|r| r.winner).collect::<Vec<_>>(), [Some(Side::Them)]);
+        let deaths = |team| m.players.iter().filter(|p| p.team == team).map(|p| p.deaths).sum::<u32>();
+        assert_eq!((deaths(1), deaths(2)), (0, 5));
+        assert!(m.players.iter().all(|p| p.dealt > 0 || p.taken > 0));
+        return;
+    }
     assert_eq!(m.roster.as_ref().map(Vec::len), Some(2), "the roster (19 e3) was read");
     assert!(!m.is_team());
     assert_eq!(named_before_rounds, Some(true), "the roster named the opponent before the first round");

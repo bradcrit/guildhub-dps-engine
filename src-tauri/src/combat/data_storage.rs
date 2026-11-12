@@ -1559,11 +1559,12 @@ impl DataStorage {
             let other = if actor == me { target } else { actor };
             (actor, inner.known_player_ids.contains(&other))
         };
-        if actor == target || (actor != me && target != me) {
+        if actor == target {
             return;
         }
+        // A team match counts hits between any two of its players.
         let other = if actor == me { target } else { actor };
-        let profile = known_players.then(|| self.nearby.lock().player(other).cloned()).flatten();
+        let profile = (actor == me || target == me).then(|| known_players.then(|| self.nearby.lock().player(other).cloned()).flatten()).flatten();
         self.arena.lock().hit(me, actor, target, damage as u64, profile.as_ref(), now_ms());
     }
 
@@ -1585,9 +1586,19 @@ impl DataStorage {
             return;
         }
         arena.assign(me.as_deref());
-        if let Some(p) = arena.opponent_without_entity().and_then(|name| self.nearby.lock().player_named(&name).cloned()) {
-            arena.player_spawned(&p);
+        if let Some(id) = self.local_player_id().and_then(|id| i32::try_from(id).ok()) {
+            arena.name_me(id, me.as_deref());
         }
+        for name in arena.players_without_entity() {
+            if let Some(p) = self.nearby.lock().player_named(&name).cloned() {
+                arena.player_spawned(&p);
+            }
+        }
+    }
+
+    /// A player in sight by name, of either faction (`NearbyPlayers::player_named`).
+    pub fn nearby_player_named(&self, name: &str) -> Option<NearbyPlayer> {
+        self.nearby.lock().player_named(name).cloned()
     }
 
     /// The 1v1 arena's matches, the newest last (`combat::arena`).
