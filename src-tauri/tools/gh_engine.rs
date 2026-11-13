@@ -1113,8 +1113,9 @@ impl Engine {
     }
 
     /// The last arena match (`combat::arena`), the one being fought while
-    /// `finished` is false — null before one. A team match (5v5) has no
-    /// rounds: it isn't counted yet.
+    /// `finished` is false — null before one. A 5v5 is one round; a
+    /// battleground (10v10) has none, but the game's kills, deaths and
+    /// assists, its clock (`endsAt`, server ms) and `result`.
     fn arena_json(&self) -> serde_json::Value {
         let matches = self.storage.arena_matches();
         let Some(m) = matches.last() else { return serde_json::Value::Null };
@@ -1139,7 +1140,8 @@ impl Engine {
             .map(|p| {
                 serde_json::json!({
                     "name": p.name, "team": p.team, "class": p.class.map(class_key), "itemLevel": p.item_level, "serverId": p.server,
-                    "dealt": p.dealt, "taken": p.taken, "deaths": p.deaths, "dead": p.dead, "me": me.as_deref() == Some(p.name.as_str()),
+                    "dealt": p.dealt, "taken": p.taken, "kills": p.kills, "deaths": p.deaths, "assists": p.assists, "dead": p.dead,
+                    "me": me.as_deref() == Some(p.name.as_str()),
                 })
             })
             .collect();
@@ -1151,6 +1153,10 @@ impl Engine {
             "leftAt": m.left_ms,
             "finished": m.left_ms.is_some(),
             "team": m.is_team(),
+            "battleground": m.battleground,
+            "endsAt": m.ends_ms,
+            "result": side(m.result),
+            "statsSeen": m.stats_seen,
             "opponent": opponent,
             "won": won,
             "lost": lost,

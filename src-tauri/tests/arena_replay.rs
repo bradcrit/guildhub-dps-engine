@@ -92,4 +92,82 @@ fn a_solo_arena_match_reads_as_the_user_saw_it() {
     assert_eq!(m.rounds.iter().map(|r| r.winner).collect::<Vec<_>>(), rounds);
     assert!(m.rounds.iter().all(|r| r.dealt > 0 && r.taken > 0));
     assert!(m.left_ms.is_some(), "left for map 1110");
+    // The game's own result (`28 e3`), where the capture has the match's end.
+    let (won, lost) = m.score();
+    if won >= 3 || lost >= 3 {
+        assert_eq!(m.result, Some(if won > lost { Side::Me } else { Side::Them }));
+    }
+}
+
+/// Every packet of a capture through the stream processor.
+fn replay(path: &str) -> Arc<DataStorage> {
+    let storage = Arc::new(DataStorage::new());
+    let mut streams: HashMap<String, (StreamProcessor, PacketAccumulator)> = HashMap::new();
+    for cap in share::read_capture(std::path::Path::new(path)).expect("capture") {
+        let (processor, acc) = streams.entry(cap.stream.clone()).or_insert_with(|| {
+            let p = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+            (p, PacketAccumulator::new())
+        });
+        acc.append(&cap.bytes);
+        let consumed = processor.consume_stream(acc.snapshot());
+        if consumed > 0 {
+            acc.discard_bytes(consumed);
+        }
+    }
+    storage
+}
+
+/// The user's 10v10 of 2026-11-13 (A2_BG_CAPTURE, `packets_20261113_111906.txt`;
+/// skips when unset): map 62 "Arena of Tactics", Bradcrit on red (team 2),
+/// red won 85:50. The game's end screen, player by player.
+#[test]
+fn a_battleground_reads_as_the_game_s_end_screen() {
+    let Ok(path) = std::env::var("A2_BG_CAPTURE") else {
+        eprintln!("A2_BG_CAPTURE unset; skipping");
+        return;
+    };
+    let storage = replay(&path);
+    let matches = storage.arena_matches();
+    let m = matches.iter().find(|m| m.battleground).expect("a battleground");
+    for p in &m.players {
+        eprintln!("  team {} {:14} {:?} IL {:?} id {} dealt {} taken {} {}/{}/{}", p.team, p.name, p.class, p.item_level, p.id, p.dealt, p.taken, p.kills, p.deaths, p.assists);
+    }
+    assert_eq!(m.map, 62);
+    assert_eq!(m.players.len(), 20);
+    assert_eq!(m.my_team, Some(2));
+    assert!(m.rounds.is_empty());
+    let end_screen: [(&str, u32, u32, u32); 20] = [
+        ("StyZZy", 14, 8, 15),
+        ("xrayder", 3, 10, 5),
+        ("Paula", 5, 5, 20),
+        ("Moxxy", 4, 7, 18),
+        ("Jankes", 3, 9, 14),
+        ("IndecisoITA", 6, 11, 4),
+        ("XiaFeng", 2, 10, 14),
+        ("Hope", 1, 11, 7),
+        ("Scarx", 10, 7, 15),
+        ("Benihimê", 2, 7, 11),
+        ("lucky17", 4, 4, 25),
+        ("Bradcrit", 4, 8, 22),
+        ("GogoYubari", 3, 5, 23),
+        ("Shû", 18, 5, 27),
+        ("NikoGoesWild", 8, 4, 26),
+        ("Roro", 5, 5, 19),
+        ("lokie", 5, 7, 16),
+        ("RalVln", 10, 5, 21),
+        ("Seia", 5, 5, 20),
+        ("Razet", 22, 2, 28),
+    ];
+    for (name, k, d, a) in end_screen {
+        let p = m.players.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("{name} on the roster"));
+        assert_eq!((p.kills, p.deaths, p.assists), (k, d, a), "{name}");
+    }
+    // A team's score is the other team's deaths.
+    let deaths = |team| m.players.iter().filter(|p| p.team == team).map(|p| p.deaths).sum::<u32>();
+    assert_eq!((deaths(1), deaths(2)), (85, 50));
+    assert_eq!(m.result, Some(Side::Me));
+    // 11:32:04 local (UTC+1): ten minutes after the start at 11:22:04.
+    assert_eq!(m.ends_ms, Some(1_794_565_924_095));
+    assert!(m.players.iter().any(|p| p.dealt > 0), "damage between the teams");
+    assert!(m.left_ms.is_some(), "left the battleground");
 }

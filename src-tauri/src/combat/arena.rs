@@ -28,6 +28,21 @@
 //! of `ArenaCombat`: 60 Fire Temple Arena, 61 Impetusium Arena (up to 10
 //! players each). 62 - 64 are the battlegrounds (`ArenaCar`, `ArenaCTF`,
 //! `ArenaDom`, up to 20).
+//!
+//! A battleground (10v10, map 62 "Arena of Tactics" in the capture of
+//! 2026-11-13) is a team match without rounds: ten minutes on a clock, you
+//! respawn (the map loads again, 62 -> 62, after each of your deaths), and
+//! the game keeps the score itself. What it sends, all checked against its
+//! end screen (Victory 85:50, every player's kills, deaths and assists):
+//! - `26 e3` (`parse_stats`): the kills, deaths and assists of the players a
+//!   kill changed — killer, victim, assisters — by their roster key. Also in
+//!   the 5v5. A team's score is the other team's deaths (a death to no
+//!   player counts too: 85 = blue's deaths, red's kills were 84).
+//! - `00 61` (`parse_clock`): the match's phase (1 preparing, 2 fought,
+//!   3 over) with its start and end (server ms) — phase 2 ran 600 000 ms.
+//! - `28 e3` (`parse_result`): your result as the match ends — `03` won,
+//!   `02` lost (also in the 1v1 and 5v5 captures of 2026-11-12).
+//! - `25 e3`: the kill feed, killer and victim by roster key (not read).
 
 use crate::combat::nearby_players::NearbyPlayer;
 use crate::entity::job_class::JobClass;
@@ -35,9 +50,21 @@ use crate::entity::job_class::JobClass;
 /// The arena maps (`ArenaCombat`): 1v1 and 5v5 alike. 61 seen in a capture.
 pub const SOLO_ARENA_MAPS: [i32; 2] = [60, 61];
 
+/// The battlegrounds (`ArenaCar`, `ArenaCTF`, `ArenaDom`): 10v10. 62 seen
+/// in a capture (2026-11-13, "Arena of Tactics").
+pub const BATTLEGROUND_MAPS: [i32; 3] = [62, 63, 64];
+
+fn is_arena_map(map: i32) -> bool {
+    SOLO_ARENA_MAPS.contains(&map) || BATTLEGROUND_MAPS.contains(&map)
+}
+
 /// One player on an arena roster (`19 e3`), team 1 or 2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterEntry {
+    /// The player's 8 bytes before their name, `<id u32> 00 00 <home server
+    /// u16>`, read as one number: how the match's kill and score records
+    /// (`25 e3`, `26 e3`) name them.
+    pub key: u64,
     pub name: String,
     pub team: u8,
     /// The class (the party roster's class field, `JobClass::from_roster_class`).
@@ -81,11 +108,60 @@ pub fn parse_roster(body: &[u8]) -> Option<Vec<RosterEntry>> {
         let class = JobClass::from_roster_class(u32::from_le_bytes(body[after..after + 4].try_into().unwrap()));
         let u16_at = |at: usize| body.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]])).filter(|s| (1..10_000).contains(s));
         let server = u16_at(after + 13).or_else(|| u16_at(i + 6));
-        out.push(RosterEntry { name, team: team.max(1), class, server });
+        let key = u64::from_le_bytes(body[i..i + 8].try_into().unwrap());
+        out.push(RosterEntry { key, name, team: team.max(1), class, server });
         i = after + 13;
     }
     let teams: std::collections::HashSet<u8> = out.iter().map(|e| e.team).collect();
     (out.len() >= 2 && teams.len() == 2).then_some(out)
+}
+
+/// The kills, deaths and assists of the players a kill changed (`26 e3`),
+/// by roster key: `<count u8>`, then each player `<key, 8 bytes>
+/// <kills u8> <deaths u8> <assists u8> <u8>` — the first of every four with
+/// one more byte (a flag) right after its key. None for a body of another
+/// length. Seen 2026-11-13: 1 to 9 players and all 20, every one adding up.
+pub fn parse_stats(body: &[u8]) -> Option<Vec<(u64, [u8; 3])>> {
+    let n = *body.first()? as usize;
+    if n == 0 || body.len() != 1 + n * 12 + n.div_ceil(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut at = 1;
+    for i in 0..n {
+        let key = u64::from_le_bytes(body[at..at + 8].try_into().unwrap());
+        at += if i % 4 == 0 { 9 } else { 8 };
+        out.push((key, [body[at], body[at + 1], body[at + 2]]));
+        at += 4;
+    }
+    Some(out)
+}
+
+/// The match's clock (`00 61`): `<u32> <phase u8> <start u64 ms> <end u64
+/// ms>` — phase 1 the preparation, 2 the match, 3 over. Seen 2026-11-13:
+/// phase 2 from 11:22:03 to 11:32:03 (600 000 ms), 3 at 11:29:27 when red
+/// had won.
+pub fn parse_clock(body: &[u8]) -> Option<(u8, i64, i64)> {
+    if body.len() != 21 || !(1..=3).contains(&body[4]) {
+        return None;
+    }
+    let ms = |at: usize| i64::from_le_bytes(body[at..at + 8].try_into().unwrap());
+    let (start, end) = (ms(5), ms(13));
+    (start > 0 && end >= start).then_some((body[4], start, end))
+}
+
+/// Your result as a match ends (`28 e3`): `<u8> <u32> <result u8> 01 <your
+/// key> ...` — `03` won, `02` lost. True for won. Seen in all four
+/// captures with an end (1v1 3:0 and 2:3, 5v5 lost, 10v10 won).
+pub fn parse_result(body: &[u8]) -> Option<bool> {
+    if body.len() < 15 || body[6] != 1 {
+        return None;
+    }
+    match body[5] {
+        3 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
 }
 
 /// The opponent's entity while only the roster named them.
@@ -124,6 +200,8 @@ pub struct Opponent {
 /// A player of a team match (from the roster), and what the match did to them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeamPlayer {
+    /// Their roster key (`RosterEntry::key`).
+    pub key: u64,
     pub name: String,
     pub team: u8,
     pub class: Option<JobClass>,
@@ -134,7 +212,11 @@ pub struct TeamPlayer {
     /// Their damage on the other team, and the other team's on them.
     pub dealt: u64,
     pub taken: u64,
+    /// The game's count once a kill record (`26 e3`) named them; until then
+    /// deaths are their 0 HPs seen.
+    pub kills: u32,
     pub deaths: u32,
+    pub assists: u32,
     /// At 0 HP now.
     pub dead: bool,
 }
@@ -153,6 +235,15 @@ pub struct ArenaMatch {
     pub players: Vec<TeamPlayer>,
     /// Your team in a team match, once your name is known.
     pub my_team: Option<u8>,
+    /// A battleground (10v10): no rounds, the game's score and clock.
+    pub battleground: bool,
+    /// When the match's clock runs out (server ms, `00 61`).
+    pub ends_ms: Option<i64>,
+    /// The game said who won (`28 e3`).
+    pub result: Option<Side>,
+    /// The game's kill records (`26 e3`) came: they count kills, deaths and
+    /// assists, not the 0 HPs seen.
+    pub stats_seen: bool,
 }
 
 impl ArenaMatch {
@@ -186,13 +277,26 @@ impl ArenaTracker {
     /// A zone load: into an arena starts a match (the same arena again is
     /// the next round of it), anywhere else ends the open one.
     pub fn map_loaded(&mut self, map: i32, now_ms: i64) {
-        if SOLO_ARENA_MAPS.contains(&map) {
+        if is_arena_map(map) {
             if self.open().is_some_and(|m| m.map == map) {
                 return;
             }
             self.close(now_ms);
             self.hp.clear();
-            self.matches.push(ArenaMatch { map, entered_ms: now_ms, left_ms: None, opponent: None, rounds: Vec::new(), roster: None, players: Vec::new(), my_team: None });
+            self.matches.push(ArenaMatch {
+                map,
+                entered_ms: now_ms,
+                left_ms: None,
+                opponent: None,
+                rounds: Vec::new(),
+                roster: None,
+                players: Vec::new(),
+                my_team: None,
+                battleground: BATTLEGROUND_MAPS.contains(&map),
+                ends_ms: None,
+                result: None,
+                stats_seen: false,
+            });
             while self.matches.len() > MATCHES_KEPT {
                 self.matches.remove(0);
             }
@@ -232,7 +336,21 @@ impl ArenaTracker {
             if m.players.is_empty() {
                 m.players = roster
                     .iter()
-                    .map(|e| TeamPlayer { name: e.name.clone(), team: e.team, class: e.class, server: e.server, item_level: None, id: UNKNOWN_ID, dealt: 0, taken: 0, deaths: 0, dead: false })
+                    .map(|e| TeamPlayer {
+                        key: e.key,
+                        name: e.name.clone(),
+                        team: e.team,
+                        class: e.class,
+                        server: e.server,
+                        item_level: None,
+                        id: UNKNOWN_ID,
+                        dealt: 0,
+                        taken: 0,
+                        kills: 0,
+                        deaths: 0,
+                        assists: 0,
+                        dead: false,
+                    })
                     .collect();
             }
             m.my_team = roster.iter().find(|e| e.name == my_name).map(|e| e.team);
@@ -367,6 +485,12 @@ impl ArenaTracker {
         if m.players[a].team == m.players[t].team {
             return;
         }
+        if m.battleground {
+            // No rounds: what each player did is all of it.
+            m.players[a].dealt += damage;
+            m.players[t].taken += damage;
+            return;
+        }
         let standing = |team: u8, players: &[TeamPlayer]| players.iter().any(|p| p.team == team && !p.dead);
         if m.rounds.last().is_none_or(|r| r.ended_ms.is_some()) {
             if !(standing(1, &m.players) && standing(2, &m.players)) {
@@ -397,9 +521,12 @@ impl ArenaTracker {
             return;
         }
         p.dead = true;
-        p.deaths += 1;
+        if !m.stats_seen {
+            p.deaths += 1;
+        }
         let team = p.team;
-        if m.players.iter().any(|p| p.team == team && !p.dead) {
+        // A battleground has no rounds: everyone comes back.
+        if m.battleground || m.players.iter().any(|p| p.team == team && !p.dead) {
             return;
         }
         let my_team = m.my_team;
@@ -432,6 +559,35 @@ impl ArenaTracker {
         if let Some(round) = m.rounds.last_mut().filter(|r| r.ended_ms.is_none()) {
             round.ended_ms = Some(now_ms);
             round.winner = Some(if side == Side::Me { Side::Them } else { Side::Me });
+        }
+    }
+
+    /// The game's kills, deaths and assists of the players a kill changed
+    /// (`parse_stats`), for the team match being fought.
+    pub fn stats(&mut self, stats: &[(u64, [u8; 3])]) {
+        let Some(m) = self.open() else { return };
+        if m.players.is_empty() {
+            return;
+        }
+        m.stats_seen = true;
+        for (key, [k, d, a]) in stats {
+            if let Some(p) = m.players.iter_mut().find(|p| p.key == *key) {
+                (p.kills, p.deaths, p.assists) = (u32::from(*k), u32::from(*d), u32::from(*a));
+            }
+        }
+    }
+
+    /// The match's clock (`parse_clock`): the end of the fought phase.
+    pub fn clock(&mut self, phase: u8, end_ms: i64) {
+        if let Some(m) = self.open().filter(|m| m.battleground && phase == 2) {
+            m.ends_ms = Some(end_ms);
+        }
+    }
+
+    /// The game's result as the match ends (`parse_result`).
+    pub fn result(&mut self, won: bool) {
+        if let Some(m) = self.open() {
+            m.result = Some(if won { Side::Me } else { Side::Them });
         }
     }
 
@@ -525,8 +681,8 @@ mod tests {
         assert_eq!(
             roster,
             [
-                RosterEntry { name: "Bradcrit".into(), team: 1, class: Some(JobClass::Gladiator), server: Some(2313) },
-                RosterEntry { name: "StayHype".into(), team: 2, class: Some(JobClass::Gladiator), server: Some(1303) },
+                RosterEntry { key: 0x0909_0000_0002_6F3B, name: "Bradcrit".into(), team: 1, class: Some(JobClass::Gladiator), server: Some(2313) },
+                RosterEntry { key: 0x0517_0000_0003_FD97, name: "StayHype".into(), team: 2, class: Some(JobClass::Gladiator), server: Some(1303) },
             ]
         );
     }
@@ -536,7 +692,7 @@ mod tests {
         let mut a = ArenaTracker::default();
         a.map_loaded(60, 0);
         // P0 - P4 team 1, P5 - P9 team 2; you are P5 (entity ME).
-        let roster = (0..10).map(|i| RosterEntry { name: format!("P{i}"), team: if i < 5 { 1 } else { 2 }, class: None, server: None }).collect();
+        let roster = (0..10).map(|i| RosterEntry { key: i as u64, name: format!("P{i}"), team: if i < 5 { 1 } else { 2 }, class: None, server: None }).collect();
         a.roster(roster, Some("P5"));
         a.name_me(ME, Some("P5"));
         for i in (0..10).filter(|&i| i != 5) {
@@ -570,7 +726,7 @@ mod tests {
     fn the_roster_names_the_opponent_before_the_first_hit() {
         let mut a = ArenaTracker::default();
         a.map_loaded(60, 0);
-        let entry = |name: &str, team, class| RosterEntry { name: name.into(), team, class, server: Some(2304) };
+        let entry = |name: &str, team, class| RosterEntry { key: 0, name: name.into(), team, class, server: Some(2304) };
         a.roster(vec![entry("Freydis", 1, Some(JobClass::Gladiator)), entry("Bradcrit", 2, Some(JobClass::Gladiator))], Some("Bradcrit"));
         let o = a.current().unwrap().opponent.clone().expect("named by the roster");
         assert_eq!((o.id, o.name.as_str(), o.server), (UNKNOWN_ID, "Freydis", Some(2304)));
@@ -595,5 +751,61 @@ mod tests {
         a.map_loaded(20, 2_000);
         let r = &a.matches()[0].rounds[0];
         assert_eq!((r.ended_ms, r.winner), (Some(2_000), None));
+    }
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        let hex: String = hex.split_whitespace().collect();
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn the_battleground_s_records_read_as_the_game_showed_them() {
+        // 11:22:29 of the capture of 2026-11-13, the first kill: the killer,
+        // the victim and three with an assist — the first and the fifth with
+        // the extra byte.
+        let stats = parse_stats(&bytes(
+            "05 F7BA000000002805 00 01000000 DE88000000002905 00010000 0D81020000000209 00000100 \
+             55DF020000000909 00000100 C31C010000000F09 00 00000100",
+        ))
+        .expect("five players");
+        assert_eq!(stats.len(), 5);
+        assert_eq!(stats[0], (0x0528_0000_0000_BAF7, [1, 0, 0]));
+        assert_eq!(stats[1].1, [0, 1, 0]);
+        assert_eq!(stats[4], (0x090F_0000_0001_1CC3, [0, 0, 1]));
+        assert!(parse_stats(&bytes("05 F7BA000000002805 00 01000000")).is_none(), "cut short");
+
+        let clock = parse_clock(&bytes("0A000000 02 3FBD6DD4A1010000 FFE476D4A1010000")).expect("the clock");
+        assert_eq!((clock.0, clock.2 - clock.1), (2, 600_000));
+
+        // Won (the 10v10), lost (the 5v5 of 2026-11-12).
+        assert_eq!(parse_result(&bytes("02 C4050000 03 01 3B6F020000000909 04081600")), Some(true));
+        assert_eq!(parse_result(&bytes("01 DD050000 02 01 3B6F020000000909 00010000")), Some(false));
+    }
+
+    #[test]
+    fn a_battleground_counts_the_game_s_score_and_has_no_rounds() {
+        let mut a = ArenaTracker::default();
+        a.map_loaded(62, 0);
+        let roster = (0..20).map(|i| RosterEntry { key: 1000 + i as u64, name: format!("P{i}"), team: if i < 10 { 1 } else { 2 }, class: None, server: None }).collect();
+        a.roster(roster, Some("P10"));
+        a.name_me(ME, Some("P10"));
+        let mut p = opp();
+        p.id = 100;
+        p.name = "P0".into();
+        a.player_spawned(&p);
+        a.clock(2, 600_000);
+        a.hit(ME, ME, 100, 700, None, 1_000);
+        a.hp(100, 0, 1_100);
+        a.stats(&[(1010, [1, 0, 0]), (1000, [0, 1, 0])]);
+        // You die and respawn: the map loads again, the match goes on.
+        a.map_loaded(62, 2_000);
+        a.hp(100, 0, 3_000);
+        a.result(true);
+        let m = a.current().expect("still open");
+        assert!(m.battleground && m.rounds.is_empty());
+        assert_eq!(m.ends_ms, Some(600_000));
+        assert_eq!(m.result, Some(Side::Me));
+        assert_eq!((m.players[10].dealt, m.players[0].taken), (700, 700));
+        assert_eq!((m.players[10].kills, m.players[0].deaths), (1, 1), "the game's count, not each 0 HP");
     }
 }

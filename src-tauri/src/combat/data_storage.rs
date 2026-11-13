@@ -1577,6 +1577,24 @@ impl DataStorage {
         self.settle_arena_opponent();
     }
 
+    /// A team match's kills, deaths and assists as the game counts them (`26 e3`).
+    pub fn note_arena_stats(&self, stats: &[(u64, [u8; 3])]) {
+        self.settle_arena_opponent();
+        self.arena.lock().stats(stats);
+    }
+
+    /// The battleground's clock (`00 61`).
+    pub fn note_arena_clock(&self, phase: u8, end_ms: i64) {
+        self.arena.lock().clock(phase, end_ms);
+    }
+
+    /// Your arena result as the match ends (`28 e3`).
+    pub fn note_arena_result(&self, won: bool) {
+        let map = self.arena.lock().current().map(|m| m.map);
+        tracing::info!("Arena result: {} (map {map:?})", if won { "won" } else { "lost" });
+        self.arena.lock().result(won);
+    }
+
     /// The roster's opponent once your name is known (`ArenaTracker::assign`),
     /// and their entity when they spawned before it was named.
     fn settle_arena_opponent(&self) {

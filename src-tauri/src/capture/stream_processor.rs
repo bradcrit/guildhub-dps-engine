@@ -655,19 +655,40 @@ impl StreamProcessor {
     /// Seen on 2026-10-25 (Nullception): the Abyss Points 50659 of 2000000
     /// as the game said, and Kinah 520, 1017, 1534 as it was picked up (the
     /// game: 1534 of its daily 1000000).
-    // ===== ARENA ROSTER (19 E3) =====
+    // ===== ARENA ROSTER (19 E3), SCORE (26 E3), RESULT (28 E3), CLOCK (00 61) =====
 
-    /// The arena's roster as a match starts (`combat::arena::parse_roster`).
+    /// The arena's roster as a match starts (`combat::arena::parse_roster`),
+    /// and a team match's records: the game's kills, deaths and assists,
+    /// the battleground's clock and your result.
     fn parse_arena_roster_packet(&self, packet: &[u8]) {
         let length_info = read_varint(packet, 0);
         if length_info.length <= 0 {
             return;
         }
         let offset = length_info.length as usize;
-        if packet.get(offset..offset + 2) != Some(&[0x19, 0xE3][..]) {
-            return;
-        }
         let body = packet.get(offset + 2..).unwrap_or_default();
+        match packet.get(offset..offset + 2) {
+            Some([0x26, 0xE3]) => {
+                if let Some(stats) = crate::combat::arena::parse_stats(body) {
+                    self.data_storage.note_arena_stats(&stats);
+                }
+                return;
+            }
+            Some([0x28, 0xE3]) => {
+                if let Some(won) = crate::combat::arena::parse_result(body) {
+                    self.data_storage.note_arena_result(won);
+                }
+                return;
+            }
+            Some([0x00, 0x61]) => {
+                if let Some((phase, _, end)) = crate::combat::arena::parse_clock(body) {
+                    self.data_storage.note_arena_clock(phase, end);
+                }
+                return;
+            }
+            Some([0x19, 0xE3]) => {}
+            _ => return,
+        }
         match crate::combat::arena::parse_roster(body) {
             Some(roster) => self.data_storage.note_arena_roster(roster),
             None => {
