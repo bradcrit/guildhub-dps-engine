@@ -955,6 +955,9 @@ impl Engine {
         });
         serde_json::json!({
             "name": name,
+            // The name is the login record's character (`53 20`, then its self
+            // record): the parent makes new characters only from such a name.
+            "fromLogin": self.storage.local_name_from_login(),
             "serverId": profile.server_id,
             "class": profile.class.map(class_key),
             "level": profile.level,

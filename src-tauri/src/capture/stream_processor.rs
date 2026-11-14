@@ -1318,6 +1318,12 @@ impl StreamProcessor {
             self.data_storage.note_low_id_entity(id);
             self.data_storage
                 .append_nickname_authoritative(id, &sanitized);
+            if record.profile.is_some() && self.data_storage.self_record_is_not_login(id) {
+                // A `33 36` about another entity than the login record's: a
+                // party member's (2026-11-13), not you — read as theirs.
+                tracing::info!("self record: '{}' -> entity {} is not the login record's entity; not you", sanitized, id);
+                continue;
+            }
             if let Some((server, job)) = record.profile {
                 // The game's word on who you are replaces whatever name was
                 // configured. That name comes from the window title or the last
@@ -6168,6 +6174,36 @@ mod tests {
         assert_eq!(storage.local_player_id(), Some(14957));
         assert_eq!((me.server_id, me.class, me.level), (1304, Some(crate::entity::job_class::JobClass::Cleric), Some(28)));
         assert_eq!(me.gear_score, Some(383));
+    }
+
+    /// After a login record only its entity's self record is you: Naicha's
+    /// record (entity 14957) after a login as 15532 is someone else's (a
+    /// party member's "Unbreakable" became the player, 2026-11-13); after a
+    /// login as 14957 it's you, named from the login.
+    #[test]
+    fn after_a_login_only_its_entitys_self_record_is_you() {
+        let record = hex("3336ed745e91c12837064e616963686118051e000000011c0000007f0100007f0100001c000000d002040000000000");
+        let storage = Arc::new(DataStorage::new());
+        let processor = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        storage.note_login_record(15532);
+        processor.scan_masked_identity(&record);
+        assert_eq!(storage.local_player_id(), Some(15532));
+        assert_eq!(storage.local_character_name(), None);
+        assert!(!storage.local_name_from_login());
+
+        let storage = Arc::new(DataStorage::new());
+        let processor = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        storage.note_login_record(14957);
+        processor.scan_masked_identity(&record);
+        assert_eq!(storage.local_character_name().as_deref(), Some("Naicha"));
+        assert!(storage.local_name_from_login());
+
+        // No login seen (a meter started mid-session): still you, but not from a login.
+        let storage = Arc::new(DataStorage::new());
+        let processor = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        processor.scan_masked_identity(&record);
+        assert_eq!(storage.local_character_name().as_deref(), Some("Naicha"));
+        assert!(!storage.local_name_from_login());
     }
 
     /// The start of another self record (2026-10-11): Nullception, server

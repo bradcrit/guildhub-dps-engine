@@ -1297,6 +1297,13 @@ struct Inner {
     /// character, which the game names with a `$`-prefixed placeholder until
     /// the player picks a name.
     local_identity_from_game: bool,
+    /// The entity the last login record (`53 20`) named as you — None until
+    /// one was seen (a meter started mid-session). A self record about any
+    /// other entity is not yours (`self_record_is_not_login`).
+    login_entity: Option<i32>,
+    /// The name the game stated is the login record's entity's: the self
+    /// record named the very entity the login record did.
+    local_name_from_login: bool,
     /// Who the loot records (`04 8d` after a kill) say owns the drops, and
     /// what that has been used for. See `note_loot_owner`.
     loot_identity: LootIdentity,
@@ -1459,6 +1466,8 @@ impl DataStorage {
                 supporters: std::sync::Arc::new(crate::supporters::Roster::default()),
                 local_character_name: None,
                 local_identity_from_game: false,
+                login_entity: None,
+                local_name_from_login: false,
                 loot_identity: LootIdentity::default(),
                 player_servers: HashMap::new(),
                 self_server: 0,
@@ -2371,7 +2380,7 @@ impl DataStorage {
     /// tutorial character. Returns whether anything changed.
     pub fn set_local_identity_from_game(&self, id: i64, name: Option<String>) -> bool {
         let mut inner = self.inner.write();
-        let changed = !inner.local_identity_from_game
+        let mut changed = !inner.local_identity_from_game
             || inner.local_player_id != Some(id)
             || inner.local_character_name != name
             || inner.loot_identity.applied;
@@ -2399,8 +2408,26 @@ impl DataStorage {
             lists.owner = name.clone();
             lists.awaits_self_record = false;
         }
+        let from_login = name.is_some() && inner.login_entity.is_some_and(|e| e as i64 == id);
+        changed |= inner.local_name_from_login != from_login;
         set_game_identity(&mut inner, id, name);
+        inner.local_name_from_login = from_login;
         changed
+    }
+
+    /// A self record about `entity_id` while the login record named another
+    /// entity as you: someone else's record (a party member's, 2026-11-13:
+    /// "Unbreakable" became the player in two members' meters), not yours.
+    /// Before any login record (a meter started mid-session) it can't tell.
+    pub fn self_record_is_not_login(&self, entity_id: i32) -> bool {
+        self.inner.read().login_entity.is_some_and(|e| e != entity_id)
+    }
+
+    /// The name the game stated is the character the login record named —
+    /// the only name a character list may be made from.
+    pub fn local_name_from_login(&self) -> bool {
+        let inner = self.inner.read();
+        inner.local_identity_from_game && !inner.loot_identity.applied && inner.local_name_from_login
     }
 
     /// The loot from a mob that just died belongs to `owner_id`, named `name`.
@@ -2582,6 +2609,7 @@ impl DataStorage {
             return false;
         }
         let mut inner = self.inner.write();
+        inner.login_entity = Some(entity_id);
         if inner.local_player_id == Some(entity_id as i64) {
             return false;
         }
@@ -5203,6 +5231,7 @@ fn bind_unnamed_self(inner: &mut Inner, entity_id: i32) {
         // What the game said is about an entity no longer you; the UI's
         // name may come back, but only as a name, not on this id.
         inner.local_identity_from_game = false;
+        inner.local_name_from_login = false;
         inner.local_character_name = None;
     }
 }
@@ -5256,6 +5285,7 @@ fn own_list(inner: &mut Inner, whole_list: bool) {
 }
 
 fn set_game_identity(inner: &mut Inner, id: i64, name: Option<String>) {
+    inner.local_name_from_login = false;
     inner.loot_identity.local_from_scope = false;
     inner.loot_identity.local_from_stats = false;
     inner.loot_identity.stats_streak = None;
