@@ -1318,10 +1318,10 @@ impl StreamProcessor {
             self.data_storage.note_low_id_entity(id);
             self.data_storage
                 .append_nickname_authoritative(id, &sanitized);
-            if record.profile.is_some() && self.data_storage.self_record_is_not_login(id) {
-                // A `33 36` about another entity than the login record's: a
+            if record.profile.is_some() && self.data_storage.self_record_is_not_login(id, &sanitized) {
+                // A `33 36` about another character than the login record's: a
                 // party member's (2026-11-13), not you — read as theirs.
-                tracing::info!("self record: '{}' -> entity {} is not the login record's entity; not you", sanitized, id);
+                tracing::info!("self record: '{}' -> entity {} is not the login record's character; not you", sanitized, id);
                 continue;
             }
             if let Some((server, job)) = record.profile {
@@ -6176,7 +6176,7 @@ mod tests {
         assert_eq!(me.gear_score, Some(383));
     }
 
-    /// After a login record only its entity's self record is you: Naicha's
+    /// After a login record only its character's self record is you: Naicha's
     /// record (entity 14957) after a login as 15532 is someone else's (a
     /// party member's "Unbreakable" became the player, 2026-11-13); after a
     /// login as 14957 it's you, named from the login.
@@ -6197,6 +6197,17 @@ mod tests {
         processor.scan_masked_identity(&record);
         assert_eq!(storage.local_character_name().as_deref(), Some("Naicha"));
         assert!(storage.local_name_from_login());
+        // A teleport: Naicha under a new entity is still you, from the login…
+        storage.set_local_identity_from_game(20111, Some("Naicha".into()));
+        assert_eq!(storage.local_player_id(), Some(20111));
+        assert!(storage.local_name_from_login());
+        // …another character's self record isn't, whatever its entity.
+        assert!(storage.self_record_is_not_login(20111, "Unbreakable"));
+        assert!(!storage.self_record_is_not_login(20999, "Naicha"));
+        // The next login (a character switch) starts over.
+        storage.note_login_record(30000);
+        assert!(!storage.self_record_is_not_login(30000, "Unbreakable"));
+        assert!(storage.self_record_is_not_login(20111, "Naicha"));
 
         // No login seen (a meter started mid-session): still you, but not from a login.
         let storage = Arc::new(DataStorage::new());

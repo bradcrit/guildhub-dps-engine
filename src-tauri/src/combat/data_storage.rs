@@ -1298,11 +1298,14 @@ struct Inner {
     /// the player picks a name.
     local_identity_from_game: bool,
     /// The entity the last login record (`53 20`) named as you — None until
-    /// one was seen (a meter started mid-session). A self record about any
-    /// other entity is not yours (`self_record_is_not_login`).
+    /// one was seen (a meter started mid-session).
     login_entity: Option<i32>,
-    /// The name the game stated is the login record's entity's: the self
-    /// record named the very entity the login record did.
+    /// The name of the login record's character, from the self record about
+    /// its entity — None until that came. A zone load (a teleport) gives you a
+    /// new entity, never a new name: until the next login record, only a self
+    /// record with this name is yours (`self_record_is_not_login`).
+    login_name: Option<String>,
+    /// The name the game stated is the login record's character's.
     local_name_from_login: bool,
     /// Who the loot records (`04 8d` after a kill) say owns the drops, and
     /// what that has been used for. See `note_loot_owner`.
@@ -1467,6 +1470,7 @@ impl DataStorage {
                 local_character_name: None,
                 local_identity_from_game: false,
                 login_entity: None,
+                login_name: None,
                 local_name_from_login: false,
                 loot_identity: LootIdentity::default(),
                 player_servers: HashMap::new(),
@@ -2408,19 +2412,29 @@ impl DataStorage {
             lists.owner = name.clone();
             lists.awaits_self_record = false;
         }
-        let from_login = name.is_some() && inner.login_entity.is_some_and(|e| e as i64 == id);
+        if inner.login_name.is_none() && inner.login_entity.is_some_and(|e| e as i64 == id) {
+            inner.login_name = name.clone();
+        }
+        let from_login = name.is_some() && inner.login_name.is_some() && inner.login_name == name;
         changed |= inner.local_name_from_login != from_login;
         set_game_identity(&mut inner, id, name);
         inner.local_name_from_login = from_login;
         changed
     }
 
-    /// A self record about `entity_id` while the login record named another
-    /// entity as you: someone else's record (a party member's, 2026-11-13:
-    /// "Unbreakable" became the player in two members' meters), not yours.
-    /// Before any login record (a meter started mid-session) it can't tell.
-    pub fn self_record_is_not_login(&self, entity_id: i32) -> bool {
-        self.inner.read().login_entity.is_some_and(|e| e != entity_id)
+    /// A self record about `entity_id`, named `name`, is someone else's (a
+    /// party member's, 2026-11-13: "Unbreakable" became the player in two
+    /// members' meters): another name than the login record's character, or
+    /// before that name came, another entity than the login record's. A
+    /// teleport's new entity with your name is still you. Before any login
+    /// record (a meter started mid-session) it can't tell.
+    pub fn self_record_is_not_login(&self, entity_id: i32, name: &str) -> bool {
+        let inner = self.inner.read();
+        match (&inner.login_name, inner.login_entity) {
+            (Some(login), _) => login.trim() != name.trim(),
+            (None, Some(entity)) => entity != entity_id,
+            (None, None) => false,
+        }
     }
 
     /// The name the game stated is the character the login record named —
@@ -2610,6 +2624,7 @@ impl DataStorage {
         }
         let mut inner = self.inner.write();
         inner.login_entity = Some(entity_id);
+        inner.login_name = None;
         if inner.local_player_id == Some(entity_id as i64) {
             return false;
         }
