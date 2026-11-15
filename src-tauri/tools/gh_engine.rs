@@ -177,12 +177,13 @@
 //! party before a fight — false after ↻ until the next roster, and ten minutes
 //! after the last roster.
 //! `selected` (`{"player":{"id","name","class","itemLevel","combatPower",
-//! "serverId","enemy"}}`, every 100 ms at most, on a change, and once on
-//! connecting): the player you selected (Tab or a click; `35 38`), of either
-//! faction — `player` null when you selected nothing, a mob or a player not in
+//! "serverId","enemy"},"npc"}`, every 100 ms at most, on a change, and once on
+//! connecting): what you selected (Tab or a click; `35 38`). `player` a player
+//! of either faction — null when you selected nothing, a mob or a player not in
 //! sight. `itemLevel` and `combatPower` as their spawn told them (null: not
 //! read; no combat power in the 10v10 battleground, where everybody has the
-//! same), `enemy` of the other faction (null: yours not known).
+//! same), `enemy` of the other faction (null: yours not known). `npc` the NPC
+//! code of the mob you selected (the pet tracker's monsters), else null.
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -671,8 +672,12 @@ impl Engine {
 
     /// The player you have selected (see the top of this file).
     fn selected_json(&self) -> String {
-        let player = self.storage.selected_target().and_then(|id| self.storage.nearby_player(id));
-        let Some(p) = player else { return serde_json::json!({ "player": null }).to_string() };
+        let selected = self.storage.selected_target();
+        let player = selected.and_then(|id| self.storage.nearby_player(id));
+        let Some(p) = player else {
+            let npc = selected.and_then(|id| self.storage.mob_code(id));
+            return serde_json::json!({ "player": null, "npc": npc }).to_string();
+        };
         let enemy = self.storage.self_faction().map(|mine| mine != p.faction);
         serde_json::json!({
             "player": {
@@ -683,7 +688,8 @@ impl Engine {
                 "combatPower": p.combat_power,
                 "serverId": p.server,
                 "enemy": enemy,
-            }
+            },
+            "npc": null,
         })
         .to_string()
     }
