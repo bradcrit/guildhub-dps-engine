@@ -615,6 +615,7 @@ mod tests {
             name: "StayHype".into(),
             class: Some(JobClass::Gladiator),
             item_level: Some(3100),
+            combat_power: None,
             faction: 1,
             paired: false,
             server: Some(2001),

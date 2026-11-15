@@ -982,6 +982,9 @@ pub struct DataStorage {
     flight_powers: Mutex<crate::capture::flight_power::FlightPowers>,
     /// Your kills, assists and deaths (see `combat::kda`). Its own lock.
     kda: Mutex<Kda>,
+    /// The entity you selected (Tab or a click; `35 38`), None after Esc
+    /// (`34 38` with id 0) or a zone load. Its own lock.
+    selected_target: Mutex<Option<i32>>,
 }
 
 /// The timeline and when it was last pruned.
@@ -1499,7 +1502,28 @@ impl DataStorage {
             black_markets: Mutex::new(Default::default()),
             flight_powers: Mutex::new(Default::default()),
             kda: Mutex::new(Kda::default()),
+            selected_target: Mutex::new(None),
         }
+    }
+
+    /// You selected `id` (Tab or a click), or nothing (None: Esc).
+    pub fn note_selected_target(&self, id: Option<i32>) {
+        *self.selected_target.lock() = id;
+    }
+
+    /// The entity you have selected, None when nothing.
+    pub fn selected_target(&self) -> Option<i32> {
+        *self.selected_target.lock()
+    }
+
+    /// The player in sight with this entity id, of either faction.
+    pub fn nearby_player(&self, id: i32) -> Option<NearbyPlayer> {
+        self.nearby.lock().player(id).cloned()
+    }
+
+    /// A player in sight's combat power, as their spawn told it.
+    pub fn note_nearby_combat_power(&self, id: i32, combat_power: Option<u32>) {
+        self.nearby.lock().set_combat_power(id, combat_power);
     }
 
     /// A player spawned in sight, with what their spawn says of them.
@@ -4228,7 +4252,8 @@ impl DataStorage {
     pub fn note_map_load(&self, map_id: i32) {
         self.skill_timers.lock().map_load();
         self.arena.lock().map_loaded(map_id, now_ms());
-        // New entity ids: the players in sight are spawned again.
+        // New entity ids: the players in sight are spawned again, and your selection is gone.
+        *self.selected_target.lock() = None;
         {
             let mut nearby = self.nearby.lock();
             nearby.clear();

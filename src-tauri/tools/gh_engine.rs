@@ -176,6 +176,13 @@
 //! (`<data-dir>/cleansable.json`). `listed`: whether the meter lists the
 //! party before a fight — false after ↻ until the next roster, and ten minutes
 //! after the last roster.
+//! `selected` (`{"player":{"id","name","class","itemLevel","combatPower",
+//! "serverId","enemy"}}`, every 100 ms at most, on a change, and once on
+//! connecting): the player you selected (Tab or a click; `35 38`), of either
+//! faction — `player` null when you selected nothing, a mob or a player not in
+//! sight. `itemLevel` and `combatPower` as their spawn told them (null: not
+//! read; no combat power in the 10v10 battleground, where everybody has the
+//! same), `enemy` of the other faction (null: yours not known).
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
 //! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
@@ -449,6 +456,8 @@ struct Engine {
     resource_bars: watch::Sender<Arc<str>>,
     /// The party frames' state as JSON (`party_json`).
     party: watch::Sender<Arc<str>>,
+    /// The player you have selected as JSON (`selected_json`).
+    selected: watch::Sender<Arc<str>>,
     /// The debuffs seen taken off by another player (`learn_cleansable`),
     /// kept for the next session in CLEANSABLE_FILE.
     cleansable: Mutex<HashSet<u32>>,
@@ -658,6 +667,25 @@ impl Engine {
             learned |= self.cleansable.lock().insert(abnormal);
         }
         learned
+    }
+
+    /// The player you have selected (see the top of this file).
+    fn selected_json(&self) -> String {
+        let player = self.storage.selected_target().and_then(|id| self.storage.nearby_player(id));
+        let Some(p) = player else { return serde_json::json!({ "player": null }).to_string() };
+        let enemy = self.storage.self_faction().map(|mine| mine != p.faction);
+        serde_json::json!({
+            "player": {
+                "id": p.id,
+                "name": p.name,
+                "class": p.class.map(class_key),
+                "itemLevel": p.item_level,
+                "combatPower": p.combat_power,
+                "serverId": p.server,
+                "enemy": enemy,
+            }
+        })
+        .to_string()
     }
 
     /// The party frames' state (see the top of this file).
@@ -1304,6 +1332,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
     let (skill_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (resource_bars, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let (party, _) = watch::channel::<Arc<str>>(Arc::from(""));
+    let (selected, _) = watch::channel::<Arc<str>>(Arc::from(""));
     let party_path = args.data_dir.join(PARTY_FILE);
     if let Ok(text) = std::fs::read_to_string(&party_path) {
         let remembered = read_party_file(&text, a2tools_dps_meter_lib::clock::now_ms());
@@ -1337,6 +1366,7 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
         skill_bars,
         resource_bars,
         party,
+        selected,
         cleansable: Mutex::new(cleansable),
         target: AtomicI32::new(0),
         bar_data,
@@ -1556,6 +1586,10 @@ async fn run(args: Args, token: String) -> std::process::ExitCode {
                 let party = engine.party_json();
                 if **engine.party.borrow() != *party {
                     engine.party.send_replace(Arc::from(party));
+                }
+                let selected = engine.selected_json();
+                if **engine.selected.borrow() != *selected {
+                    engine.selected.send_replace(Arc::from(selected));
                 }
                 if saved.elapsed() >= CAST_TIMES_SAVE_EVERY {
                     saved = std::time::Instant::now();
@@ -1930,6 +1964,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     let mut skill_bars = engine.skill_bars.subscribe();
     let mut resource_bars = engine.resource_bars.subscribe();
     let mut party = engine.party.subscribe();
+    let mut selected = engine.selected.subscribe();
     let mut events = engine.events.subscribe();
     let mut beat = tokio::time::interval(HEARTBEAT_EVERY);
     beat.tick().await;
@@ -1942,6 +1977,7 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
     skill_bars.mark_changed();
     resource_bars.mark_changed();
     party.mark_changed();
+    selected.mark_changed();
     loop {
         let frame = tokio::select! {
             changed = dps.changed() => {
@@ -2033,6 +2069,16 @@ async fn events(mut stream: TcpStream, engine: Arc<Engine>) {
                     continue;
                 }
                 format!("event: party\ndata: {current}\n\n")
+            }
+            changed = selected.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let current = selected.borrow_and_update().clone();
+                if current.is_empty() {
+                    continue;
+                }
+                format!("event: selected\ndata: {current}\n\n")
             }
             event = events.recv() => match event {
                 Ok((name, data)) => format!("event: {name}\ndata: {data}\n\n"),

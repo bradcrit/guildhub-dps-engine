@@ -56,6 +56,8 @@ pub struct NearbyPlayer {
     pub class: Option<JobClass>,
     /// Equipment item level, as the inspect window shows it.
     pub item_level: Option<u32>,
+    /// Combat power, from the end of their spawn (`spawn_combat_power`).
+    pub combat_power: Option<u32>,
     /// The spawn's faction byte; yours is in your self record. In an Abyss
     /// pairing of one race, the side byte instead (`paired`).
     pub faction: u8,
@@ -318,6 +320,7 @@ impl NearbyPlayers {
         let same = self.players.get(&id).filter(|p| p.name == name);
         let attacked_me_ms = same.and_then(|p| p.attacked_me_ms);
         let item_level = item_level.or_else(|| same.and_then(|p| p.item_level));
+        let combat_power = same.and_then(|p| p.combat_power);
         let rank = same.and_then(|p| p.rank);
         let server = same.and_then(|p| p.server);
         let (dealt, taken) = same.map_or((0, 0), |p| (p.dealt, p.taken));
@@ -331,6 +334,7 @@ impl NearbyPlayers {
                 name: name.to_string(),
                 class,
                 item_level,
+                combat_power,
                 faction,
                 paired,
                 server,
@@ -357,6 +361,13 @@ impl NearbyPlayers {
     pub fn set_server(&mut self, id: i32, server: Option<u16>) {
         if let (Some(p), Some(server)) = (self.players.get_mut(&id), server) {
             p.server = Some(server);
+        }
+    }
+
+    /// A player's combat power, as their spawn told it (kept when it didn't).
+    pub fn set_combat_power(&mut self, id: i32, combat_power: Option<u32>) {
+        if let (Some(p), Some(cp)) = (self.players.get_mut(&id), combat_power) {
+            p.combat_power = Some(cp);
         }
     }
 

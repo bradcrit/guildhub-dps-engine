@@ -330,6 +330,9 @@ impl StreamProcessor {
         self.parse_zone_change_packet(packet);
         self.parse_map_load_packet(packet);
         self.parse_nearby_player_packet(packet);
+        if let Some(selected) = target_select(packet) {
+            self.data_storage.note_selected_target(selected);
+        }
         // Where you and the mobs are (the pet tracker's distances).
         if let Some(spotted) = crate::capture::positions::parse(packet) {
             self.data_storage.note_spotted(spotted);
@@ -1189,8 +1192,10 @@ impl StreamProcessor {
     fn scan_for_embedded_40_36(&mut self, data: &[u8]) {
         for (i, opcode, id) in embedded_spawns(data) {
             if opcode == 0x44 || opcode == 0x45 {
-                // 44/45 36 = player spawn — extract name
-                self.parse_player_spawn_name(data, i + 2);
+                // 44/45 36 = player spawn — extract name. Its end (for the
+                // combat power) is the region's only when it opens it.
+                let opens = usize::try_from(read_varint(data, 0).length).is_ok_and(|len| len == i);
+                self.parse_player_spawn_name(data, i + 2, opens.then_some(data.len()));
             } else {
                 // 40/41 36 = summon/mob spawn
                 let mut real_id = id;
@@ -1431,7 +1436,10 @@ impl StreamProcessor {
     /// (`<id varint> <mask1 u32> <mask2 u8> [mask2 & 0x01] <len><utf8>`) rather
     /// than hunting for the literal `0x07` that older builds happened to put in
     /// the `mask2` slot.
-    fn parse_player_spawn_name(&self, data: &[u8], offset_after_opcode: usize) {
+    ///
+    /// `frame_end`: where the spawn's frame ends, when known — its combat
+    /// power sits just before it (`spawn_combat_power`).
+    fn parse_player_spawn_name(&self, data: &[u8], offset_after_opcode: usize, frame_end: Option<usize>) {
         let Some((actor_id, sanitized, field)) = player_spawn_at(data, offset_after_opcode) else {
             return;
         };
@@ -1460,6 +1468,9 @@ impl StreamProcessor {
                 profile.server,
                 profile.rank,
             );
+            let frame = frame_end.and_then(|end| data.get(..end));
+            let combat_power = frame.and_then(|frame| spawn_combat_power(frame, profile.item_level));
+            self.data_storage.note_nearby_combat_power(actor_id, combat_power);
         }
     }
 
@@ -1515,7 +1526,7 @@ impl StreamProcessor {
         }
         // Player spawn: 0x3644 pre-2026-06, 0x3645 after the June 2026 +1 shift.
         if packet[offset] == 0x44 || packet[offset] == 0x45 {
-            self.parse_player_spawn_name(packet, offset + 2);
+            self.parse_player_spawn_name(packet, offset + 2, Some(packet.len()));
             return false;
         }
         // Mob/summon spawn: 0x3640 pre-2026-06, 0x3641 after the shift.
@@ -4069,6 +4080,56 @@ fn spawn_profile(data: &[u8], after: usize) -> Option<SpawnProfile> {
     })
 }
 
+/// What a player spawn's frame says of their combat power: a u32 just before
+/// its end, followed by five zero bytes (six in about one spawn of ten), as
+/// the DPS meter "Aion DPS" by SkeeveAN (MIT) reads it. In the captures of
+/// 2026-11-15 (town and Abyss) 63 spawns all had it there: Pridestalker
+/// 67,133 at item level 1,483, inb4qq 233,575 at 3,577, Azraeel 19,749 at 368
+/// — between 45 and 75 times the item level, every one of them.
+///
+/// A small value read one byte off is the real one shifted by a byte, so the
+/// spot is the one whose value fits the item level (CP_PER_ITEM_LEVEL); with
+/// the item level not known, the usual spot alone if its value is a likely
+/// combat power. The 10v10 battleground gives everybody the same
+/// ARENA_COMBAT_POWER: not theirs, so none.
+fn spawn_combat_power(frame: &[u8], item_level: Option<u32>) -> Option<u32> {
+    const CP_PER_ITEM_LEVEL: std::ops::RangeInclusive<u32> = 25..=150;
+    const ARENA_COMBAT_POWER: u32 = 397_228;
+    let at = |back: usize| {
+        let start = frame.len().checked_sub(back)?;
+        Some(u32::from_le_bytes(frame.get(start..start + 4)?.try_into().ok()?))
+    };
+    let found = match item_level.filter(|&il| il > 0) {
+        Some(il) => [9, 10, 8, 11].into_iter().filter_map(at).find(|&cp| CP_PER_ITEM_LEVEL.contains(&(cp / il))),
+        None => at(9).filter(|cp| (20_000..=4_000_000).contains(cp)),
+    };
+    found.filter(|&cp| cp != ARENA_COMBAT_POWER)
+}
+
+/// Your selection of a target (Tab or a click), as the server confirms it:
+/// `35 38 <entity varint> 00 00` (once with `00 <varint>` after it instead),
+/// sent together with `34 38 00 00 00 <entity varint>`; `34 38 00 00 00 00`
+/// when you clear it (Esc). Seen for players of either faction and for mobs
+/// on 2026-11-15 (town 15:22-15:24, Abyss 15:28), as SkeeveAN's "Aion DPS"
+/// (MIT) reads `35 38`. Some(None): nothing selected.
+fn target_select(packet: &[u8]) -> Option<Option<i32>> {
+    let len = usize::try_from(read_varint(packet, 0).length).ok().filter(|&l| l > 0)?;
+    let body = packet.get(len..)?;
+    match body {
+        [0x35, 0x38, rest @ ..] => {
+            let id = read_varint(rest, 0);
+            let after = rest.get(usize::try_from(id.length).ok().filter(|&l| l > 0)?..)?;
+            (id.value > 0 && (2..=5).contains(&after.len()) && after[0] == 0).then_some(Some(id.value))
+        }
+        [0x34, 0x38, 0, 0, 0, rest @ ..] => {
+            let id = read_varint(rest, 0);
+            let len = usize::try_from(id.length).ok().filter(|&l| l > 0)?;
+            (len == rest.len() && id.value >= 0).then_some((id.value > 0).then_some(id.value))
+        }
+        _ => None,
+    }
+}
+
 /// The server of a player's legion, from their spawn's legion entry within
 /// 200 bytes of `after` (the end of the name field):
 /// `<server u16> <legion u32> 00 00 <server u16> <len u8> <legion name>` —
@@ -4649,6 +4710,44 @@ mod tests {
         assert_eq!(rank("21 F4 CB 1F EC 03 00 00 00 00 00 00 9A 2B 00 00 00 00 00 00 00"), None);
         assert_eq!(rank("21 F4 CB 1F EC 03 00 00 13 00 00 00 9A 2B 00 00 00 05 00 00 00"), None);
         assert_eq!(pvp_rank(&[1, 2, 3]), None);
+    }
+
+    /// The last 20 bytes of spawns of 2026-11-15, after the rest of a record.
+    #[test]
+    fn a_spawn_ends_with_the_combat_power() {
+        let spawn = |tail: &str| [vec![0x11; 600], hex_bytes(tail)].concat();
+        // Pridestalker: nine bytes before the end.
+        let pridestalker = spawn("F4 CB 1F B4 04 00 00 13 00 00 00 3D 06 01 00 00 00 00 00 00");
+        assert_eq!(spawn_combat_power(&pridestalker, Some(1483)), Some(67_133));
+        assert_eq!(spawn_combat_power(&pridestalker, None), Some(67_133));
+        // Aenon: ten — read at nine, it is 242, nothing like item level 1270.
+        let aenon = spawn("CB 1F FA 03 00 00 13 00 00 00 E6 F2 00 00 00 00 00 00 00 00");
+        assert_eq!(spawn_combat_power(&aenon, Some(1270)), Some(62_182));
+        // Azraeel: low, below what a guess without the item level takes.
+        let azraeel = spawn("F4 CB 1F 31 04 00 00 13 00 00 00 25 4D 00 00 00 00 00 00 00");
+        assert_eq!(spawn_combat_power(&azraeel, Some(368)), Some(19_749));
+        assert_eq!(spawn_combat_power(&azraeel, None), None);
+        // The 10v10 battleground's number for everyone, and a frame too short.
+        let arena = spawn("F4 CB 1F 31 04 00 00 13 00 00 00 AC 0F 06 00 00 00 00 00 00");
+        assert_eq!(spawn_combat_power(&arena, Some(3000)), None);
+        assert_eq!(spawn_combat_power(&[1, 2, 3], Some(3000)), None);
+    }
+
+    /// Selections of 2026-11-15, as framed (the length first).
+    #[test]
+    fn a_selection_names_the_target() {
+        let select = |s: &str| target_select(&hex_bytes(s));
+        // Pridestalker (15:22:33) and a mob (15:22:36), both frames each.
+        assert_eq!(select("07 35 38 F2 52 00 00"), Some(Some(10_610)));
+        assert_eq!(select("08 34 38 00 00 00 F2 52"), Some(Some(10_610)));
+        assert_eq!(select("08 35 38 A0 94 01 00 00"), Some(Some(18_976)));
+        // Azraeel, with the trailing varint (15:23:33).
+        assert_eq!(select("09 35 38 DF 18 00 B6 E3 01"), Some(Some(3_167)));
+        // Esc.
+        assert_eq!(select("07 34 38 00 00 00 00"), Some(None));
+        // Something else.
+        assert_eq!(select("09 36 38 F2 52 00 00"), None);
+        assert_eq!(select("0C 35 38 F2 52 01 02 03 04 05 06 07"), None);
     }
 
     #[test]
