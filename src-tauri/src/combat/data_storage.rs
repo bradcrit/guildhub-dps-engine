@@ -1584,7 +1584,15 @@ impl DataStorage {
 
     /// A player in sight's combat power, as their spawn told it.
     pub fn note_nearby_combat_power(&self, id: i32, combat_power: Option<u32>) {
-        self.nearby.lock().set_combat_power(id, combat_power);
+        let mut nearby = self.nearby.lock();
+        nearby.set_combat_power(id, combat_power);
+        // The arena's players got the spawn before its combat power was read.
+        if combat_power.is_some()
+            && let Some(p) = nearby.player(id).cloned()
+        {
+            drop(nearby);
+            self.arena.lock().player_spawned(&p);
+        }
     }
 
     /// A player spawned in sight, with what their spawn says of them.

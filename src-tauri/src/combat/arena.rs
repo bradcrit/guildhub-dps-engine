@@ -194,6 +194,8 @@ pub struct Opponent {
     pub name: String,
     pub class: Option<JobClass>,
     pub item_level: Option<u32>,
+    /// From their spawn — None in the 10v10, which gives everybody the same.
+    pub combat_power: Option<u32>,
     pub server: Option<u16>,
 }
 
@@ -207,6 +209,8 @@ pub struct TeamPlayer {
     pub class: Option<JobClass>,
     pub server: Option<u16>,
     pub item_level: Option<u32>,
+    /// From their spawn — None in the 10v10, which gives everybody the same.
+    pub combat_power: Option<u32>,
     /// Their entity — UNKNOWN_ID until they spawned (or, you, hit).
     pub id: i32,
     /// Their damage on the other team, and the other team's on them.
@@ -343,6 +347,7 @@ impl ArenaTracker {
                         class: e.class,
                         server: e.server,
                         item_level: None,
+                        combat_power: None,
                         id: UNKNOWN_ID,
                         dealt: 0,
                         taken: 0,
@@ -373,7 +378,7 @@ impl ArenaTracker {
                     }
                     // None yet, or the first hit picked someone else: the roster knows
                     // better. Their entity comes with their spawn or first hit.
-                    _ => m.opponent = Some(Opponent { id: UNKNOWN_ID, name: t.name.clone(), class: t.class, item_level: None, server: t.server }),
+                    _ => m.opponent = Some(Opponent { id: UNKNOWN_ID, name: t.name.clone(), class: t.class, item_level: None, combat_power: None, server: t.server }),
                 }
             }
         }
@@ -389,13 +394,15 @@ impl ArenaTracker {
     }
 
     /// A player spawned in sight: the opponent the roster named gets their
-    /// entity, and their item level.
+    /// entity, and their item level and combat power (called again once the
+    /// spawn's combat power is read).
     pub fn player_spawned(&mut self, p: &NearbyPlayer) {
         let Some(m) = self.open() else { return };
         if let Some(t) = m.players.iter_mut().find(|t| t.name == p.name) {
             t.id = p.id;
             t.class = t.class.or(p.class);
             t.item_level = p.item_level.or(t.item_level);
+            t.combat_power = p.combat_power.or(t.combat_power);
             t.server = t.server.or(p.server);
         }
         let Some(o) = m.opponent.as_mut() else { return };
@@ -405,6 +412,7 @@ impl ArenaTracker {
         o.id = p.id;
         o.class = p.class.or(o.class);
         o.item_level = p.item_level.or(o.item_level);
+        o.combat_power = p.combat_power.or(o.combat_power);
         o.server = o.server.or(p.server);
     }
 
@@ -434,7 +442,7 @@ impl ArenaTracker {
         }
         match (&mut m.opponent, other) {
             (None, Some(p)) => {
-                m.opponent = Some(Opponent { id: p.id, name: p.name.clone(), class: p.class, item_level: p.item_level, server: p.server });
+                m.opponent = Some(Opponent { id: p.id, name: p.name.clone(), class: p.class, item_level: p.item_level, combat_power: p.combat_power, server: p.server });
             }
             (None, None) => return,
             (Some(o), p) if o.id != other_id => {
@@ -447,6 +455,7 @@ impl ArenaTracker {
             (Some(o), Some(p)) => {
                 o.class = o.class.or(p.class);
                 o.item_level = p.item_level.or(o.item_level);
+                o.combat_power = p.combat_power.or(o.combat_power);
                 o.server = o.server.or(p.server);
             }
             (Some(_), None) => {}
@@ -721,6 +730,25 @@ mod tests {
         assert_eq!(m.rounds[0].winner, Some(Side::Them));
         assert_eq!(m.score(), (0, 1));
         assert_eq!(m.players.iter().map(|p| p.deaths).sum::<u32>(), 5);
+    }
+
+    #[test]
+    fn a_team_player_s_combat_power_comes_after_their_spawn() {
+        // The spawn's combat power is read after the spawn itself (stream_processor's
+        // parse_player_spawn_name): the second call fills it in, a later one without keeps it.
+        let mut a = ArenaTracker::default();
+        a.map_loaded(60, 0);
+        let roster = (0..10).map(|i| RosterEntry { key: i as u64, name: format!("P{i}"), team: if i < 5 { 1 } else { 2 }, class: None, server: None }).collect();
+        a.roster(roster, Some("P5"));
+        let mut p = opp();
+        p.name = "P0".into();
+        a.player_spawned(&p);
+        assert_eq!(a.current().unwrap().players[0].combat_power, None);
+        p.combat_power = Some(171_327);
+        a.player_spawned(&p);
+        p.combat_power = None;
+        a.player_spawned(&p);
+        assert_eq!(a.current().unwrap().players[0].combat_power, Some(171_327));
     }
 
     #[test]

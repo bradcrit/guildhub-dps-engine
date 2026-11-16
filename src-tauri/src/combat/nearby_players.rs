@@ -175,6 +175,8 @@ pub struct KillRecord {
     pub name: String,
     pub class: Option<JobClass>,
     pub item_level: Option<u32>,
+    /// As their spawn told it (`NearbyPlayer::combat_power`).
+    pub combat_power: Option<u32>,
     pub rank: Option<u8>,
     /// As `RecapAttacker::server` and `paired`.
     pub server: Option<u16>,
@@ -513,6 +515,7 @@ impl NearbyPlayers {
             name: p.name.clone(),
             class: p.class,
             item_level: p.item_level,
+            combat_power: p.combat_power,
             rank: p.rank,
             server: p.server,
             paired: p.paired,

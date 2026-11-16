@@ -58,28 +58,28 @@
 //! the field bosses in the open world whose HP changed, and the ones still
 //! fought once a minute — `hp` whole percent left, `reset` when it came back
 //! up. `server` is the game's server id (null for a kill before the game
-//! named it). `pvp` (`{"players":[{"id","name","class","itemLevel","rank","seenAt",
+//! named it). `pvp` (`{"players":[{"id","name","class","itemLevel","combatPower","rank","seenAt",
 //! "attackedAt","dealt","taken"}],"abyss","death"}`) on every change and once on
 //! connecting: the players of the other faction in sight, attacking you first
 //! (latest attack first), then the one seen last first — `seenAt`/`attackedAt`
 //! unix ms, `attackedAt` null for one who hasn't hit you, `class` and
-//! `itemLevel` null while not known, `rank` the Abyss rank (19 Trainee, 18
+//! `itemLevel`/`combatPower` null while not known (`combatPower` from their spawn), `rank` the Abyss rank (19 Trainee, 18
 //! Ninth-Class … 10 First-Class Soldier; null: not known), `dealt`/`taken` the damage you dealt them
 //! and they dealt you since they came into sight; `abyss` while the map you
 //! are on is the Abyss; `death` the recap of your last death by players' hands
 //! (`{"at","killer","skill","abyss","attackers":[{"name","class","rank","damage","hits","skill"}]}`,
 //! most damage first, `skill` a name, "" when the game's isn't known) or null;
 //! `kills` your last 50 kills and assists of enemy players, oldest first
-//! (`{"at","name","class","itemLevel","rank","killingBlow","damage","hits","skill",
+//! (`{"at","name","class","itemLevel","combatPower","rank","killingBlow","damage","hits","skill",
 //! "total","helpers","abyss"}`: the last hit yours, your damage, hits and top
 //! skill, everyone's damage and how many others hit them, in the 15 s before);
 //! `abyssPoints` the Abyss Points you gained lately (`{"at","amount"}`, oldest
 //! first: each rise of the total the game sends, from any source — not the
 //! first total after a start or a character switch); `arena` the last arena
 //! match (`{"map","enteredAt","leftAt","finished","team","opponent":{"name",
-//! "class","itemLevel","serverId"},"won","lost","rounds":[{"start","end",
+//! "class","itemLevel","combatPower","serverId"},"won","lost","rounds":[{"start","end",
 //! "winner","dealt","taken"}],"myTeam","players":[{"name","team","class",
-//! "itemLevel","serverId","dealt","taken","deaths","dead","me"}]}`, `winner`
+//! "itemLevel","combatPower","serverId","dealt","taken","deaths","dead","me"}]}`, `winner`
 //! "me", "them" or null; `team` a 5v5, whose `players` are all ten with their
 //! damage on the other team and from it, `myTeam` yours) or null before one
 //! (`combat::arena`).
@@ -1078,6 +1078,7 @@ impl Engine {
                     "name": p.name,
                     "class": p.class.map(class_key),
                     "itemLevel": p.item_level,
+                    "combatPower": p.combat_power,
                     "rank": p.rank,
                     "serverId": p.server,
                     "paired": p.paired,
@@ -1123,6 +1124,7 @@ impl Engine {
                     "name": k.name,
                     "class": k.class.map(class_key),
                     "itemLevel": k.item_level,
+                    "combatPower": k.combat_power,
                     "rank": k.rank,
                     "enemyServerId": k.server,
                     "paired": k.paired,
@@ -1168,7 +1170,7 @@ impl Engine {
             .map(|r| serde_json::json!({ "start": r.started_ms, "end": r.ended_ms, "winner": side(r.winner), "dealt": r.dealt, "taken": r.taken }))
             .collect();
         let opponent = m.opponent.as_ref().map(|o| {
-            serde_json::json!({ "name": o.name, "class": o.class.map(class_key), "itemLevel": o.item_level, "serverId": o.server })
+            serde_json::json!({ "name": o.name, "class": o.class.map(class_key), "itemLevel": o.item_level, "combatPower": o.combat_power, "serverId": o.server })
         });
         let me = self.storage.local_character_name();
         let players: Vec<_> = m
@@ -1176,7 +1178,7 @@ impl Engine {
             .iter()
             .map(|p| {
                 serde_json::json!({
-                    "name": p.name, "team": p.team, "class": p.class.map(class_key), "itemLevel": p.item_level, "serverId": p.server,
+                    "name": p.name, "team": p.team, "class": p.class.map(class_key), "itemLevel": p.item_level, "combatPower": p.combat_power, "serverId": p.server,
                     "dealt": p.dealt, "taken": p.taken, "kills": p.kills, "deaths": p.deaths, "assists": p.assists, "dead": p.dead,
                     "me": me.as_deref() == Some(p.name.as_str()),
                 })
