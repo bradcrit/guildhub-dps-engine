@@ -630,6 +630,26 @@ const REGION_MIN_STEP: f32 = 100.0;
 /// each check the area breaks (2026-11-07 22:33: ±5 m said, 32 m off, with one broken).
 const REGION_MIN_CM: f32 = 1_000.0;
 const REGION_BROKEN_CM: f32 = 2_000.0;
+/// What any mob's code and players go by till REGION_MIN_LEARNT distances are
+/// learnt (tests/sight_radii_scan.rs, five captures of 2026-11-15: a circle,
+/// not a grid): a mob comes into sight (`41 36`) within MOB_ENTER_CM of you —
+/// 249 of 252 within 38 m, the rest respawns or walk-ins nearer — and leaves
+/// it (`42 36` flag 1), as players do (`47 36`), between LEAVE_NEAR_CM and
+/// LEAVE_FAR_CM (34–50 m, players 28–48 m). A code learnt farther (a boss:
+/// up to ~120 m) goes by its own; never nearer than these.
+const MOB_ENTER_CM: f32 = 3_900.0;
+const LEAVE_NEAR_CM: f32 = 2_800.0;
+const LEAVE_FAR_CM: f32 = 5_000.0;
+/// What's in range wins over the spot told (and a guess off one leaving
+/// sight) once that spot is this old (ms) — and its accuracy is scaled by
+/// REGION_SAYS_SCALE, as it said ±14–295 m where it was 5–71 m off.
+/// positions_scan, 24 gaps in five captures of 2026-11-15/16: the engine's
+/// pick was off median 14 / mean 30 / p90 97 / max 145 m, with this
+/// 14 / 16 / 32 / 40 m (from 3 s on, one 71 m miss 3.4 s after a spot told).
+const REGION_TAKES_OVER_MS: i64 = 4_500;
+const REGION_SAYS_SCALE: f32 = 0.4;
+/// A mob's come-into-sight distance is kept under its code plus this.
+const MOB_ENTER_KEY_OFFSET: i32 = 1_000_000_000;
 /// Running (~5 m/s, `capture::positions`), and a mount at its fastest (cm a ms).
 const RUN_CM_PER_MS: f32 = 0.5;
 const MAX_CM_PER_MS: f32 = 2.5;
@@ -734,22 +754,46 @@ fn self_fix(inner: &Inner, self_max_age_ms: i64) -> Option<SelfFix> {
             best = Some((guess, RING_GUESS_CM, true));
         }
     }
+    // What's in range takes over once the spot told is REGION_TAKES_OVER_MS
+    // old: it holds that spot too (within mount reach), and its own accuracy
+    // says far more than it is off (REGION_SAYS_SCALE).
+    // Before that, it wins only by its own (unscaled) say.
     if let Some((pos, cm)) = region_estimate(inner, now) {
-        if best.is_none_or(|(_, b, _)| cm < b) {
-            best = Some((pos, cm, true));
+        let told_old = told.is_none_or(|(_, age)| age >= REGION_TAKES_OVER_MS);
+        if told_old || best.is_none_or(|(_, b, _)| cm < b) {
+            best = Some((pos, cm * REGION_SAYS_SCALE, true));
         }
     }
     best.map(|(pos, cm, guessed)| SelfFix { pos, age_ms: told_age, guessed, accuracy_m: cm / 100.0 })
 }
 
 /// The distances kept under `key` (cm): the smallest (p10) and the largest
-/// (p90) — None until REGION_MIN_LEARNT.
+/// (p90), the largest never under the default for mobs and players
+/// (`default_sight_band`) — objects: None until REGION_MIN_LEARNT.
 fn sight_band(inner: &Inner, key: i32) -> Option<(f32, f32)> {
-    let kept = inner.sight_radii.get(&key).filter(|k| k.len() >= REGION_MIN_LEARNT)?;
+    let default = default_sight_band(key);
+    let Some(kept) = inner.sight_radii.get(&key).filter(|k| k.len() >= REGION_MIN_LEARNT) else { return default };
     let mut v: Vec<f32> = kept.iter().copied().collect();
     v.sort_by(f32::total_cmp);
     let at = |q: f32| v[((v.len() - 1) as f32 * q).round() as usize];
-    Some((at(0.1), at(0.9)))
+    Some((at(0.1), at(0.9).max(default.map_or(0.0, |(_, far)| far))))
+}
+
+/// What a key goes by before it is learnt (MOB_ENTER_CM): mobs and players —
+/// objects differ too much by code (60–166 m).
+fn default_sight_band(key: i32) -> Option<(f32, f32)> {
+    if key == PLAYER_SIGHT_KEY || (1..MOB_ENTER_KEY_OFFSET).contains(&key) {
+        Some((LEAVE_NEAR_CM, LEAVE_FAR_CM))
+    } else if key >= MOB_ENTER_KEY_OFFSET {
+        Some((0.0, MOB_ENTER_CM))
+    } else {
+        None
+    }
+}
+
+/// The key a mob's come-into-sight distance is kept under (MOB_ENTER_CM).
+fn mob_enter_key(code: i32) -> Option<i32> {
+    (1..MOB_ENTER_KEY_OFFSET).contains(&code).then(|| code + MOB_ENTER_KEY_OFFSET)
 }
 
 /// Your spot from what's in range now and what came and went lately (see
@@ -869,6 +913,19 @@ fn note_came_in(inner: &mut Inner, code: u32, spot: Position, created_ms: Option
         return;
     }
     let key = object_enter_key(code);
+    if !learn_sight(inner, key, spot) {
+        push_sight_event(inner, key, spot);
+    }
+}
+
+/// A mob of `code` came into sight at `spot` (`41 36`): you are within its
+/// code's come-in distance (MOB_ENTER_CM). Not right after a map load (all
+/// in range comes at once then, ENTER_AFTER_LOAD_MS).
+fn note_mob_came_in(inner: &mut Inner, code: i32, spot: Position) {
+    if now_ms() - inner.map_loaded_ms <= ENTER_AFTER_LOAD_MS {
+        return;
+    }
+    let Some(key) = mob_enter_key(code) else { return };
     if !learn_sight(inner, key, spot) {
         push_sight_event(inner, key, spot);
     }
@@ -1131,6 +1188,9 @@ struct Inner {
     gathering_since: Option<i64>,
     /// What left sight or came into range in the last REGION_EVENT_MS (`region_estimate`).
     sight_events: VecDeque<SightEvent>,
+    /// The mob a spawn record just named (entity, code): its spot comes next
+    /// from the same record (`note_spotted`, `note_mob_came_in`).
+    pending_spawn: Option<(i32, i32)>,
     /// When the last map load came (ms) — ENTER_AFTER_LOAD_MS.
     map_loaded_ms: i64,
     object_codes_logged: HashSet<u32>,
@@ -1415,6 +1475,7 @@ impl DataStorage {
                 gathered_nodes: VecDeque::new(),
                 gathering_since: None,
                 sight_events: VecDeque::new(),
+                pending_spawn: None,
                 map_loaded_ms: 0,
                 object_codes_logged: HashSet::new(),
                 actor_power_scalars: HashMap::new(),
@@ -1748,6 +1809,7 @@ impl DataStorage {
     pub fn note_spotted(&self, spotted: Spotted) {
         let mut inner = self.inner.write();
         let me = inner.local_player_id;
+        let spawned = inner.pending_spawn.take();
         match spotted {
             Spotted::You(pos) => {
                 inner.self_position = Some((pos, now_ms()));
@@ -1760,6 +1822,9 @@ impl DataStorage {
             Spotted::Entity(id, pos) => {
                 if !inner.dead_entity_ids.contains(&id) {
                     inner.entity_positions.insert(id, pos);
+                    if let Some((_, code)) = spawned.filter(|&(mid, _)| mid == id) {
+                        note_mob_came_in(&mut inner, code, pos);
+                    }
                 }
             }
         }
@@ -1881,6 +1946,12 @@ impl DataStorage {
     /// Your spot as best known, with how far off it may be (`SelfFix`).
     pub fn self_fix(&self, self_max_age_ms: i64) -> Option<SelfFix> {
         self_fix(&self.inner.read(), self_max_age_ms)
+    }
+
+    /// Your spot from what's in range alone, and how far off it may be (cm) —
+    /// for the scans (tests/positions_scan.rs) to weigh it on its own.
+    pub fn region_estimate(&self) -> Option<(Position, f32)> {
+        region_estimate(&self.inner.read(), now_ms())
     }
 
     /// The NPC code of the mob you are fighting: the one in sight you hit
@@ -3499,6 +3570,7 @@ impl DataStorage {
         let before = inner.mob_storage.insert(mid, code);
         if !inner.dead_entity_ids.contains(&mid) {
             inner.mobs_in_sight.insert(mid, code);
+            inner.pending_spawn = Some((mid, code));
         }
         // An Abyss core seen up, once per entity (online builds only, as kills).
         #[cfg(feature = "online")]
@@ -5899,6 +5971,40 @@ mod tests {
         assert_eq!(next.self_estimate(60_000).map(|(p, ..)| p.y.round() as i32), Some(6_000));
         // What was loaded isn't new: nothing to write back.
         assert_eq!(next.sight_radii_since(0), None);
+        crate::clock::set_override(None);
+    }
+
+    /// A mob coming into sight says you are within MOB_ENTER_CM of it — any
+    /// code, learnt or not — and its distance is learnt while your spot is fresh.
+    #[test]
+    fn a_mob_coming_into_sight_tells_you_are_near_it() {
+        let storage = DataStorage::new();
+        let spot = |x: f32, y: f32| Position { x, y, z: 15_000.0 };
+        crate::clock::set_override(Some(10_000));
+        storage.note_spotted(Spotted::You(spot(0.0, 0.0)));
+        // Your spot fresh: learnt under the come-in key, not the code's.
+        storage.append_mob(1, 777);
+        storage.note_spotted(Spotted::Entity(1, spot(3_000.0, 0.0)));
+        let (_, radii) = storage.sight_radii_since(0).unwrap();
+        assert_eq!(radii, HashMap::from([(777 + MOB_ENTER_KEY_OFFSET, vec![3_000.0])]));
+        // 30 s on, no spot told since: two mobs come in 70 m apart, another
+        // is in sight — you are between them, within 39 m of both.
+        crate::clock::set_override(Some(40_000));
+        for (id, code, x) in [(2, 888, 50_000.0), (3, 999, 57_000.0)] {
+            storage.append_mob(id, code);
+            storage.note_spotted(Spotted::Entity(id, spot(x, 0.0)));
+        }
+        storage.append_mob(4, 555);
+        storage.note_spotted(Spotted::Entity(4, spot(53_500.0, 2_000.0)));
+        let fix = storage.self_fix(60_000).unwrap();
+        assert!(fix.guessed);
+        assert!((fix.pos.x - 53_500.0).abs() < 1_000.0 && fix.pos.y.abs() < 2_500.0, "{fix:?}");
+        // Right after a map load everything comes at once: nothing to go by.
+        storage.inner.write().map_loaded_ms = 41_000;
+        crate::clock::set_override(Some(42_000));
+        storage.append_mob(5, 666);
+        storage.note_spotted(Spotted::Entity(5, spot(0.0, 0.0)));
+        assert!(storage.inner.read().sight_events.iter().all(|e| e.key != 666 + MOB_ENTER_KEY_OFFSET));
         crate::clock::set_override(None);
     }
 

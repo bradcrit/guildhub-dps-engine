@@ -124,18 +124,33 @@ fn scan_for_your_spot() {
                             let p0 = storage.self_position().unwrap().0;
                             let reach = 500.0 + age as f32 * SPEED;
                             let near: Vec<_> = scan.sight.values().filter(|(p, _)| p0.metres_to(p) * 100.0 <= reach + 8_000.0).collect();
+                            let region = storage.region_estimate().map_or("none".to_string(), |(r, cm)| format!("{:.0} m off, says ±{:.0} m", r.metres_to(&pos), cm / 100.0));
                             eprintln!(
-                                "age {age} guess {:.0}/{:.0} off {:.0} m; spot before {:.0}/{:.0}; test near {} of {}",
+                                "age {age} guess {:.0}/{:.0} off {:.0} m; spot before {:.0}/{:.0} ({:.0} m off); region {region}; test near {} of {}",
                                 before.x / 100.0,
                                 before.y / 100.0,
                                 before.metres_to(&pos),
                                 p0.x / 100.0,
                                 p0.y / 100.0,
+                                p0.metres_to(&pos),
                                 near.len(),
                                 scan.sight.len()
                             );
                         }
                         if age >= GAP_MS {
+                            // Alternatives to weigh against the engine's pick: the spot told
+                            // before and what's in range, blended by how far off each may be
+                            // (the latter's own say times k).
+                            if let (Some((p0, _)), Some((r, cm))) = (storage.self_position(), storage.region_estimate()) {
+                                let told = 300.0 + age as f32 * 0.5;
+                                let mut row = vec![age as f32, before.metres_to(&pos), p0.metres_to(&pos), r.metres_to(&pos)];
+                                for k in [0.15f32, 0.25, 0.35, 0.5, 0.75] {
+                                    let (wt, wr) = (1.0 / told.powi(2), 1.0 / (cm * k).powi(2));
+                                    let b = Position { x: (p0.x * wt + r.x * wr) / (wt + wr), y: (p0.y * wt + r.y * wr) / (wt + wr), z: p0.z };
+                                    row.push(b.metres_to(&pos));
+                                }
+                                eprintln!("ALT {}", row.iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>().join(" "));
+                            }
                             scan.engine.push((age, before.metres_to(&pos), storage.self_position().map_or(f32::NAN, |(p, _)| p.metres_to(&pos))));
                         }
                     }
