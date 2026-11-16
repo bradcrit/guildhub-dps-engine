@@ -178,7 +178,7 @@
 //! after the last roster.
 //! `selected` (`{"player":{"id","name","class","itemLevel","combatPower",
 //! "serverId","enemy"},"npc"}`, every 100 ms at most, on a change, and once on
-//! connecting): what you selected (Tab or a click; `35 38`). `player` a player
+//! connecting): what you selected (Tab or a click; `34 38`). `player` a player
 //! of either faction — null when you selected nothing, a mob or a player not in
 //! sight. `itemLevel` and `combatPower` as their spawn told them (null: not
 //! read; no combat power in the 10v10 battleground, where everybody has the

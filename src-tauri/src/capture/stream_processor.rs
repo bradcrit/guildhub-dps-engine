@@ -4107,20 +4107,19 @@ fn spawn_combat_power(frame: &[u8], item_level: Option<u32>) -> Option<u32> {
 }
 
 /// Your selection of a target (Tab or a click), as the server confirms it:
-/// `35 38 <entity varint> 00 00` (once with `00 <varint>` after it instead),
-/// sent together with `34 38 00 00 00 <entity varint>`; `34 38 00 00 00 00`
-/// when you clear it (Esc). Seen for players of either faction and for mobs
-/// on 2026-11-15 (town 15:22-15:24, Abyss 15:28), as SkeeveAN's "Aion DPS"
-/// (MIT) reads `35 38`. Some(None): nothing selected.
+/// `34 38 00 00 00 <entity varint>`, `34 38 00 00 00 00` when you clear it
+/// (Esc) or it dies. Seen for players of either faction and for mobs on
+/// 2026-11-15 (town 15:22-15:24, Abyss 15:28). Some(None): nothing selected.
+///
+/// Not `35 38 <entity varint> 00 <varint>`, which comes with it: that is an
+/// entity's own target (`00 00`: none), sent too for a mob that turns on you
+/// or a player in sight that targets someone — read as your selection, a mob
+/// aggroing you showed in the target window with nothing selected (captures
+/// of 2026-11-15 19:24-20:55).
 fn target_select(packet: &[u8]) -> Option<Option<i32>> {
     let len = usize::try_from(read_varint(packet, 0).length).ok().filter(|&l| l > 0)?;
     let body = packet.get(len..)?;
     match body {
-        [0x35, 0x38, rest @ ..] => {
-            let id = read_varint(rest, 0);
-            let after = rest.get(usize::try_from(id.length).ok().filter(|&l| l > 0)?..)?;
-            (id.value > 0 && (2..=5).contains(&after.len()) && after[0] == 0).then_some(Some(id.value))
-        }
         [0x34, 0x38, 0, 0, 0, rest @ ..] => {
             let id = read_varint(rest, 0);
             let len = usize::try_from(id.length).ok().filter(|&l| l > 0)?;
@@ -4737,12 +4736,13 @@ mod tests {
     #[test]
     fn a_selection_names_the_target() {
         let select = |s: &str| target_select(&hex_bytes(s));
-        // Pridestalker (15:22:33) and a mob (15:22:36), both frames each.
-        assert_eq!(select("07 35 38 F2 52 00 00"), Some(Some(10_610)));
+        // Pridestalker (15:22:33).
         assert_eq!(select("08 34 38 00 00 00 F2 52"), Some(Some(10_610)));
-        assert_eq!(select("08 35 38 A0 94 01 00 00"), Some(Some(18_976)));
-        // Azraeel, with the trailing varint (15:23:33).
-        assert_eq!(select("09 35 38 DF 18 00 B6 E3 01"), Some(Some(3_167)));
+        // An entity's own target (`35 38`): not your selection, whether it
+        // targets nobody, or a mob turns on you (20:54:40) or Azraeel on someone.
+        assert_eq!(select("07 35 38 F2 52 00 00"), None);
+        assert_eq!(select("08 35 38 A0 94 01 00 00"), None);
+        assert_eq!(select("09 35 38 DF 18 00 B6 E3 01"), None);
         // Esc.
         assert_eq!(select("07 34 38 00 00 00 00"), Some(None));
         // Something else.

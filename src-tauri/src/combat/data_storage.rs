@@ -1039,7 +1039,7 @@ pub struct DataStorage {
     flight_powers: Mutex<crate::capture::flight_power::FlightPowers>,
     /// Your kills, assists and deaths (see `combat::kda`). Its own lock.
     kda: Mutex<Kda>,
-    /// The entity you selected (Tab or a click; `35 38`), None after Esc
+    /// The entity you selected (Tab or a click; `34 38`), None after Esc
     /// (`34 38` with id 0) or a zone load. Its own lock.
     selected_target: Mutex<Option<i32>>,
 }
