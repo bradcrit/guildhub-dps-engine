@@ -102,3 +102,41 @@ fn kina_and_kina_bound_apart() {
     assert_eq!(lists.items.get(&930_100_031), Some(&1_920), "Kina");
     assert_eq!(lists.items.get(&930_100_001), Some(&319_600), "Kina (Bound)");
 }
+
+/// Character switches, 2026-11-16 21:30: Bradcrit logs in (Nightmare 6(+1),
+/// Lower Reshanta's basic time used up — an entry kind `02` that once left
+/// the list unread), then Cplusplus (Nightmare 2), then Bradcrit again, who
+/// was given Cplusplus's counts before.
+///
+///   A2_LISTS_CAPTURE_SWITCH=…/packets_20261116_213022.txt cargo test --test game_lists_replay
+#[test]
+fn a_switch_keeps_each_characters_counts() {
+    let Ok(path) = std::env::var("A2_LISTS_CAPTURE_SWITCH") else {
+        eprintln!("A2_LISTS_CAPTURE_SWITCH unset; skipping");
+        return;
+    };
+    let text = std::fs::read_to_string(path).expect("capture readable");
+    let lines: Vec<(String, Vec<u8>)> = text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut parts = l.splitn(3, '|');
+            let ts = parts.next()?.to_string();
+            let _stream = parts.next()?;
+            Some((ts, decode_hex(parts.next()?)?))
+        })
+        .collect();
+
+    let bradcrit = replay(&lines, "2026-11-16T21:30:50");
+    assert_eq!(bradcrit.owner.as_deref(), Some("Bradcrit"));
+    assert_eq!(count(&bradcrit, 4), (6, 1, None), "Nightmare 6(+1)");
+    assert_eq!(count(&bradcrit, 3).2, Some(0), "no basic Reshanta time left");
+
+    let cplusplus = replay(&lines, "2026-11-16T21:31:10");
+    assert_eq!(cplusplus.owner.as_deref(), Some("Cplusplus"));
+    assert_eq!(count(&cplusplus, 4), (2, 0, None), "Nightmare 2");
+
+    let back = replay(&lines, "");
+    assert_eq!(back.owner.as_deref(), Some("Bradcrit"));
+    assert_eq!(count(&back, 4), (6, 1, None), "Bradcrit's own again");
+}

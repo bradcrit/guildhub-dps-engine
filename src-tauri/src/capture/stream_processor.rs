@@ -2933,7 +2933,7 @@ enum Entry {
 
 /// One entry of the entry counts read as the game lays it out, `<kind> <id
 /// u32 LE> <values>`: kind `00` no value (both 0), `01` a u64 (a time, not a
-/// count), `03` two u64, `04` the first value, `08` the second, `0c` both (varints). Odyle
+/// count), `02` the second u64 alone, `03` two u64, `04` the first value, `08` the second, `0c` both (varints). Odyle
 /// energy is id 60000001 (`01 87 93 03`), Shugo Festival keys id 1. Returns
 /// the entry and where the next begins. Ids seen run from 1 to 90000006 and
 /// counts stay in the thousands, so an id of 0 or past 99999999, or a count
@@ -2959,6 +2959,12 @@ fn content_entry_at(body: &[u8], at: usize) -> Option<(Entry, usize)> {
             let time = u64::from_le_bytes(body.get(o..o + 8)?.try_into().ok()?);
             body.get(o + 8..o + 16)?;
             return Some((Entry::Time(id, time), o + 16));
+        }
+        // The second u64 alone: the first time left out, so 0 — id 3 with
+        // 3199000 (0:53:19) and its basic time used up, 2026-11-16.
+        0x02 => {
+            body.get(o..o + 8)?;
+            return Some((Entry::Time(id, 0), o + 8));
         }
         0x04 => v[0] = value(&mut o)?,
         0x08 => v[1] = value(&mut o)?,

@@ -2531,7 +2531,9 @@ impl DataStorage {
             inner.odyle_awaits_self_record = false;
         }
         let lists = &mut inner.game_lists;
-        if (!lists.counts.is_empty() || !lists.items.is_empty()) && (lists.awaits_self_record || lists.owner.is_none()) {
+        // Awaiting (a login): theirs even with nothing read yet — the changes that
+        // follow are, and the last character's are gone (`note_login_record`).
+        if lists.awaits_self_record || (lists.owner.is_none() && (!lists.counts.is_empty() || !lists.items.is_empty())) {
             lists.owner = name.clone();
             lists.awaits_self_record = false;
         }
@@ -2748,6 +2750,20 @@ impl DataStorage {
         let mut inner = self.inner.write();
         inner.login_entity = Some(entity_id);
         inner.login_name = None;
+        // The lists so far are the last character's: the login's own come
+        // right after (`0b 61` 0.05 s later, 2026-11-16) and wait for the self
+        // record. One that doesn't read must not leave the last one's to it —
+        // a switch Cplusplus → Bradcrit gave Bradcrit Cplusplus's 73 counts.
+        let lists = &mut inner.game_lists;
+        lists.counts.clear();
+        lists.items.clear();
+        lists.items_whole = false;
+        lists.duties = None;
+        lists.morphs_server.clear();
+        lists.morphs_character.clear();
+        lists.morphs_whole = false;
+        lists.owner = None;
+        lists.awaits_self_record = true;
         if inner.local_player_id == Some(entity_id as i64) {
             return false;
         }
@@ -5955,6 +5971,27 @@ mod tests {
         let lists = s.game_lists();
         assert_eq!(lists.duties, Some(5));
         assert!(lists.duties_at_login);
+    }
+
+    /// A character switch whose login list doesn't read: the last
+    /// character's counts go with the login record, they don't pass to the
+    /// one named next (Cplusplus → Bradcrit, 2026-11-16).
+    #[test]
+    fn a_login_drops_the_last_characters_lists() {
+        let s = DataStorage::new();
+        s.note_game_list(ListUpdate::Counts { entries: vec![EntryCount { id: 4, first: 2, second: 0, ms: None }], whole: true });
+        s.set_local_identity_from_game(1030, Some("Cplusplus".into()));
+        assert_eq!(s.game_lists().owner.as_deref(), Some("Cplusplus"));
+        s.note_login_record(2040);
+        s.note_game_list(ListUpdate::Items { items: vec![(930_100_031, 5)], whole: true });
+        s.set_local_identity_from_game(2040, Some("Bradcrit".into()));
+        let lists = s.game_lists();
+        assert_eq!(lists.owner.as_deref(), Some("Bradcrit"));
+        assert!(lists.counts.is_empty());
+        // What changes next is Bradcrit's.
+        s.note_game_list(ListUpdate::Counts { entries: vec![EntryCount { id: 4, first: 6, second: 1, ms: None }], whole: false });
+        assert_eq!(s.game_lists().counts.get(&4).map(|e| e.first), Some(6));
+        assert_eq!(s.game_lists().owner.as_deref(), Some("Bradcrit"));
     }
 
     /// Your HP bar without a login: `1b 92` (in a party) gives HP and max

@@ -3,8 +3,10 @@
 //! **Entry counts** (`0B 61` the whole list at login, `0C 61` the entries that
 //! changed): Nightmare, Shugo Festival keys, Abyss time, Odyle energy … one
 //! list of `<kind u8> <id u32 LE> <values>`. The kind says which values follow,
-//! a zero being left out: `01` a time in ms (u64 LE), `04` the first number,
-//! `08` the second, `0c` both (varints), `00` none. What the ids are, as far as
+//! a zero being left out: `01` a time in ms (u64 LE), `02` a second time (u64
+//! LE: Lower Reshanta's 0:53:19 beside its basic time used up, 2026-11-16),
+//! `03` both times, `04` the first number, `08` the second, `0c` both
+//! (varints), `00` none. What the ids are, as far as
 //! read from the game's own windows (2026-10-18):
 //!
 //! | id         | values                                       |
@@ -174,7 +176,7 @@ fn entry_at(body: &[u8], at: usize) -> Option<(EntryCount, usize)> {
     let kind = *body.get(at)?;
     // A time together with numbers was never seen: in which order they'd
     // come is unknown, so such an entry (and the list) is not read.
-    if !matches!(kind, 0x00 | 0x01 | 0x04 | 0x08 | 0x0C) {
+    if !matches!(kind, 0x00 | 0x01 | 0x02 | 0x03 | 0x04 | 0x08 | 0x0C) {
         return None;
     }
     let id = u32::from_le_bytes(body.get(at + 1..at + 5)?.try_into().ok()?);
@@ -183,6 +185,13 @@ fn entry_at(body: &[u8], at: usize) -> Option<(EntryCount, usize)> {
     if kind & 0x01 != 0 {
         entry.ms = Some(u64::from_le_bytes(body.get(o..o + 8)?.try_into().ok()?));
         o += 8;
+    }
+    if kind & 0x02 != 0 {
+        // The second time isn't read — but it says the entry is a time, the
+        // first (`ms`) left out being 0.
+        body.get(o..o + 8)?;
+        o += 8;
+        entry.ms.get_or_insert(0);
     }
     if kind & 0x04 != 0 {
         entry.first = varint(body, &mut o)?;
@@ -265,6 +274,17 @@ mod tests {
         assert_eq!(entries[1], EntryCount { id: 3, first: 0, second: 0, ms: Some(19_670_000) });
         assert_eq!(entries[2], EntryCount { id: 4, first: 0, second: 9, ms: None });
         assert_eq!(entries[3], EntryCount { id: 60_000_001, first: 15, second: 1425, ms: None });
+    }
+
+    /// Bradcrit's login list of 2026-11-16 21:30:30, cut to three entries:
+    /// Lower Reshanta as `02` (its basic time used up, 0:53:19 in the second
+    /// time), which once left the whole list unread.
+    #[test]
+    fn a_second_time_alone_reads_as_no_time_left() {
+        let p = packet("0B 61", "03 04 01 00 00 00 10 02 03 00 00 00 18 D0 30 00 00 00 00 00 0C 04 00 00 00 06 01");
+        let Some(ListUpdate::Counts { entries, whole: true }) = parse(&p) else { panic!("{:?}", parse(&p)) };
+        assert_eq!(entries[1], EntryCount { id: 3, first: 0, second: 0, ms: Some(0) });
+        assert_eq!(entries[2], EntryCount { id: 4, first: 6, second: 1, ms: None });
     }
 
     #[test]
