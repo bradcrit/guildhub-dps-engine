@@ -82,6 +82,10 @@ pub enum DeriveError {
     NotASlice,
     /// Parsed, but produced no damage — nothing to publish.
     NothingDerived,
+    /// Parsed, and the boss is known, but it was fought for less than the
+    /// 5 seconds a boss fight needs (`short_boss_fight`): a boss tagged in
+    /// passing, not a fight a log is for.
+    ShortFight,
 }
 
 impl std::fmt::Display for DeriveError {
@@ -89,6 +93,7 @@ impl std::fmt::Display for DeriveError {
         match self {
             DeriveError::NotASlice => write!(f, "not an evidence slice"),
             DeriveError::NothingDerived => write!(f, "no damage derived from the slice"),
+            DeriveError::ShortFight => write!(f, "the boss was fought for less than 5 seconds"),
         }
     }
 }
@@ -237,6 +242,40 @@ pub struct SliceChecks {
     /// so every other fight's checks are unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub boss_named_by_adds: bool,
+    /// The slice had no spawn for the boss, which was named by the boss the
+    /// uploader's meter saw (`Claim`, `claimed_boss`), as nothing in the
+    /// slice contradicted it. Written only when true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub boss_named_by_client: bool,
+    /// The dungeon's clear (`00 61` state 3, sent as its final boss dies)
+    /// came this many ms after the fight's last hit (negative: before), when
+    /// one came within `CLEAR_WINDOW_MS` of it. `killed` is then true even
+    /// with no death record for the target, which a slice can lack. Written
+    /// only when present, so slices without one are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared_after_ms: Option<i64>,
+}
+
+/// How far from the fight's last hit a dungeon's clear may come and still be
+/// this fight's: the clear follows the final boss's death within seconds (the
+/// Shugo Festival's 3 s), and a fight's last hit is its killing blow.
+const CLEAR_WINDOW_MS: std::ops::RangeInclusive<i64> = -3_000..=15_000;
+
+/// When the dungeon's clear came, relative to `last_hit_ms` (both on the
+/// slice's clock), if one came within `CLEAR_WINDOW_MS` of it: the arrival of
+/// a `00 61` record whose state is 3.
+fn clear_near(records: &[(i32, Vec<u8>)], last_hit_ms: i64) -> Option<i64> {
+    records
+        .iter()
+        .filter(|(_, p)| {
+            let len = crate::capture::stream_processor::read_varint(p, 0);
+            usize::try_from(len.length).ok().filter(|&n| n > 0).is_some_and(|at| {
+                p.get(at..at + 2) == Some(&[0x00, 0x61][..]) && p.get(at + 6) == Some(&3)
+            })
+        })
+        .map(|(dt, _)| i64::from(*dt) - last_hit_ms)
+        .filter(|after| CLEAR_WINDOW_MS.contains(after))
+        .min_by_key(|after| after.abs())
 }
 
 fn is_false(b: &bool) -> bool {
@@ -261,7 +300,9 @@ struct BossSign {
 /// fight; codes in at least 30% of one boss's fights and in none of another's)
 /// and checked five-fold, each fight scored by signs learned without it
 /// (2026-11-12): Normal 140 of 160 named right, Hard 75 of 123, none wrong;
-/// the rest name no boss and stay refused.
+/// the rest name no boss and stay refused. Fanatical Urugugu Canyon's bosses
+/// lose their spawn the same way: its tiers 72 of 100, 74 of 100 and 75 of 92,
+/// none wrong.
 const BOSS_SIGNS: &[BossSign] = &[
     // Isolation Specialist Rahu
     BossSign {
@@ -304,6 +345,603 @@ const BOSS_SIGNS: &[BossSign] = &[
         adds: &[
             2920654, 2920745, 2920746, 2920748, 2920750, 2920751, 2920752, 2920753, 2920754, 2920755, 2920757,
             2920770, 2920771, 2920772, 2920793, 2920805, 2920806, 2920810, 2921505,
+        ],
+    },
+    // Fanatical Urugugu Canyon, its three tiers (the Mau Totem spawns no adds of its own: never named)
+    // Watchdog Kwapo (600091)
+    BossSign {
+        dungeon: 600091,
+        boss: 2310908,
+        adds: &[
+            2920580, 2920581, 2920582, 2920583, 2920728, 2920730, 2920842, 2921150,
+        ],
+    },
+    // Necromancer Duanka (600091)
+    BossSign { dungeon: 600091, boss: 2310909, adds: &[2920589, 2920590, 2920591, 2920598, 2920726, 2920777] },
+    // Ferocious Horn Nuakum (600091)
+    BossSign { dungeon: 600091, boss: 2310910, adds: &[2920603, 2920604] },
+    // Watchdog Kwapo (600092)
+    BossSign { dungeon: 600092, boss: 2300908, adds: &[2920580, 2920581, 2920582, 2920583, 2920607, 2920728, 2921150] },
+    // Necromancer Duanka (600092)
+    BossSign { dungeon: 600092, boss: 2300909, adds: &[2920589, 2920590, 2920591, 2920592, 2920598, 2920726, 2920777] },
+    // Ferocious Horn Nuakum (600092)
+    BossSign { dungeon: 600092, boss: 2300910, adds: &[2920400, 2920601, 2920603, 2920604, 2920605] },
+    // Watchdog Kwapo (600093)
+    BossSign {
+        dungeon: 600093,
+        boss: 2320908,
+        adds: &[
+            2920580, 2920581, 2920582, 2920583, 2920607, 2920728, 2920842, 2921150,
+        ],
+    },
+    // Necromancer Duanka (600093)
+    BossSign {
+        dungeon: 600093,
+        boss: 2320909,
+        adds: &[
+            2920589, 2920590, 2920591, 2920592, 2920593, 2920598, 2920631, 2920726, 2920777,
+        ],
+    },
+    // Ferocious Horn Nuakum (600093)
+    BossSign { dungeon: 600093, boss: 2320910, adds: &[2920400, 2920601, 2920602, 2920603, 2920604] },
+    // Every other dungeon whose bosses spawn adds of their own: learned the same way from 25 known
+    // logs a boss (2026-11-13), kept only for dungeons with no fight named wrong.
+    // Ultimate Berk
+    BossSign { dungeon: 600001, boss: 2300171, adds: &[2920249, 2920311, 2920337, 2920439, 2920503, 2920665] },
+    // Ultimate Berk
+    BossSign { dungeon: 600002, boss: 2310171, adds: &[2920249, 2920311, 2920337, 2920665] },
+    // Ultimate Berk
+    BossSign { dungeon: 600004, boss: 2320171, adds: &[2920439, 2920665, 2920906, 2920913, 2920922, 2920924] },
+    // Divine Auldor
+    BossSign { dungeon: 600011, boss: 2310218, adds: &[2920207, 2920208, 2920209, 2920215] },
+    // Divine Auldor
+    BossSign { dungeon: 600012, boss: 2300218, adds: &[2920206, 2920207, 2920208, 2920209, 2920215, 2920262] },
+    // Guardian Captain Raur
+    BossSign { dungeon: 600013, boss: 2320206, adds: &[2920062, 2920214] },
+    // Divine Auldor
+    BossSign { dungeon: 600013, boss: 2320218, adds: &[2920206, 2920207, 2920208, 2920209, 2920215, 2920262] },
+    // Kromede's Desire
+    BossSign { dungeon: 600022, boss: 2300371, adds: &[2920339, 2920340, 2920342, 2920343, 2920345, 2920346, 2920347] },
+    // Kromede's Desire
+    BossSign {
+        dungeon: 600023,
+        boss: 2320371,
+        adds: &[
+            2920339, 2920340, 2920342, 2920343, 2920345, 2920346, 2920348, 2920904, 2920905,
+        ],
+    },
+    // Phantasmal Lakshmi
+    BossSign { dungeon: 600031, boss: 2310401, adds: &[2310402, 2310404, 2920027] },
+    // Predator Saraswati
+    BossSign { dungeon: 600031, boss: 2310403, adds: &[2310423, 2920048] },
+    // Transcendent Bakarma
+    BossSign { dungeon: 600031, boss: 2310471, adds: &[2920254, 2920258, 2920259] },
+    // Phantasmal Lakshmi
+    BossSign { dungeon: 600032, boss: 2300401, adds: &[2300402, 2920027] },
+    // Predator Saraswati
+    BossSign { dungeon: 600032, boss: 2300403, adds: &[2300420, 2300424, 2300426, 2920048] },
+    // Transcendent Bakarma
+    BossSign { dungeon: 600032, boss: 2300471, adds: &[2920254, 2920257, 2920258, 2920259, 2920260, 2920279, 2920305] },
+    // Phantasmal Lakshmi
+    BossSign { dungeon: 600033, boss: 2320401, adds: &[2300402, 2920027] },
+    // Transcendent Bakarma
+    BossSign {
+        dungeon: 600033,
+        boss: 2320471,
+        adds: &[
+            2920254, 2920257, 2920258, 2920259, 2920260, 2920279, 2920300, 2920305,
+        ],
+    },
+    // Broodkeeper Nayatman
+    BossSign { dungeon: 600042, boss: 2310508, adds: &[2920407, 2920408, 2920409] },
+    // Decaying Durvati
+    BossSign { dungeon: 600042, boss: 2310509, adds: &[2920154, 2920356, 2920626, 2920650, 2920651, 2920931] },
+    // Atiel
+    BossSign {
+        dungeon: 600053,
+        boss: 2320601,
+        adds: &[
+            2920411, 2920412, 2920413, 2920414, 2920415, 2920445, 2920446, 2920449, 2920465, 2920467, 2920469,
+            2920470,
+        ],
+    },
+    // Nazmun
+    BossSign {
+        dungeon: 600053,
+        boss: 2320615,
+        adds: &[
+            2320608, 2920440, 2920441, 2920444, 2920485, 2920505, 2920506, 2920507,
+        ],
+    },
+    // Gelcos
+    BossSign { dungeon: 600053, boss: 2320616, adds: &[2320610, 2320617, 2920361, 2920369, 2920400] },
+    // Atiel
+    BossSign {
+        dungeon: 600055,
+        boss: 2340601,
+        adds: &[
+            2920411, 2920412, 2920413, 2920414, 2920415, 2920445, 2920446, 2920449, 2920465, 2920467, 2920469,
+            2920470,
+        ],
+    },
+    // Nazmun
+    BossSign {
+        dungeon: 600055,
+        boss: 2340615,
+        adds: &[
+            2340608, 2920440, 2920441, 2920444, 2920485, 2920505, 2920506, 2920507,
+        ],
+    },
+    // Gelcos
+    BossSign { dungeon: 600055, boss: 2340616, adds: &[2340610, 2340617, 2920361, 2920369, 2920400] },
+    // Atiel
+    BossSign {
+        dungeon: 600058,
+        boss: 2343601,
+        adds: &[
+            2920411, 2920412, 2920413, 2920414, 2920415, 2920445, 2920446, 2920449, 2920465, 2920467, 2920469,
+            2920470,
+        ],
+    },
+    // Nazmun
+    BossSign {
+        dungeon: 600058,
+        boss: 2343615,
+        adds: &[
+            2343608, 2920440, 2920441, 2920444, 2920485, 2920505, 2920506, 2920507,
+        ],
+    },
+    // Gelcos
+    BossSign { dungeon: 600058, boss: 2343616, adds: &[2343610, 2343617, 2920361, 2920369, 2920400] },
+    // Siliator of Deceit
+    BossSign { dungeon: 600063, boss: 2330707, adds: &[2920393, 2920394, 2920395, 2920410, 2920466] },
+    // Ruthilis of Pain
+    BossSign { dungeon: 600063, boss: 2330708, adds: &[2920355, 2920480, 2920481, 2920482, 2920483, 2920484] },
+    // Talisra of the Void
+    BossSign {
+        dungeon: 600063,
+        boss: 2330709,
+        adds: &[
+            2920519, 2920520, 2920521, 2920522, 2920526, 2920527, 2920539, 2920540, 2920541, 2920542, 2920563,
+            2920564, 2920936, 2920937,
+        ],
+    },
+    // Siliator of Deceit
+    BossSign { dungeon: 600065, boss: 2350707, adds: &[2920393, 2920394, 2920395, 2920410, 2920466] },
+    // Ruthilis of Pain
+    BossSign { dungeon: 600065, boss: 2350708, adds: &[2920355, 2920480, 2920481, 2920482, 2920483, 2920484] },
+    // Talisra of the Void
+    BossSign {
+        dungeon: 600065,
+        boss: 2350709,
+        adds: &[
+            2920519, 2920520, 2920521, 2920522, 2920526, 2920527, 2920539, 2920540, 2920541, 2920542, 2920563,
+            2920564, 2920936, 2920937,
+        ],
+    },
+    // Siliator of Deceit
+    BossSign { dungeon: 600068, boss: 2353707, adds: &[2920393, 2920394, 2920395, 2920410, 2920466] },
+    // Ruthilis of Pain
+    BossSign { dungeon: 600068, boss: 2353708, adds: &[2920355, 2920480, 2920481, 2920482, 2920483, 2920484] },
+    // Talisra of the Void
+    BossSign {
+        dungeon: 600068,
+        boss: 2353709,
+        adds: &[
+            2920519, 2920520, 2920521, 2920522, 2920523, 2920524, 2920526, 2920527, 2920539, 2920540, 2920541,
+            2920542, 2920563, 2920564, 2920682, 2920683, 2920684, 2920685, 2920686,
+        ],
+    },
+    // Tiere
+    BossSign { dungeon: 600071, boss: 2310810, adds: &[2920362, 2920363, 2920364, 2920366] },
+    // Thamon
+    BossSign { dungeon: 600071, boss: 2310811, adds: &[2310805, 2310813, 2920371, 2920474] },
+    // Tiere
+    BossSign {
+        dungeon: 600072,
+        boss: 2300810,
+        adds: &[
+            2300802, 2300808, 2300814, 2920362, 2920363, 2920364, 2920366, 2920400,
+        ],
+    },
+    // Thamon
+    BossSign { dungeon: 600072, boss: 2300811, adds: &[2300817, 2300818, 2920371, 2920474] },
+    // Tiere
+    BossSign { dungeon: 600073, boss: 2320810, adds: &[2920362, 2920363, 2920364, 2920366, 2920400] },
+    // Thamon
+    BossSign { dungeon: 600073, boss: 2320811, adds: &[2300817, 2300818, 2920371, 2920474] },
+    // Afflicted Bakarma
+    BossSign { dungeon: 600122, boss: 2311301, adds: &[2920190, 2920993, 2920994] },
+    // Multiverse Veltiras
+    BossSign { dungeon: 600122, boss: 2311302, adds: &[2920612, 2920614, 2920850] },
+    // Glassvein
+    BossSign { dungeon: 600131, boss: 2301401, adds: &[2920917, 2920919, 2921012] },
+    // Nazarak
+    BossSign { dungeon: 600131, boss: 2301402, adds: &[2920942, 2920969, 2921021, 2921126, 2921213] },
+    // Nazarak
+    BossSign { dungeon: 600132, boss: 2311402, adds: &[2920942, 2920969, 2921126, 2921169, 2921213] },
+    // Nathara
+    BossSign { dungeon: 600132, boss: 2311403, adds: &[2920958, 2921004, 2921005, 2921156] },
+    // Nazarak
+    BossSign {
+        dungeon: 600133,
+        boss: 2321402,
+        adds: &[
+            8205, 2321401, 2321404, 2321405, 2321406, 2321407, 2321408, 2321409, 2321412, 2321414, 2321418,
+            2920915, 2921219,
+        ],
+    },
+    // Nathara
+    BossSign {
+        dungeon: 600133,
+        boss: 2321403,
+        adds: &[
+            2920935, 2920958, 2920971, 2921004, 2921005, 2921132, 2921135, 2921136, 2921156,
+        ],
+    },
+    // Wise Baumnute
+    BossSign { dungeon: 600141, boss: 2300189, adds: &[2920842, 2921002, 2921182, 2921216] },
+    // Expanding Xyrepe
+    BossSign {
+        dungeon: 600141,
+        boss: 2300190,
+        adds: &[
+            2910045, 2920963, 2920964, 2920965, 2920966, 2920967, 2920968, 2921001, 2921014, 2921015, 2921016,
+            2921204,
+        ],
+    },
+    // Awakened Alturadon
+    BossSign {
+        dungeon: 600142,
+        boss: 2300200,
+        adds: &[
+            2921027, 2921028, 2921029, 2921030, 2921053, 2921186, 2921188, 2921209,
+        ],
+    },
+    // Wise Baumnute
+    BossSign { dungeon: 600142, boss: 2300219, adds: &[2920842, 2921002, 2921182, 2921216] },
+    // Expanding Xyrepe
+    BossSign {
+        dungeon: 600142,
+        boss: 2300230,
+        adds: &[
+            2920963, 2920964, 2920965, 2920966, 2920967, 2920968, 2921001, 2921014, 2921015, 2921016,
+        ],
+    },
+    // Willful Turgen
+    BossSign { dungeon: 600145, boss: 2301701, adds: &[2921025, 2921376] },
+    // Forbidden Hexbeast Griosa
+    BossSign { dungeon: 600145, boss: 2301702, adds: &[2921145, 2921146, 2921151, 2921316] },
+    // Basilus the False
+    BossSign {
+        dungeon: 600145,
+        boss: 2301703,
+        adds: &[
+            2921248, 2921249, 2921250, 2921251, 2921254, 2921260, 2921264, 2921265, 2921266, 2921267, 2921268,
+            2921269, 2921272, 2921317, 2921359, 2921383, 2921384, 2921385, 2921386, 2921391,
+        ],
+    },
+    // Willful Turgen
+    BossSign { dungeon: 600146, boss: 2301721, adds: &[2921025, 2921341, 2921376] },
+    // Forbidden Hexbeast Griosa
+    BossSign { dungeon: 600146, boss: 2301722, adds: &[2921145, 2921146, 2921151, 2921316] },
+    // Basilus the False
+    BossSign {
+        dungeon: 600146,
+        boss: 2301723,
+        adds: &[
+            2921248, 2921249, 2921250, 2921251, 2921252, 2921253, 2921254, 2921255, 2921256, 2921257, 2921260,
+            2921264, 2921265, 2921266, 2921267, 2921268, 2921269, 2921271, 2921272, 2921278, 2921359, 2921383,
+            2921384, 2921385, 2921386, 2921391, 2921777,
+        ],
+    },
+    // Prideful Atiel
+    BossSign { dungeon: 600162, boss: 2301748, adds: &[2921293, 2921295, 2921297, 2921298, 2921300, 2921302, 2921303] },
+    // Lab Director Zylus
+    BossSign { dungeon: 600162, boss: 2301749, adds: &[2921482, 2921483, 2921484, 2921485, 2921486, 2921487, 2921488] },
+    // Overseer Gromkas
+    BossSign { dungeon: 600162, boss: 2301750, adds: &[2920369, 2920400, 2921460] },
+    // Prideful Atiel
+    BossSign {
+        dungeon: 600163,
+        boss: 2300481,
+        adds: &[
+            2921293, 2921295, 2921296, 2921297, 2921299, 2921302, 2921304, 2921511,
+        ],
+    },
+    // Lab Director Zylus
+    BossSign { dungeon: 600163, boss: 2300555, adds: &[2921482, 2921483, 2921484, 2921486, 2921487, 2921488] },
+    // Overseer Gromkas
+    BossSign { dungeon: 600163, boss: 2300556, adds: &[2920369, 2920400, 2921460] },
+    // Resurrected Auldor
+    BossSign {
+        dungeon: 600192,
+        boss: 2300948,
+        adds: &[
+            2921620, 2921621, 2921622, 2921626, 2921627, 2921628, 2921629, 2921630, 2921631, 2921650, 2921733,
+            2921734, 2921735, 2921736, 2921742,
+        ],
+    },
+    // Resurrected Auldor
+    BossSign {
+        dungeon: 600193,
+        boss: 2300970,
+        adds: &[
+            2921620, 2921621, 2921622, 2921623, 2921624, 2921626, 2921627, 2921628, 2921629, 2921630, 2921631,
+            2921650, 2921656, 2921657, 2921674, 2921742,
+        ],
+    },
+    // Submerged Emon
+    BossSign { dungeon: 610010, boss: 2301501, adds: &[2920650, 2920658, 2920740, 2920786, 2920787, 2920811] },
+    // Singing Ellyde
+    BossSign { dungeon: 610010, boss: 2301503, adds: &[2920880, 2920881] },
+    // Rotar
+    BossSign { dungeon: 610020, boss: 2300259, adds: &[2921032, 2921033, 2921034, 2921035, 2921051] },
+    // Kromede's Desolation
+    BossSign {
+        dungeon: 610020,
+        boss: 2300261,
+        adds: &[
+            2921099, 2921104, 2921105, 2921108, 2921109, 2921110, 2921111, 2921139, 2921205,
+        ],
+    },
+    // Rotar
+    BossSign {
+        dungeon: 610021,
+        boss: 2300299,
+        adds: &[
+            2921032, 2921033, 2921034, 2921035, 2921037, 2921038, 2921040, 2921051,
+        ],
+    },
+    // Kromede's Desolation
+    BossSign {
+        dungeon: 610021,
+        boss: 2300317,
+        adds: &[
+            2921099, 2921104, 2921105, 2921106, 2921107, 2921108, 2921109, 2921110, 2921111, 2921139, 2921205,
+            2921206, 2921224,
+        ],
+    },
+    // Rotar
+    BossSign {
+        dungeon: 610023,
+        boss: 2300353,
+        adds: &[
+            2921032, 2921033, 2921034, 2921035, 2921037, 2921038, 2921039, 2921040, 2921042, 2921043, 2921051,
+        ],
+    },
+    // Kromede's Desolation
+    BossSign {
+        dungeon: 610023,
+        boss: 2300355,
+        adds: &[
+            2921099, 2921102, 2921103, 2921104, 2921105, 2921106, 2921107, 2921108, 2921109, 2921110, 2921111,
+            2921139, 2921205, 2921206, 2921207, 2921224,
+        ],
+    },
+    // Askran
+    BossSign {
+        dungeon: 610030,
+        boss: 2300436,
+        adds: &[
+            2920400, 2921360, 2921361, 2921363, 2921364, 2921365, 2921366, 2921369,
+        ],
+    },
+    // Incomplete Braunt
+    BossSign { dungeon: 610030, boss: 2300437, adds: &[2921281, 2921286, 2921403, 2921404, 2921405] },
+    // Mad Klominster
+    BossSign { dungeon: 610030, boss: 2300438, adds: &[2921389, 2921462] },
+    // Askran
+    BossSign {
+        dungeon: 610033,
+        boss: 2300445,
+        adds: &[
+            2920400, 2921361, 2921363, 2921364, 2921365, 2921366, 2921369, 2921370, 2921371, 2921372, 2921373,
+        ],
+    },
+    // Incomplete Braunt
+    BossSign { dungeon: 610033, boss: 2300446, adds: &[2300590, 2921281, 2921403, 2921404, 2921405] },
+    // Mad Klominster
+    BossSign { dungeon: 610033, boss: 2300447, adds: &[2921389, 2921462] },
+    // Broodkeeper Nayatman
+    BossSign { dungeon: 610044, boss: 2300154, adds: &[2300146, 2300149, 2300152, 2920407, 2920408, 2920409] },
+    // Decaying Durvati
+    BossSign {
+        dungeon: 610044,
+        boss: 2300155,
+        adds: &[
+            2920356, 2920357, 2920358, 2920359, 2920384, 2920931, 2921009, 2921011,
+        ],
+    },
+    // Atiel
+    BossSign {
+        dungeon: 610052,
+        boss: 2346601,
+        adds: &[
+            2920411, 2920412, 2920413, 2920414, 2920415, 2920445, 2920446, 2920449, 2920465, 2920467, 2920469,
+            2920470,
+        ],
+    },
+    // Nazmun
+    BossSign { dungeon: 610052, boss: 2346615, adds: &[2920440, 2920441, 2920444, 2920485, 2920505, 2920506, 2920507] },
+    // Gelcos
+    BossSign { dungeon: 610052, boss: 2346616, adds: &[2346610, 2346617, 2346618, 2920361, 2920369, 2920400] },
+    // Siliator of Deceit
+    BossSign { dungeon: 610062, boss: 2356707, adds: &[2920393, 2920394, 2920395, 2920410, 2920466] },
+    // Ruthilis of Pain
+    BossSign { dungeon: 610062, boss: 2356708, adds: &[2920355, 2920480, 2920481, 2920482, 2920483, 2920484] },
+    // Talisra of the Void
+    BossSign {
+        dungeon: 610062,
+        boss: 2356709,
+        adds: &[
+            2920519, 2920522, 2920523, 2920524, 2920526, 2920527, 2920539, 2920540, 2920541, 2920542, 2920563,
+            2920564, 2920687, 2920688, 2920689, 2920690, 2920691, 2920692, 2920693, 2920694, 2920695, 2920696,
+            2920697, 2920698,
+        ],
+    },
+    // Tyrant Ulmar
+    BossSign {
+        dungeon: 610110,
+        boss: 2300792,
+        adds: &[
+            2920737, 2920834, 2921594, 2921595, 2921596, 2921598, 2921600, 2921601, 2921603, 2921604, 2921605,
+            2921609, 2921781,
+        ],
+    },
+    // Tyrant Ulmar
+    BossSign {
+        dungeon: 610111,
+        boss: 2300890,
+        adds: &[
+            2921594, 2921595, 2921596, 2921597, 2921598, 2921599, 2921600, 2921601, 2921603, 2921605, 2921607,
+            2921608, 2921609, 2921781,
+        ],
+    },
+    // Scribe Lipika
+    BossSign { dungeon: 610111, boss: 2300891, adds: &[2921602, 2921606, 2921648, 2921671, 2921672, 2921673, 2921685] },
+    // Gluttonous Khurbas
+    BossSign { dungeon: 610111, boss: 2300892, adds: &[2300890, 2921379, 2921380, 2921381, 2921670] },
+    // Black Blood Blatt
+    BossSign {
+        dungeon: 620011,
+        boss: 2301207,
+        adds: &[
+            2920854, 2920860, 2920861, 2920902, 2920944, 2920949, 2920951, 2920952, 2920953, 2920955,
+        ],
+    },
+    // Terminator Bargott
+    BossSign {
+        dungeon: 620011,
+        boss: 2301208,
+        adds: &[
+            20, 2920790, 2920972, 2920974, 2920995, 2920996, 2921017, 2921049, 2921069, 2921096, 2921097,
+        ],
+    },
+    // Devouring Klawfly
+    BossSign {
+        dungeon: 620011,
+        boss: 2301209,
+        adds: &[
+            2920890, 2920891, 2920903, 2920957, 2920986, 2920987, 2920990, 2921045, 2921075, 2921083,
+        ],
+    },
+    // Iscariel
+    BossSign {
+        dungeon: 620021,
+        boss: 2301059,
+        adds: &[
+            2921172, 2921173, 2921175, 2921177, 2921178, 2921179, 2921183, 2921184, 2921189, 2921192, 2921193,
+            2921194, 2921195, 2921199, 2921230, 2921231, 2921234, 2921259, 2921263, 2921279, 2921291, 2921292,
+            2921306, 2921307,
+        ],
+    },
+    // Kaldrix
+    BossSign {
+        dungeon: 620021,
+        boss: 2301060,
+        adds: &[
+            2921048, 2921054, 2921055, 2921057, 2921062, 2921063, 2921065, 2921082, 2921084, 2921085, 2921086,
+            2921161, 2921203,
+        ],
+    },
+    // Iscariel
+    BossSign {
+        dungeon: 620022,
+        boss: 2301089,
+        adds: &[
+            2921171, 2921172, 2921173, 2921175, 2921177, 2921178, 2921179, 2921183, 2921184, 2921189, 2921192,
+            2921193, 2921194, 2921195, 2921199, 2921230, 2921231, 2921234, 2921263, 2921279, 2921291, 2921292,
+            2921306, 2921307, 2921319,
+        ],
+    },
+    // Kaldrix
+    BossSign {
+        dungeon: 620022,
+        boss: 2301090,
+        adds: &[
+            2921056, 2921065, 2921082, 2921087, 2921161, 2921312, 2921313, 2921314,
+        ],
+    },
+    // Triton the Returned
+    BossSign {
+        dungeon: 620025,
+        boss: 2301112,
+        adds: &[
+            28, 2921463, 2921464, 2921465, 2921466, 2921467, 2921468, 2921469, 2921507, 2921509, 2921510,
+            2921551, 2921578, 2921584, 2921587, 2921589, 2921590, 2921591, 2921610,
+        ],
+    },
+    // Deltras
+    BossSign {
+        dungeon: 620025,
+        boss: 2301113,
+        adds: &[
+            2921444, 2921450, 2921489, 2921490, 2921491, 2921492, 2921493, 2921495, 2921496, 2921498, 2921499,
+            2921500, 2921501, 2921502, 2921504,
+        ],
+    },
+    // Deltras
+    BossSign {
+        dungeon: 620025,
+        boss: 2301115,
+        adds: &[
+            2921435, 2921438, 2921449, 2921452, 2921457, 2921459, 2921516, 2921524, 2921526, 2921527, 2921530,
+            2921531, 2921534, 2921535, 2921537, 2921540, 2921541, 2921544, 2921545, 2921569,
+        ],
+    },
+    // Triton the Returned
+    BossSign {
+        dungeon: 620026,
+        boss: 2301142,
+        adds: &[
+            28, 2921463, 2921464, 2921465, 2921466, 2921467, 2921468, 2921469, 2921507, 2921509, 2921510,
+            2921551, 2921578, 2921584, 2921587, 2921589, 2921590, 2921591, 2921610,
+        ],
+    },
+    // Deltras
+    BossSign {
+        dungeon: 620026,
+        boss: 2301143,
+        adds: &[
+            2921444, 2921450, 2921490, 2921493, 2921495, 2921497, 2921500, 2921502, 2921504,
+        ],
+    },
+    // Deltras
+    BossSign {
+        dungeon: 620026,
+        boss: 2301145,
+        adds: &[
+            2921437, 2921438, 2921441, 2921449, 2921451, 2921452, 2921456, 2921457, 2921458, 2921523, 2921525,
+            2921527, 2921529, 2921530, 2921532, 2921533, 2921534, 2921535, 2921536, 2921538, 2921539, 2921540,
+            2921542, 2921543, 2921545, 2921569,
+        ],
+    },
+    // Triton the Returned
+    BossSign {
+        dungeon: 620027,
+        boss: 2301162,
+        adds: &[
+            28, 2921463, 2921465, 2921466, 2921467, 2921468, 2921469, 2921507, 2921509, 2921510, 2921551,
+            2921578, 2921584, 2921587, 2921589, 2921590, 2921591, 2921610,
+        ],
+    },
+    // Deltras
+    BossSign {
+        dungeon: 620027,
+        boss: 2301163,
+        adds: &[
+            2921444, 2921450, 2921489, 2921490, 2921491, 2921492, 2921493, 2921494, 2921495, 2921496, 2921497,
+            2921498, 2921499, 2921500, 2921501, 2921502, 2921503, 2921504,
+        ],
+    },
+    // Deltras
+    BossSign {
+        dungeon: 620027,
+        boss: 2301165,
+        adds: &[
+            2301119, 2921437, 2921438, 2921441, 2921449, 2921451, 2921452, 2921516, 2921523, 2921524, 2921525,
+            2921528, 2921532, 2921533, 2921536, 2921538, 2921539, 2921542, 2921543, 2921546, 2921569,
         ],
     },
 ];
@@ -374,6 +1012,41 @@ pub fn parser_version() -> String {
     format!("{}.{}", crate::entity::fight_record::APP_VERSION, SERVICE_REVISION)
 }
 
+/// What decides whether a refused slice could now derive: the parser
+/// (`parser_version`) and the rules that name a boss whose spawn is missing
+/// (`BOSS_SIGNS` and its thresholds), as "<parser>+<8 hex digits>". A
+/// refused upload tried again under the same revision is refused again, so
+/// the site's recovery skips those (upload_reject.tried_with). Unlike
+/// SERVICE_REVISION, a change here re-derives no stored log.
+pub fn rules_revision() -> &'static str {
+    static REVISION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        // FNV-1a over every number the rules use, in table order.
+        let mut h: u32 = 0x811c_9dc5;
+        let mut eat = |n: i64| {
+            for b in n.to_le_bytes() {
+                h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+            }
+        };
+        eat(SIGN_MIN_ADDS as i64);
+        eat(SIGN_MIN_FIGHT_MS);
+        eat(BOSS_FIGHT_MIN_MS);
+        // The crowd rule (`crowd_summons`): a refusal for too many players
+        // may derive under a new one.
+        eat(RAID_ROWS as i64);
+        eat(CROWD_SUMMON_SKILLS as i64);
+        eat(CROWD_SUMMON_ROWS as i64);
+        for sign in BOSS_SIGNS {
+            eat(sign.dungeon as i64);
+            eat(sign.boss as i64);
+            for &add in sign.adds {
+                eat(add as i64);
+            }
+        }
+        format!("{}+{:08x}", parser_version(), h)
+    });
+    &REVISION
+}
+
 /// Remove the rows of summons whose owner the parser could not find, and
 /// their damage from the totals. Returns the damage removed.
 ///
@@ -396,7 +1069,7 @@ fn hide_unplaced_summons(
     }
     let total: i64 = damage.values().sum();
     let long_fight = record.duration_ms >= 20_000;
-    let summon: std::collections::HashSet<i32> = record.actors.iter()
+    let mut summon: std::collections::HashSet<i32> = record.actors.iter()
         .filter(|a| !named.contains(&a.actor_id))
         .filter(|a| {
             let few_skills = skills.get(&a.actor_id).map_or(0, |s| s.len()) <= 2;
@@ -405,6 +1078,7 @@ fn hide_unplaced_summons(
         })
         .map(|a| a.actor_id)
         .collect();
+    summon.extend(crowd_summons(record, named, &summon, &damage, &skills, total));
     if summon.is_empty() {
         return 0;
     }
@@ -428,6 +1102,52 @@ fn hide_unplaced_summons(
     record.jobs = jobs;
     record.job_ids = job_ids;
     removed
+}
+
+/// More rows dealing damage than a raid holds (the site refuses those:
+/// logs_store.MAX_PARTY).
+const RAID_ROWS: usize = 24;
+/// Most skills, and at most 1/20 of the damage, of a row taken for a summon
+/// in a crowd (`crowd_summons`); and how many such rows of one class make one.
+const CROWD_SUMMON_SKILLS: usize = 5;
+const CROWD_SUMMON_ROWS: usize = 3;
+
+/// The summons of a fight with more rows than a raid holds, which the rules
+/// above leave: unnamed rows of a class that come several at once, each with
+/// a few skills and a small share. A Spiritmaster's spirits are new entities
+/// at every summon, with the class and two to five of its spirit skills; a
+/// Sorcerer's Fire Wall and Cold Storm are an entity a cast, with that one
+/// skill. Unplaced, a fight of a few players read as 25 to 150 (4,119 uploads
+/// refused for it, 2026-10-17 to 11-12). Only past a raid's rows, so a fight
+/// that fits one derives as before, and a real crowd stays too many.
+fn crowd_summons(
+    record: &FightRecord,
+    named: &std::collections::HashSet<i32>,
+    already: &std::collections::HashSet<i32>,
+    damage: &HashMap<i32, i64>,
+    skills: &HashMap<i32, std::collections::HashSet<i32>>,
+    total: i64,
+) -> Vec<i32> {
+    let rows = damage.keys().filter(|id| !already.contains(id)).count();
+    if rows <= RAID_ROWS {
+        return Vec::new();
+    }
+    let candidates: Vec<&crate::entity::details_context::DetailsActorSummary> = record.actors.iter()
+        .filter(|a| !already.contains(&a.actor_id) && !named.contains(&a.actor_id) && a.job_id > 0)
+        .filter(|a| {
+            let n = skills.get(&a.actor_id).map_or(0, |s| s.len());
+            let d = damage.get(&a.actor_id).copied().unwrap_or(0);
+            n >= 1 && n <= CROWD_SUMMON_SKILLS && d * 20 < total
+        })
+        .collect();
+    let mut per_class: HashMap<i32, usize> = HashMap::new();
+    for a in &candidates {
+        *per_class.entry(a.job_id).or_default() += 1;
+    }
+    candidates.into_iter()
+        .filter(|a| per_class[&a.job_id] >= CROWD_SUMMON_ROWS)
+        .map(|a| a.actor_id)
+        .collect()
 }
 
 /// Replay a slice through the parser AND the combat aggregation, and return
@@ -484,96 +1204,239 @@ pub fn derive_decoded(
 
 /// `derive_decoded` with the tables already parsed.
 pub fn derive_decoded_with(decoded: &Decoded, tables: &Tables) -> Result<DerivedFight, DeriveError> {
-    match derive_fight_with(decoded, tables, true, false, false) {
-        // Slices from early meters (2.0.30 to 2.0.37) have no self record and
-        // no dungeon, so `is_our_fight` (2026-10-05, #19) takes the uploader's
-        // own boss for a stranger's and nothing is derived: 56 logs a re-derive
-        // could not update (2026-10-11). A slice is an upload its owner chose
-        // to send, so when "ours only" finds nothing, every fight counts. A
-        // slice that derives as it is never comes here, so none changes.
-        Err(DeriveError::NothingDerived) => derive_fight_with(decoded, tables, true, true, false),
-        other => other,
-    }
-    .or_else(|e| assume_boss_from_adds(decoded, tables, e, false))
-    .map(|(fight, _, _)| fight)
+    derive_decoded_claiming(decoded, tables, None)
+}
+
+/// The boss and dungeon the uploader's meter saw for a fight, sent with it
+/// when it is sent again because the slice alone named none (the meter's
+/// sweep of refused fights). Used only when nothing else names the boss, and
+/// only if the slice does not contradict it (`claimed_boss`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Claim {
+    pub mob: i32,
+    pub dungeon: i32,
+}
+
+/// `derive_decoded_with`, with the meter's `claim` for when nothing else
+/// names the boss.
+pub fn derive_decoded_claiming(decoded: &Decoded, tables: &Tables, claim: Option<Claim>) -> Result<DerivedFight, DeriveError> {
+    derive_fight_with(decoded, tables, true, false, false)
+        .or_else(|e| when_nothing_derived(decoded, tables, e, false, claim))
+        .map(|(fight, _, _)| fight)
 }
 
 /// `derive_decoded_with`, and every hit its record counts (`FightHits`): the
 /// same replay with `DataStorage::set_on_hit` watching, so the hits are the
 /// ones the record was summed from, filed on the record's own rows.
 pub fn derive_hits_with(decoded: &Decoded, tables: &Tables) -> Result<(DerivedFight, FightHits), DeriveError> {
-    match derive_fight_with(decoded, tables, true, false, true) {
-        Err(DeriveError::NothingDerived) => derive_fight_with(decoded, tables, true, true, true),
-        other => other,
-    }
-    .or_else(|e| assume_boss_from_adds(decoded, tables, e, true))
-    .map(|(fight, _, hits)| (fight, hits.unwrap_or_default()))
+    derive_hits_claiming(decoded, tables, None)
 }
 
-/// The fight, when nothing derived because the boss's spawn is missing from
-/// the slice and the adds spawned during the fight name exactly one boss of
-/// the instance (`BOSS_SIGNS`); else the error as it was.
-fn assume_boss_from_adds(
+/// `derive_hits_with`, with the meter's `claim` (`derive_decoded_claiming`):
+/// a log stored on one is derived again with it.
+pub fn derive_hits_claiming(
+    decoded: &Decoded,
+    tables: &Tables,
+    claim: Option<Claim>,
+) -> Result<(DerivedFight, FightHits), DeriveError> {
+    derive_fight_with(decoded, tables, true, false, true)
+        .or_else(|e| when_nothing_derived(decoded, tables, e, true, claim))
+        .map(|(fight, _, hits)| (fight, hits.unwrap_or_default()))
+}
+
+/// What is tried when the first derive finds nothing, on one replay of the
+/// whole slice shared by every check: each replay is most of a derive's time,
+/// and the recovery of refused uploads waited 13 seconds a slice on six of
+/// them (2026-11-13).
+///
+/// 1. Every fight counted, not only the uploader's own. Slices from early
+///    meters (2.0.30 to 2.0.37) have no self record and no dungeon, so
+///    `is_our_fight` (2026-10-05, #19) takes the uploader's own boss for a
+///    stranger's: 56 logs a re-derive could not update (2026-10-11). In an
+///    instance every fight is already ours (`fight_is_ours`), so this is
+///    tried only without one, or when the zone changed in the slice (the
+///    derive stops short of that, and the zone after may not be the fight's).
+/// 2. The boss named by the adds spawned during the fight (`boss_from_adds`).
+/// 3. The boss the uploader's meter saw, when it sent one (`claimed_boss`).
+/// 4. Else whether the fight was too short (`short_boss_fight`).
+fn when_nothing_derived(
     decoded: &Decoded,
     tables: &Tables,
     error: DeriveError,
     collect_hits: bool,
+    claim: Option<Claim>,
 ) -> Result<(DerivedFight, i64, Option<FightHits>), DeriveError> {
     if !matches!(error, DeriveError::NothingDerived) {
         return Err(error);
     }
-    match boss_from_adds(decoded, tables) {
-        Some(assume) => derive_fight_assuming(decoded, tables, true, true, collect_hits, Some(assume)),
-        None => Err(error),
+    let (all, _, zone_changed) = replay_until(decoded, tables, decoded.0.len(), None);
+    if all.current_dungeon_id() <= 0 || zone_changed {
+        match derive_fight_with(decoded, tables, true, true, collect_hits) {
+            Err(DeriveError::NothingDerived) => {}
+            other => return other,
+        }
     }
+    if let Some((entity, code)) = boss_from_adds(decoded, tables, &all) {
+        return derive_fight_assuming(decoded, tables, true, true, collect_hits, Some((entity, code, Named::Adds)));
+    }
+    if let Some((entity, code)) = claim.and_then(|c| claimed_boss(decoded, tables, &all, c)) {
+        return derive_fight_assuming(decoded, tables, true, true, collect_hits, Some((entity, code, Named::Client)));
+    }
+    if short_boss_fight(&all, tables) {
+        return Err(DeriveError::ShortFight);
+    }
+    Err(error)
+}
+
+/// What named a boss whose spawn the slice lacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Named {
+    Adds,
+    Client,
+}
+
+/// The most damaged target, (entity, first hit, last hit), when it has no
+/// spawn (no NPC code) and was fought for at least `min_ms`.
+fn anonymous_top(all: &DataStorage, min_ms: i64) -> Option<(i32, i64, i64)> {
+    let combat = all.get_combat_snapshot_light();
+    let top = combat
+        .values()
+        .filter(|t| t.total_damage > 0)
+        .max_by_key(|t| (t.total_damage, std::cmp::Reverse(t.target_id)))?;
+    let (target, first, last) = (top.target_id, top.first_damage_time, top.last_damage_time);
+    (all.mob_code(target).is_none() && last - first >= min_ms).then_some((target, first, last))
+}
+
+/// The NPC codes that spawned between `first` and `last` (one replay, to
+/// the last hit).
+fn fight_spawns(decoded: &Decoded, tables: &Tables, first: i64, last: i64) -> Option<std::collections::HashSet<i32>> {
+    let records = &decoded.0;
+    let start = records.iter().position(|(dt, _)| *dt as i64 >= first)?;
+    let end = records.iter().skip(start).position(|(dt, _)| *dt as i64 > last).map_or(records.len(), |n| start + n);
+    let (to_end, before, _) = replay_until(decoded, tables, end, Some(start));
+    Some(
+        to_end
+            .get_mob_data()
+            .into_iter()
+            .filter(|(id, _)| !before.contains(id))
+            .map(|(_, code)| code)
+            .collect(),
+    )
+}
+
+/// (entity, boss code) for the uploader's meter's `claim`, when nothing in
+/// the slice says otherwise: a boss of the claimed dungeon (as the NPC table
+/// has it, when it says), the slice's own dungeon that one or none, the most
+/// damaged target without a spawn and fought for at least BOSS_FIGHT_MIN_MS
+/// (SIGN_MIN_FIGHT_MS in a slice with no dungeon), and none of another boss's adds (`BOSS_SIGNS`) spawned during the fight.
+/// The site keeps such a log off the boards unless its kill shows: a death
+/// or clear in the slice, and damage of at least the boss's known health, so
+/// a claim alone ranks nothing.
+fn claimed_boss(decoded: &Decoded, tables: &Tables, all: &DataStorage, claim: Claim) -> Option<(i32, i32)> {
+    let npcs = &tables.npcs;
+    if claim.dungeon <= 0 || !npcs.is_boss(claim.mob) || npcs.is_training_dummy(claim.mob) {
+        return None;
+    }
+    if npcs.dungeon_of(claim.mob).is_some_and(|d| d != claim.dungeon) {
+        return None;
+    }
+    let own = all.current_dungeon_id();
+    if own > 0 && own != claim.dungeon {
+        return None;
+    }
+    // A slice with no dungeon of its own says least: then the fight must be
+    // as long as the add rule asks (SIGN_MIN_FIGHT_MS), not just a boss
+    // fight's least.
+    let (target, first, last) = anonymous_top(all, if own > 0 { BOSS_FIGHT_MIN_MS } else { SIGN_MIN_FIGHT_MS })?;
+    let others: Vec<&BossSign> =
+        BOSS_SIGNS.iter().filter(|s| s.dungeon == claim.dungeon && s.boss != claim.mob).collect();
+    if !others.is_empty() {
+        let spawned = fight_spawns(decoded, tables, first, last)?;
+        if others.iter().any(|s| s.adds.iter().any(|c| spawned.contains(c))) {
+            return None;
+        }
+    }
+    Some((target, claim.mob))
+}
+
+/// The storage after the slice's first `upto` records; with `mark`, the NPC
+/// entities known just before record `mark` too; and whether the zone changed
+/// (a zone reset or the party ending) after the fight began, as the derive's
+/// own replay watches for.
+fn replay_until(
+    decoded: &Decoded,
+    tables: &Tables,
+    upto: usize,
+    mark: Option<usize>,
+) -> (Arc<DataStorage>, std::collections::HashSet<i32>, bool) {
+    let storage = Arc::new(DataStorage::new());
+    let mut processor = StreamProcessor::new(storage.clone(), tables.skills.clone(), tables.npcs.clone());
+    if let Some(ids) = &tables.dot_ids {
+        processor.set_dot_skill_ids(ids.clone());
+    }
+    let mut known = std::collections::HashSet::new();
+    let mut zone_changed = false;
+    for (n, (dt_ms, packet)) in decoded.0.iter().enumerate().take(upto) {
+        if mark == Some(n) {
+            known = storage.get_mob_data().into_keys().collect();
+        }
+        processor.set_override_timestamp(Some(*dt_ms as i64));
+        let before = (storage.last_zone_reset_ms(), storage.party_ended_at_ms());
+        processor.consume_stream(packet);
+        if *dt_ms > 0 && (storage.last_zone_reset_ms(), storage.party_ended_at_ms()) != before {
+            zone_changed = true;
+        }
+    }
+    if mark == Some(upto) {
+        known = storage.get_mob_data().into_keys().collect();
+    }
+    processor.set_override_timestamp(None);
+    (storage, known, zone_changed)
+}
+
+/// The least fight a boss fight is (`DpsCalculator::snapshot_boss_fights`).
+const BOSS_FIGHT_MIN_MS: i64 = 5_000;
+
+/// Whether nothing derived because the boss fight was too short, and for no
+/// other reason: a boss the NPC table names took damage, for less than
+/// BOSS_FIGHT_MIN_MS, and no target without a spawn was fought for longer.
+/// A slice whose main target is anonymous (a boss whose spawn is missing)
+/// is never called short: what it holds is not known. `all`: the whole slice
+/// replayed.
+fn short_boss_fight(all: &DataStorage, tables: &Tables) -> bool {
+    let combat = all.get_combat_snapshot_light();
+    let span = |t: &crate::combat::data_storage::TargetCombatData| t.last_damage_time - t.first_damage_time;
+    let mut boss_hit = false;
+    for t in combat.values().filter(|t| t.total_damage > 0) {
+        match all.mob_code(t.target_id) {
+            Some(code) if tables.npcs.is_boss(code) => {
+                if span(t) >= BOSS_FIGHT_MIN_MS {
+                    return false;
+                }
+                boss_hit = true;
+            }
+            Some(_) => {}
+            None if span(t) >= BOSS_FIGHT_MIN_MS => return false,
+            None => {}
+        }
+    }
+    boss_hit
 }
 
 /// (entity, boss code) for a slice whose most damaged target has no spawn,
 /// in an instance with `BOSS_SIGNS`, when the NPCs that spawned while it was
 /// being hit hold at least SIGN_MIN_ADDS of one boss's sign and none of any
-/// other boss's. None otherwise: a fight is never filed on a guess.
-pub fn boss_from_adds(decoded: &Decoded, tables: &Tables) -> Option<(i32, i32)> {
-    let records = &decoded.0;
-    let replay = |upto: usize| {
-        let storage = Arc::new(DataStorage::new());
-        let mut processor = StreamProcessor::new(storage.clone(), tables.skills.clone(), tables.npcs.clone());
-        if let Some(ids) = &tables.dot_ids {
-            processor.set_dot_skill_ids(ids.clone());
-        }
-        for (dt_ms, packet) in records.iter().take(upto) {
-            processor.set_override_timestamp(Some(*dt_ms as i64));
-            processor.consume_stream(packet);
-        }
-        processor.set_override_timestamp(None);
-        storage
-    };
-    let all = replay(records.len());
+/// other boss's. None otherwise: a fight is never filed on a guess. `all`:
+/// the whole slice replayed; the spawns during the fight take one more
+/// replay, to its last hit.
+pub fn boss_from_adds(decoded: &Decoded, tables: &Tables, all: &DataStorage) -> Option<(i32, i32)> {
     let signs: Vec<&BossSign> = BOSS_SIGNS.iter().filter(|s| s.dungeon == all.current_dungeon_id()).collect();
     if signs.is_empty() {
         return None;
     }
-    let (target, first, last) = {
-        let combat = all.get_combat_snapshot_light();
-        let top = combat
-            .values()
-            .filter(|t| t.total_damage > 0)
-            .max_by_key(|t| (t.total_damage, std::cmp::Reverse(t.target_id)))?;
-        (top.target_id, top.first_damage_time, top.last_damage_time)
-    };
-    if all.mob_code(target).is_some() || last - first < SIGN_MIN_FIGHT_MS {
-        return None;
-    }
-    drop(all);
+    let (target, first, last) = anonymous_top(all, SIGN_MIN_FIGHT_MS)?;
     // The NPCs that spawned between the first hit and the last.
-    let start = records.iter().position(|(dt, _)| *dt as i64 >= first)?;
-    let end = records.iter().skip(start).position(|(dt, _)| *dt as i64 > last).map_or(records.len(), |n| start + n);
-    let before: std::collections::HashSet<i32> = replay(start).get_mob_data().into_keys().collect();
-    let spawned: std::collections::HashSet<i32> = replay(end)
-        .get_mob_data()
-        .into_iter()
-        .filter(|(id, _)| !before.contains(id))
-        .map(|(_, code)| code)
-        .collect();
+    let spawned = fight_spawns(decoded, tables, first, last)?;
     let seen = |s: &BossSign| s.adds.iter().filter(|c| spawned.contains(c)).count();
     let mut named = signs.iter().filter(|s| seen(s) >= SIGN_MIN_ADDS);
     let boss = named.next()?;
@@ -627,15 +1490,16 @@ fn derive_fight_with(
     derive_fight_assuming(decoded, tables, hide, every_fight, collect_hits, None)
 }
 
-/// `derive_fight_with`, with `assume` = (entity, NPC code) taken as that
-/// entity's spawn when the slice has none (`boss_from_adds`).
+/// `derive_fight_with`, with `assume` = (entity, NPC code, what named it)
+/// taken as that entity's spawn when the slice has none (`boss_from_adds`,
+/// `claimed_boss`).
 fn derive_fight_assuming(
     decoded: &Decoded,
     tables: &Tables,
     hide: bool,
     every_fight: bool,
     collect_hits: bool,
-    assume: Option<(i32, i32)>,
+    assume: Option<(i32, i32, Named)>,
 ) -> Result<(DerivedFight, i64, Option<FightHits>), DeriveError> {
     let (records, blind_map) = (&decoded.0, decoded.1.clone());
     let (npcs, skills, dot_ids) = (&tables.npcs, &tables.skills, &tables.dot_ids);
@@ -680,7 +1544,7 @@ fn derive_fight_assuming(
     if let Some(n) = reset_at {
         (storage, processor, _, seen) = replay(n);
     }
-    if let Some((entity, code)) = assume {
+    if let Some((entity, code, _)) = assume {
         storage.append_mob(entity, code);
     }
     // Keep the clock pinned through the snapshot. It asks for "now" to decide
@@ -734,13 +1598,16 @@ fn derive_fight_assuming(
     canonicalise(&mut record);
     let on_target = totals.get(&record.target_id).copied().unwrap_or(0);
     let (count, lifted, bundles) = slice_structure(&records);
+    let cleared_after_ms = clear_near(records, record.start_time_ms + record.duration_ms);
     let checks = SliceChecks {
         unblinded_names: evidence_slice::unblinded_names(&records, &blind_map),
         records: count,
         lifted,
         bundles,
-        killed: dead.contains(&record.target_id),
-        boss_named_by_adds: assume.is_some(),
+        killed: dead.contains(&record.target_id) || cleared_after_ms.is_some(),
+        boss_named_by_adds: assume.is_some_and(|a| a.2 == Named::Adds),
+        boss_named_by_client: assume.is_some_and(|a| a.2 == Named::Client),
+        cleared_after_ms,
         max_hp: record.details.max_hp as i64,
         damage: on_target,
     };
@@ -881,6 +1748,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_rules_revision_is_the_parser_and_a_stable_hash_of_the_signs() {
+        let r = rules_revision();
+        let (parser, hash) = r.split_once('+').expect("parser+hash");
+        assert_eq!(parser, parser_version());
+        assert_eq!(hash.len(), 8);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(r, rules_revision(), "the same on every call");
+    }
+
+    #[test]
     fn boss_signs_name_bosses_of_their_instance_and_share_no_add() {
         let npcs = NpcLookup::new();
         npcs.load_from_json(include_str!("../../src/data/i18n/npcs/en.json"));
@@ -942,6 +1819,26 @@ mod tests {
         assert!(!FightHits::sorted(more, &record, &uid_of, fold).matches);
     }
 
+    /// A dungeon's clear confirms the kill only when it comes as the fight
+    /// ends: the run cleared (`00 61` state 3) 2 s after the last hit, not a
+    /// clear long after (another fight's) nor a run merely going on.
+    #[test]
+    fn a_clear_as_the_fight_ends_is_a_kill() {
+        let state = |n: u8| {
+            let mut p = vec![0x18, 0x00, 0x61];
+            p.extend(600_071u32.to_le_bytes());
+            p.push(n);
+            p.extend((-450_000i64).to_le_bytes());
+            p.extend(150_000i64.to_le_bytes());
+            p
+        };
+        let last_hit = 120_000;
+        assert_eq!(clear_near(&[(5_000, state(2)), (122_000, state(3))], last_hit), Some(2_000));
+        assert_eq!(clear_near(&[(5_000, state(2))], last_hit), None, "running is no clear");
+        assert_eq!(clear_near(&[(200_000, state(3))], last_hit), None, "a clear well after this fight");
+        assert_eq!(clear_near(&[(110_000, state(3))], last_hit), None, "a clear before the last hit");
+    }
+
     #[test]
     fn slice_structure_counts_lifted_records_and_bundles() {
         let lifted = vec![0x09, 0xE5, 0xA2, 0x04, 0x38, 0x01, 0x02];
@@ -976,6 +1873,61 @@ mod tests {
         record.stagger = Some(Vec::new());
         canonicalise(&mut record);
         assert!(serde_json::to_value(&record).unwrap().get("stagger").is_none(), "fight.json keeps its shape");
+    }
+
+    /// A fight of `players` (named, a rotation each) and `spirits` unnamed
+    /// Spiritmaster rows of two spirit skills, at 1 damage a spirit.
+    fn crowd(players: i32, spirits: i32, duration_ms: i64) -> (FightRecord, std::collections::HashSet<i32>) {
+        let skill = |actor: i32, code: i32, dmg: i32| serde_json::json!({
+            "actorId": actor, "code": code, "name": "", "time": 1, "dmg": dmg, "multiHitCount": 0,
+            "multiHitDamage": 0, "crit": 0, "parry": 0, "back": 0, "perfect": 0, "double": 0, "regen": 0});
+        let mut skills = Vec::new();
+        let mut actors = Vec::new();
+        for p in 1..=players {
+            for c in 0..8 {
+                skills.push(skill(p, 16_010_000 + c * 10_000, 1_000));
+            }
+            actors.push(serde_json::json!({"actorId": p, "nickname": "", "jobId": 16}));
+        }
+        for n in 0..spirits {
+            let id = 1_000 + n;
+            skills.push(skill(id, 16_001_104, 1));
+            skills.push(skill(id, 16_100_004, 1));
+            actors.push(serde_json::json!({"actorId": id, "nickname": "", "jobId": 16}));
+        }
+        let record = serde_json::from_value(serde_json::json!({
+            "id": "auto_1_2", "bossName": "B", "targetId": 1, "startTimeMs": 0, "durationMs": duration_ms,
+            "totalDamage": 1, "jobs": [],
+            "details": {"targetId": 1, "maxHp": 0, "totalTargetDamage": 1, "battleTime": 1000,
+                        "startTime": 0, "skills": skills, "pingHistory": [], "healSkills": []},
+            "actors": actors,
+        }))
+        .unwrap();
+        (record, (1..=players).collect())
+    }
+
+    #[test]
+    fn a_crowd_of_spirits_is_hidden_past_a_raid_and_only_past_one() {
+        let none = std::collections::HashSet::new();
+        // Four Spiritmasters and 30 spirits, in a short fight: the old rule
+        // (20 seconds or more) leaves them; past a raid's rows, they go.
+        let (mut record, named) = crowd(4, 30, 14_000);
+        hide_unplaced_summons(&mut record, &named, &none);
+        assert_eq!(record.actors.len(), 4);
+        // The same spirits unnamed players would be too: a nameless slice of
+        // a four-player fight is read the same way.
+        let (mut record, _) = crowd(4, 30, 14_000);
+        hide_unplaced_summons(&mut record, &none, &none);
+        assert_eq!(record.actors.len(), 4);
+        // Within a raid's rows nothing changes.
+        let (mut record, named) = crowd(4, 20, 14_000);
+        hide_unplaced_summons(&mut record, &named, &none);
+        assert_eq!(record.actors.len(), 24);
+        // A crowd of named players stays a crowd, and is refused.
+        let (mut record, _) = crowd(30, 0, 14_000);
+        let all: std::collections::HashSet<i32> = (1..=30).collect();
+        hide_unplaced_summons(&mut record, &all, &none);
+        assert_eq!(record.actors.len(), 30);
     }
 
     #[test]

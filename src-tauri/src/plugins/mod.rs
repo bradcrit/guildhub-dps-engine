@@ -132,7 +132,9 @@ fn all_listed(ids: &[String], list: &[String]) -> bool {
 /// settings or start an update (security audit H2, 2026-10-26). Add a command
 /// here when a plugin page starts using it.
 const PLUGIN_SURFACE_COMMANDS: &[&str] = &[
-    "dock_close", "dock_fold", "dock_hello", "meter_shown", "open_settings_at", "open_settings_window",
+    // The dock's Edit layout button (crate::layout checks it is the dock's:
+    // a plugin's own window is refused there).
+    "dock_close", "dock_fold", "dock_hello", "layout_edit_start", "meter_shown", "open_settings_at", "open_settings_window",
     "open_url", "plugin_abyss_siege", "plugin_boss_follow", "plugin_boss_timers", "plugin_close",
     "plugin_fps_admin", "plugin_fps_watch", "plugin_hello", "plugin_screenshot", "plugin_set_docked", "plugin_storage_get",
     "plugin_storage_set", "plugin_widget_area", "plugin_widget_close", "plugin_widget_drag",
@@ -158,7 +160,8 @@ pub fn is_plugin_window(label: &str) -> bool {
 /// Using a configuration panel counts as using the game for focus hiding.
 /// Combat widgets are deliberately excluded: showing an alert is not focus.
 pub fn configuration_focused(app: &tauri::AppHandle) -> bool {
-    app.webview_windows().into_iter().any(|(label, window)| {
+    // The layout being edited, too: no piece hides while it is arranged.
+    crate::layout::editing() || app.webview_windows().into_iter().any(|(label, window)| {
         is_plugin_window(&label) && window.is_focused().unwrap_or(false)
     })
 }
@@ -679,12 +682,16 @@ impl PluginHost {
                 GAME_OPEN.store(game, std::sync::atomic::Ordering::Relaxed);
                 sync_game_hiding(&app);
                 let mut game_checked = Instant::now();
-                let mut ping: Option<i32> = None;
+                let mut ping: (Option<i32>, Option<i64>) = (None, None);
+                let mut matchup_seq = 0u64;
+                let mut pairings_told: (u16, u64) = (0, 0);
+                let mut supply_seq = 0u64;
                 let mut fps_told: Option<Value> = None;
                 let mut map_seq = 0u64;
                 let mut abyss_seq = 0u64;
                 let mut recap_seq = 0u64;
                 let mut roll_seq = 0u64;
+                let mut loot_seq = 0u64;
                 let mut market_seq = 0u64;
                 let mut kda_seq = 0u64;
                 let mut stats_seq = 0u64;
@@ -758,6 +765,15 @@ impl PluginHost {
                                 host.queue_permitted("events:loot-rolls", "lootRoll", roll.at, data);
                             }
                         }
+                        // Items gained and gathers, as they come: numbered
+                        // and kept, as loot rolls.
+                        if let Some((next, events)) = state.data_storage.loot_since(loot_seq) {
+                            loot_seq = next;
+                            for event in events {
+                                let data = serde_json::to_value(&event).unwrap_or_default();
+                                host.queue_permitted("events:loot", "loot", event.at(), data);
+                            }
+                        }
                         // The Black Cloud Merchant's stock, each tab as it
                         // is opened: kept, so a window opened later has it.
                         if let Some((next, markets)) = state.data_storage.black_markets_since(market_seq) {
@@ -774,7 +790,7 @@ impl PluginHost {
                         if let Some((next, events)) = state.data_storage.kda_since(kda_seq) {
                             kda_seq = next;
                             for e in events {
-                                let data = serde_json::to_value(e).unwrap_or_default();
+                                let data = serde_json::to_value(&e).unwrap_or_default();
                                 host.queue_permitted("events:kda", "kda", e.at, data);
                             }
                         }
@@ -789,12 +805,40 @@ impl PluginHost {
                             }
                         }
                     }
-                    // The ping to the game server, when it changes (about every
-                    // 10 s), to every plugin: a ping widget needs no permission.
-                    let now_ping = app.try_state::<AppState>().and_then(|s| s.ping_tracker.current_ping_ms());
-                    if now_ping != ping {
-                        ping = now_ping;
-                        host.tell_all(&app, "ping", serde_json::json!({ "ms": now_ping }));
+                    // The ping to the game server, at each reading (about every
+                    // 10 s), with its jitter, to every plugin: a ping widget
+                    // needs no permission.
+                    if let Some(state) = app.try_state::<AppState>() {
+                        let now_ping = (state.ping_tracker.current_ping_ms(), state.ping_tracker.last_reading_at());
+                        if now_ping != ping {
+                            ping = now_ping;
+                            host.tell_all(&app, "ping", ping_event(&state.ping_tracker));
+                        }
+                    }
+                    // The servers sharing your Abyss, when the game says
+                    // (meter 2.0.99 on): public game state, so to every plugin.
+                    if let Some((seq, matchup)) = crate::capture::matchup::since(matchup_seq) {
+                        matchup_seq = seq;
+                        host.tell_all(&app, "abyssPairing", matchup.to_json());
+                    }
+                    // The character's server's Abyss and Spacetime Rift
+                    // opponents (crate::pairings, meter 2.0.99 on), when the
+                    // list or the server changes: public, so to every plugin.
+                    let now = (pairing_server(&app), crate::pairings::seq());
+                    if now != pairings_told && now.0 > 0 {
+                        pairings_told = now;
+                        if let Some(pairings) = crate::pairings::for_server(now.0) {
+                            host.tell_all(&app, "pairings", pairings);
+                        }
+                    }
+                    // The Supply Requests boards, as the game sends them at
+                    // login (meter 2.0.99 on): the server's, not the
+                    // character's progress, so to every plugin.
+                    if let Some(state) = app.try_state::<AppState>() {
+                        if let Some((seq, boards)) = state.data_storage.supply_requests_since(supply_seq) {
+                            supply_seq = seq;
+                            host.tell_all(&app, "supplyBoards", supply_boards_event(&boards));
+                        }
                     }
                     // The game's frame rate, while a plugin asks (fps.rs), to
                     // plugins with "fps" when it changes.
@@ -1320,6 +1364,7 @@ struct PromptTexts {
     perm_fps: String,
     perm_death_recap: String,
     perm_loot_rolls: String,
+    perm_loot: String,
     perm_black_market: String,
     perm_kda: String,
     perm_stats: String,
@@ -1393,8 +1438,9 @@ fn prompt_texts(data_dir: Option<&Path>, lang: &str) -> PromptTexts {
         perm_fps: perm("permFps", "Show the game's frame rate (on Windows, the meter asks to run as administrator for it)"),
         perm_death_recap: perm("permDeathRecap", "After a player kills you: who they were and the damage they did to you"),
         perm_loot_rolls: perm("permLootRolls", "See Dice Roll loot: the item, who rolled what, and who won it"),
+        perm_loot: perm("permLoot", "See your loot: the items you pick up or receive, and what you gather"),
         perm_black_market: perm("permBlackMarket", "See the Black Cloud Merchants' stock when you open their shop: the items and their prices"),
-        perm_kda: perm("permKda", "Count your kills, assists and deaths against players (no names)"),
+        perm_kda: perm("permKda", "Count your kills, assists and deaths against players, naming the players you kill or help kill"),
         perm_stats: perm("permStats", "See your character's stats, such as cooldown reduction"),
         perm_screenshot: perm("permScreenshot", "Take screenshots of its own window, to the clipboard and your screenshot folder"),
     }
@@ -1412,6 +1458,7 @@ fn describe_permission(t: &PromptTexts, permission: &str) -> String {
         "fps" => t.perm_fps.clone(),
         "events:death-recap" => t.perm_death_recap.clone(),
         "events:loot-rolls" => t.perm_loot_rolls.clone(),
+        "events:loot" => t.perm_loot.clone(),
         "events:black-market" => t.perm_black_market.clone(),
         "events:kda" => t.perm_kda.clone(),
         "events:stats" => t.perm_stats.clone(),
@@ -2384,7 +2431,51 @@ pub fn plugin_hello(app: tauri::AppHandle, window: tauri::WebviewWindow, plugin:
         "reviewed": reviewed,
         "game": crate::platform::window_detector::find_aion2_window(),
         "ping": app.try_state::<AppState>().and_then(|s| s.ping_tracker.current_ping_ms()),
+        "abyssPairing": crate::capture::matchup::latest().map(|m| m.to_json()),
+        "supplyBoards": app.try_state::<AppState>()
+            .map(|s| s.data_storage.supply_requests())
+            .filter(|b| !b.is_empty())
+            .map(|b| supply_boards_event(&b)),
+        "pairings": app.try_state::<AppState>()
+            .and_then(|_| crate::pairings::for_server(pairing_server(&app))),
+        "jitter": app.try_state::<AppState>().map(|s| ping_event(&s.ping_tracker)["jitter"].clone()).unwrap_or(Value::Null),
+        "layout": crate::layout::editing(),
     }))
+}
+
+/// Your own server, kept here once the game has said it.
+const LAST_SERVER_KEY: &str = "dpsMeter.lastOwnServer";
+
+/// The server whose pairings plugins hear: your own as the game states it,
+/// else the one it last stated. A meter started mid-game (after an update)
+/// knew no server until the game sent your record again, at the next zone,
+/// so Event Timers had no rift opponent until then (2026-11-15).
+fn pairing_server(app: &tauri::AppHandle) -> u16 {
+    let Some(state) = app.try_state::<AppState>() else { return 0 };
+    let own = state.data_storage.own_server();
+    let kept = state.settings.get(LAST_SERVER_KEY).and_then(|v| v.parse::<u16>().ok()).unwrap_or(0);
+    if own != 0 {
+        if own != kept {
+            state.settings.set(LAST_SERVER_KEY, &own.to_string());
+        }
+        return own;
+    }
+    if kept != 0 { kept } else { state.data_storage.local_profile().server_id }
+}
+
+/// The `supplyBoards` event: each board's tab (1 Emergency, 2 Weekly, 3
+/// Craft, 4 Boss), window (ms) and request ids (SupplyRequest).
+fn supply_boards_event(boards: &[crate::capture::supply_requests::Board]) -> Value {
+    serde_json::json!({ "boards": boards.iter().map(|b| serde_json::json!({
+        "tab": b.tab, "start": b.start_ms, "end": b.end_ms, "requests": b.requests,
+    })).collect::<Vec<_>>() })
+}
+
+/// The `ping` event: the ping in ms and its jitter (the mean change between
+/// recent readings, to 0.1 ms; meter 2.0.99 on), each null while not known.
+fn ping_event(tracker: &crate::combat::ping_tracker::PingTracker) -> Value {
+    let jitter = tracker.current_jitter_ms().map(|j| (j * 10.0).round() / 10.0);
+    serde_json::json!({ "ms": tracker.current_ping_ms(), "jitter": jitter })
 }
 
 /// Debug builds only: feed a game packet (hex, with its length prefix) to the
@@ -2568,12 +2659,16 @@ async fn feed_file(app: &tauri::AppHandle, feed: &'static str, server: u32) -> R
     }
     let state = app.try_state::<AppState>().ok_or("no app state")?;
     let url = format!("https://cdn.a2tools.app/feeds/{feed}/{server}.json");
-    let res = state.http.get(&url).timeout(Duration::from_secs(15)).send().await.map_err(|e| e.to_string())?;
-    let value = match res.status() {
-        s if s == reqwest::StatusCode::NOT_FOUND => None,
-        s if s.is_success() => Some(serde_json::from_str(&res.text().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?),
-        s => return Err(format!("the feed answered {s}")),
-    };
+    // Tried again on a poor connection (`crate::cdn`).
+    let value = crate::cdn::retry(|| async {
+        let res = state.http.get(&url).timeout(Duration::from_secs(15)).send().await.map_err(|e| e.to_string())?;
+        match res.status() {
+            s if s == reqwest::StatusCode::NOT_FOUND => Ok(None),
+            s if s.is_success() => Ok(Some(serde_json::from_str::<Value>(&res.text().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?)),
+            s => Err(format!("the feed answered {s}")),
+        }
+    })
+    .await?;
     cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (Instant::now(), value.clone()));
     Ok(value)
 }

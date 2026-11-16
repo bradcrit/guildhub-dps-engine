@@ -20,6 +20,9 @@ pub mod entity;
 pub mod i18n;
 pub mod rederive;
 pub mod supporters;
+pub mod pairings;
+#[cfg(feature = "online")]
+pub mod cdn;
 
 // ── desktop only ───────────────────────────────────────────────────────────
 #[cfg(feature = "online")]
@@ -59,6 +62,8 @@ mod npcap_setup;
 mod app;
 #[cfg(feature = "desktop")]
 mod fp_pin;
+#[cfg(feature = "desktop")]
+mod layout;
 
 #[cfg(feature = "desktop")]
 mod atomic_file;

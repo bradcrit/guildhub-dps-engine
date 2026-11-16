@@ -138,11 +138,14 @@
       if (permission === "events:loot-rolls") {
         return t("settings.plugins.permLootRolls", "See Dice Roll loot: the item, who rolled what, and who won it");
       }
+      if (permission === "events:loot") {
+        return t("settings.plugins.permLoot", "See your loot: the items you pick up or receive, and what you gather");
+      }
       if (permission === "events:black-market") {
         return t("settings.plugins.permBlackMarket", "See the Black Cloud Merchants' stock when you open their shop: the items and their prices");
       }
       if (permission === "events:kda") {
-        return t("settings.plugins.permKda", "Count your kills, assists and deaths against players (no names)");
+        return t("settings.plugins.permKda", "Count your kills, assists and deaths against players, naming the players you kill or help kill");
       }
       if (permission === "events:stats") {
         return t("settings.plugins.permStats", "See your character's stats, such as cooldown reduction");

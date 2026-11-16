@@ -194,6 +194,17 @@ fn dungeon_of_map(roster_dungeon: i32, map: Option<i32>) -> i32 {
     }
 }
 
+/// A dungeon run as the game states it (`00 61`): its content id, state (1
+/// entered, 2 running, 3 cleared, 4 leaving), the state's time and the
+/// deadline (0: none), unix ms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DungeonRun {
+    pub content: u32,
+    pub state: u8,
+    pub time: i64,
+    pub deadline: i64,
+}
+
 // ───── Aggregate data structures ─────
 
 /// Your entry counts and currencies by id, as the game last sent them, and
@@ -1032,6 +1043,8 @@ pub struct DataStorage {
     death_recaps: Mutex<DeathRecaps>,
     /// Dice Roll loot as read (`capture::loot_rolls`), for plugins.
     loot_rolls: Mutex<crate::capture::loot_rolls::LootRolls>,
+    /// Items gained and gathers (`capture::loot`), for plugins.
+    loot: Mutex<crate::capture::loot::Loot>,
     /// The Black Cloud Merchant's stock as read (`capture::black_market`),
     /// for plugins.
     black_markets: Mutex<crate::capture::black_market::BlackMarkets>,
@@ -1194,6 +1207,10 @@ struct Inner {
     /// When the last map load came (ms) — ENTER_AFTER_LOAD_MS.
     map_loaded_ms: i64,
     object_codes_logged: HashSet<u32>,
+    /// The game's last word on the dungeon run (`00 61`).
+    dungeon_run: Option<DungeonRun>,
+    /// Your character's id, from the login record (`53 20`).
+    local_dbid: Option<u64>,
     /// Power-scalar values observed per actor in its damage records. A summon
     /// inherits its owner's, so this links the two when no spawn packet (and
     /// therefore no `parent_key`) ever arrives — the case for a Cleric's Divine
@@ -1478,6 +1495,8 @@ impl DataStorage {
                 pending_spawn: None,
                 map_loaded_ms: 0,
                 object_codes_logged: HashSet::new(),
+                dungeon_run: None,
+                local_dbid: None,
                 actor_power_scalars: HashMap::new(),
                 hostile_target_ids: HashSet::new(),
                 dead_entity_ids: HashSet::new(),
@@ -1560,6 +1579,7 @@ impl DataStorage {
             entry: Mutex::new(Default::default()),
             death_recaps: Mutex::new(DeathRecaps::default()),
             loot_rolls: Mutex::new(Default::default()),
+            loot: Mutex::new(Default::default()),
             black_markets: Mutex::new(Default::default()),
             flight_powers: Mutex::new(Default::default()),
             kda: Mutex::new(Kda::default()),
@@ -3173,9 +3193,9 @@ impl DataStorage {
         inner.login_abyss_points = Some((points, limit, at));
     }
 
-    /// The Abyss Points total the game just sent, for the K/D/A feed.
-    pub fn note_abyss_points_total(&self, total: u64, at: i64) {
-        self.kda.lock().abyss_points(total, at);
+    /// The week's Abyss Points and cap the game just sent, for the K/D/A feed.
+    pub fn note_abyss_points_total(&self, total: u64, limit: u64, at: i64) {
+        self.kda.lock().abyss_points(total, limit, at);
     }
 
     /// The week's Abyss Points and limit at `now` (unix ms): 0 points once a
@@ -3682,7 +3702,7 @@ impl DataStorage {
         inner.boss_hp_now.remove(&entity_id);
         inner.boss_hp_sent.remove(&entity_id);
         self.stagger.lock().note_gone(entity_id, now_ms(), true);
-        inner.dead_entity_ids.insert(entity_id);
+        let first_death = inner.dead_entity_ids.insert(entity_id);
         let code = inner.mobs_in_sight.remove(&entity_id);
         let spot = inner.entity_positions.remove(&entity_id);
         if let (Some(code), Some(spot)) = (code, spot) {
@@ -3695,6 +3715,26 @@ impl DataStorage {
         inner.death_log.push_back((entity_id, now_ms(), None));
         while inner.death_log.len() > MAX_DEATHS {
             inner.death_log.pop_front();
+        }
+        // A monster's death, for drop rates: who of yours hit it.
+        let kill = inner.mob_storage.get(&entity_id).copied().filter(|_| first_death).map(|mob| {
+            let me = inner.local_player_id.and_then(|id| i32::try_from(id).ok());
+            let hitters: Vec<i32> = inner
+                .target_combat
+                .get(&entity_id)
+                .map(|t| t.actors.keys().map(|a| inner.summon_storage.get(a).copied().unwrap_or(*a)).collect())
+                .unwrap_or_default();
+            let by_you = me.is_some_and(|me| hitters.contains(&me));
+            let by_party = hitters.iter().any(|a| {
+                Some(*a) != me
+                    && inner.nickname_storage.get(a).is_some_and(|name| inner.party_members.contains_key(name))
+            });
+            (mob, by_you, by_party)
+        });
+        drop(inner);
+        if let Some((mob, by_you, by_party)) = kill {
+            let place = self.loot_place();
+            self.loot.lock().kill(now_ms(), entity_id, mob, by_you, by_party, place);
         }
     }
 
@@ -3810,17 +3850,23 @@ impl DataStorage {
         self.death_recaps.lock().push(recap);
     }
 
-    /// The record that names who killed `victim` came at `at`. Counted when
-    /// the victim is a player and the record names you (a kill) or you hit
-    /// them just before (an assist).
-    pub fn note_player_killed(&self, victim: i32, killer: i32, at_ms: i64) -> Option<KdaKind> {
-        let by_me = {
+    /// The record that names who killed `victim` (`killer`, of server
+    /// `killer_server`) came at `at`. Counted when the victim is a player and
+    /// the record names you (a kill), or names someone on your side and you
+    /// hit the victim just before (an assist). Your side: your party, or your
+    /// faction (a server's first digit, 1 Elyos, 2 Asmodian) fighting a
+    /// player not of it. Your "hits" take in buffs on players near you, and
+    /// an ally an enemy killed was counted as your assist.
+    pub fn note_player_killed(&self, victim: i32, killer: i32, killer_server: u16, at_ms: i64) -> Option<KdaKind> {
+        let own_server = self.own_server();
+        let (by_me, ally_killer, who) = {
             let inner = self.inner.read();
             let me = inner.local_player_id.and_then(|id| i32::try_from(id).ok())?;
             if victim == me {
                 return None;
             }
-            let player = inner.known_player_ids.contains(&victim) || self.death_recaps.lock().knows(victim);
+            let recaps = self.death_recaps.lock();
+            let player = inner.known_player_ids.contains(&victim) || recaps.knows(victim);
             if !player {
                 // A mob's loot record, unless you had just hit it.
                 if let Some(age) = self.kda.lock().hit_age(victim, at_ms) {
@@ -3828,10 +3874,30 @@ impl DataStorage {
                 }
                 return None;
             }
-            killer == me
+            let profile = recaps.profile_of(victim).cloned().unwrap_or_default();
+            let name = profile.name.clone().or_else(|| inner.nickname_storage.get(&victim).cloned());
+            let server = profile
+                .server_id
+                .or_else(|| name.as_deref().and_then(|n| inner.player_servers.get(n.trim()).copied()))
+                .filter(|&s| s != 0);
+            let faction = |s: u16| (s != 0).then_some(s / 1000);
+            let mine = faction(own_server);
+            let ally_killer = in_party(&inner, killer)
+                || (mine.is_some() && faction(killer_server) == mine && server.and_then(faction) != mine);
+            let who = crate::combat::kda::Victim {
+                name,
+                server_id: server,
+                class: profile.class.map(death_recap::class_key),
+                level: profile.level,
+                legion: profile.legion,
+            };
+            (killer == me, ally_killer, who)
         };
-        let kind = self.kda.lock().player_died(victim, by_me, at_ms);
-        tracing::debug!("KDA: player {victim} died, killer {killer}{}: {kind:?}", if by_me { " (you)" } else { "" });
+        let kind = self.kda.lock().player_died(victim, by_me, ally_killer, at_ms, who);
+        tracing::debug!(
+            "KDA: player {victim} died, killer {killer} of {killer_server}{}: {kind:?}",
+            if by_me { " (you)" } else if ally_killer { " (your side)" } else { "" }
+        );
         kind
     }
 
@@ -3862,6 +3928,76 @@ impl DataStorage {
     pub fn note_loot_roll(&self, roll: crate::capture::loot_rolls::LootRoll) {
         let at = crate::clock::now_ms();
         self.loot_rolls.lock().push(crate::capture::loot_rolls::LootRollEvent { at, roll });
+    }
+
+    /// Where the player is, for loot: the map, the dungeon and the timed
+    /// content the game last stated.
+    fn loot_place(&self) -> crate::capture::loot::Whereabouts {
+        let inner = self.inner.read();
+        crate::capture::loot::Whereabouts {
+            map: inner.current_map_id.unwrap_or(0),
+            dungeon: inner.current_dungeon_id,
+            content: inner.dungeon_run.map_or(0, |r| r.content),
+            content_state: inner.dungeon_run.map_or(0, |r| r.state),
+        }
+    }
+
+    /// Items gained (`1B 56`), kept for plugins.
+    pub fn note_items(&self, entries: &[crate::capture::loot::ItemEntry]) {
+        let place = self.loot_place();
+        self.loot.lock().items(crate::clock::now_ms(), entries, place);
+    }
+
+    /// Your character's id, from the login record (`53 20`): the id drops
+    /// name their owner by.
+    pub fn note_local_dbid(&self, dbid: u64) {
+        self.inner.write().local_dbid = Some(dbid);
+    }
+
+    /// Drops seen (`1E 56`), kept for plugins: each with its monster's NPC
+    /// code, and whose it is (yours, a party member's, someone else's).
+    pub fn note_drops(&self, drops: &[crate::capture::loot::Drop]) {
+        use crate::capture::loot::{DropSeen, Owner};
+        let place = self.loot_place();
+        let seen: Vec<DropSeen> = {
+            let inner = self.inner.read();
+            drops
+                .iter()
+                .map(|d| {
+                    let owner = if d.owner_kind == 2 && inner.local_dbid == Some(d.owner) {
+                        Owner::You
+                    } else if d.owner_kind == 2 && inner.party_members.values().any(|m| m.dbid == d.owner) {
+                        Owner::Party
+                    } else {
+                        Owner::Other
+                    };
+                    let mob = i32::try_from(d.source).ok().and_then(|e| inner.mob_storage.get(&e).copied());
+                    DropSeen { source: d.source, mob, item: d.item, count: d.count, owner }
+                })
+                .collect()
+        };
+        self.loot.lock().drops(now_ms(), seen, place);
+    }
+
+    /// A timed content's reward cards (`0A 57`), kept for plugins.
+    pub fn note_reward_cards(&self, cards: Vec<crate::capture::reward_cards::Card>) {
+        let place = self.loot_place();
+        let count = cards.len();
+        if self.loot.lock().cards(now_ms(), cards, place) {
+            tracing::info!("Reward cards: {count} read");
+        }
+    }
+
+    /// A gather (`31 8D`, `33 8D`), kept for plugins.
+    pub fn note_gather(&self, gather: crate::capture::loot::Gather) {
+        let place = self.loot_place();
+        self.loot.lock().gather(crate::clock::now_ms(), gather, place);
+    }
+
+    /// The loot events read since `seq`, and the count to ask with next
+    /// time; None when there are none.
+    pub fn loot_since(&self, seq: u64) -> Option<(u64, Vec<crate::capture::loot::LootEvent>)> {
+        self.loot.lock().since(seq)
     }
 
     /// The roll events read since `seq`, and the count to ask with next
@@ -3958,6 +4094,11 @@ impl DataStorage {
     /// The ranking tables waiting, taken.
     pub fn take_rankings(&self) -> Vec<crate::capture::rankings::Ranking> {
         std::mem::take(&mut self.inner.write().rankings)
+    }
+
+    /// The boards as last told (empty before the login sends them).
+    pub fn supply_requests(&self) -> Vec<crate::capture::supply_requests::Board> {
+        self.inner.read().supply_requests.clone()
     }
 
     /// The boards, when told since `seq`: (the new seq, the boards).
@@ -4325,6 +4466,34 @@ impl DataStorage {
         }
         tracing::info!("Party left — clearing party rows");
         self.end_party();
+    }
+
+    /// The game's word on a dungeon run (`00 61`, see
+    /// `stream_processor::dungeon_state`). Kept as the run now; a dungeon's
+    /// id (600000-699999) is also where the player is when no map load has
+    /// said (a meter started inside the run).
+    pub fn note_dungeon_state(&self, run: DungeonRun) {
+        let mut inner = self.inner.write();
+        if inner.dungeon_run != Some(run) {
+            tracing::info!(
+                "Dungeon state: {} state {} at {} (deadline {})",
+                run.content,
+                run.state,
+                run.time,
+                run.deadline
+            );
+        }
+        inner.dungeon_run = Some(run);
+        let id = run.content as i32;
+        if inner.current_map_id.is_none() && (600_000..700_000).contains(&id) && inner.current_dungeon_id != id {
+            tracing::info!("Dungeon {id} from its run state (no map load seen)");
+            inner.current_dungeon_id = id;
+        }
+    }
+
+    /// The last dungeon run state the game sent, if any.
+    pub fn dungeon_run(&self) -> Option<DungeonRun> {
+        self.inner.read().dungeon_run
     }
 
     /// A zone load named the map it loads (`21 36`). The map, once known, is
@@ -6043,6 +6212,32 @@ mod tests {
         storage.note_player_hp(2695, 12_419); // you are revived 40 s later
         crate::clock::set_override(None);
         assert_eq!(storage.deaths_between(0, 50_000), vec![(2695, 2_000, Some(42_000)), (14106, 2_000, None)]);
+    }
+
+    /// The Abyss, 2026-11-14 (an Elyos of 1304): your buffs and hits on the
+    /// players around you, then the kill records. One named Shiozuki of 1304
+    /// (your side) is an assist and names the player; one named Tayna of
+    /// 2303 killing your ally was counted as an assist too, and is none.
+    #[test]
+    fn an_assist_is_on_an_enemy_your_side_killed() {
+        let storage = DataStorage::new();
+        storage.set_local_player_id(Some(1000));
+        storage.note_self_server(1304);
+        storage.append_nickname_authoritative(3312, "Mocha");
+        storage.note_player_server("Mocha", 2303);
+        storage.note_player_profile(3312, death_recap::Profile { legion: Some("Dusk".into()), ..Default::default() });
+        storage.append_nickname_authoritative(3533, "Ally");
+        storage.note_player_server("Ally", 1304);
+        {
+            let mut kda = storage.kda.lock();
+            kda.note_my_hit(3312, 1_000);
+            kda.note_my_hit(3533, 1_000);
+        }
+        assert_eq!(storage.note_player_killed(3533, 16233, 2303, 2_000), None);
+        assert_eq!(storage.note_player_killed(3312, 3396, 1304, 2_000), Some(KdaKind::Assist));
+        let (_, events) = storage.kda_since(0).unwrap();
+        let victim = events[0].victim.clone().unwrap();
+        assert_eq!((victim.name.as_deref(), victim.server_id, victim.legion.as_deref()), (Some("Mocha"), Some(2303), Some("Dusk")));
     }
 
     fn who(s: &DataStorage) -> (Option<i64>, Option<String>, bool) {

@@ -185,7 +185,7 @@
 //! same), `enemy` of the other faction (null: yours not known). `npc` the NPC
 //! code of the mob you selected (the pet tracker's monsters), else null.
 //! `loot` (`{"at","source","dungeon","runAt","items":[{"item","count"}]}`)
-//! as you loot (`capture::loot`): `source` "cube" — a cube's whole reward
+//! as you loot (`capture::own_loot`): `source` "cube" — a cube's whole reward
 //! list — or "item", one item that went into your inventory (a boss's soul,
 //! Kinah from a mob). `item` is the game's item id. `dungeon` the instance
 //! you are in (0: the open world), `runAt` when it was entered (unix ms,
@@ -218,7 +218,7 @@ use a2tools_dps_meter_lib::capture::field_bosses::npc_of_map_id;
 use a2tools_dps_meter_lib::capture::game_lists::CURRENCIES;
 use a2tools_dps_meter_lib::capture::commendation::{self, Commendation};
 use a2tools_dps_meter_lib::capture::gathering::{self, Gathered};
-use a2tools_dps_meter_lib::capture::loot::{Loot, LootReader};
+use a2tools_dps_meter_lib::capture::own_loot::{Loot, LootReader};
 use a2tools_dps_meter_lib::capture::combat_port_detector::CombatPortDetector;
 use a2tools_dps_meter_lib::capture::pcap_capturer::PcapCapturer;
 use a2tools_dps_meter_lib::combat::capture_dispatcher::CaptureDispatcher;
@@ -485,7 +485,7 @@ struct Engine {
     /// Pet records read (`PET_DECODERS`), waiting to be passed on: when read
     /// (unix ms), the decoder's name, what it read.
     pets: Arc<Mutex<Vec<(i64, String, serde_json::Value)>>>,
-    /// Loot read (`capture::loot`), waiting to be passed on: when read (unix ms), what.
+    /// Loot read (`capture::own_loot`), waiting to be passed on: when read (unix ms), what.
     loot: Arc<Mutex<Vec<(i64, Loot)>>>,
     /// Gathering rounds read (`capture::gathering`), waiting to be passed on: when read (unix ms), what.
     gathered: Arc<Mutex<Vec<(i64, Gathered)>>>,

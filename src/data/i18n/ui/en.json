@@ -1,6 +1,7 @@
 {
   "header": {
     "title": "A2Tools DPS Meter",
+"pluginDock": "Plugin dock",
     "display": {
       "dps": "DPS",
       "total": "DMG",
@@ -342,6 +343,7 @@
     "title": "Settings",
     "lockedPort": "Detected connection",
     "resetDetection": "Detect again",
+    "mirroredCapture": "The game runs on another PC (mirrored capture)",
     "characterName": "Your character",
     "characterNamePlaceholder": "Enter your character name",
     "pinMeToTop": "Keep my row at the top",
@@ -399,6 +401,10 @@
     },
     "showSuspendBtn": "Show pause capture button",
     "showLockBtn": "Show click-through lock button",
+    "editLayout": "Arrange the meter, pins and widgets",
+    "editLayoutBtn": "Edit layout",
+    "editLayoutUnsupported": "This desktop places the meter's windows itself, so the layout can't be edited here.",
+    "showDockBtn": "Show plugin dock button",
     "playerLimit": {
       "label": "Max players shown"
     },
@@ -584,6 +590,7 @@
       "pressKeys": "Press keys...",
       "tooManyKeys": "Up to 3 keys",
       "plugins": "Show/Hide plugin windows",
+      "layout": "Edit layout",
       "hidePins": "Hide plugin pins too",
       "notSet": "Not set",
       "restoreDefaults": "Restore defaults",
@@ -658,6 +665,7 @@
       "characterName": "Your in-game name and ID, so the meter knows which row is you. It is usually found on its own.",
       "device": "The network connection the meter reads game traffic from. Auto-detect finds it; pick one by hand if you use a VPN.",
       "lockedPort": "The adapter and port the game was found on.",
+      "mirroredCapture": "For a PC that reads a mirrored copy of the game's traffic while AION2 runs on another PC: every adapter is read, without an address too, in promiscuous mode, and no AION2 window is needed here. Restart the meter to apply.",
       "defaultMeterMode": "The target mode the meter opens in: Boss, Target, Train or All.",
       "playerLimit": "How many player rows the meter shows; the rest are left out.",
       "meterAnchor": "The edge of the meter that stays put as rows come and go.",
@@ -669,6 +677,8 @@
       "roundDps": "13,412 shows as 13k.",
       "showSuspendBtn": "A button on the meter that stops reading game traffic until you press it again.",
       "showLockBtn": "A button that makes the meter ignore the mouse, so clicks go through to the game.",
+      "editLayout": "Unlocks the meter, the FP pin and every plugin widget at once, to drag into place. Done keeps the new places; Cancel puts them back.",
+      "showDockBtn": "A button on the meter that opens and closes the plugin dock.",
       "windowOpacity": "How see-through the meter's background is. Bars and text stay as they are.",
       "titleOpacity": "How see-through the meter's title bar is, apart from the background under it. Until you move it, it follows the background.",
       "meterOpacity": "How solid the coloured damage bars are.",
@@ -765,8 +775,9 @@
       "permFps": "Show the game's frame rate (on Windows, the meter asks to run as administrator for it)",
       "permDeathRecap": "After a player kills you: who they were and the damage they did to you",
       "permLootRolls": "See Dice Roll loot: the item, who rolled what, and who won it",
+      "permLoot": "See your loot: the items you pick up or receive, and what you gather",
       "permBlackMarket": "See the Black Cloud Merchants' stock when you open their shop: the items and their prices",
-      "permKda": "Count your kills, assists and deaths against players (no names)",
+      "permKda": "Count your kills, assists and deaths against players, naming the players you kill or help kill",
       "permStats": "See your character's stats, such as cooldown reduction",
       "permScreenshot": "Take screenshots of its own window, to the clipboard and your screenshot folder",
       "testHint": "Early versions for anyone to try, signed like the others. They may change or have rough edges: tell us what you find.",
@@ -939,6 +950,7 @@
     "showControls": "Show the controls",
     "popOut": "Open in its own window",
     "pluginSettings": "Plugin settings",
+    "editLayout": "Edit layout",
     "hide": "Hide (the plugin keeps running)",
     "close": "Hide the dock (the plugins keep running)",
     "hideMeter": "Hide the DPS meter",
@@ -962,6 +974,21 @@
     "never": "Your PC's name and your character's full name are never sent.",
     "policy": "Privacy policy",
     "continue": "Continue"
+  },
+  "layout": {
+    "title": "Edit layout",
+    "hint": "Drag any piece into place. Dropped near an edge, it snaps to it.",
+    "snap": "Snap",
+    "gridOff": "Grid: off",
+    "gridOn": "Grid: {px} px",
+    "cancel": "Cancel",
+    "done": "Done"
+  },
+  "netNotice": {
+    "title": "Can't reach A2 Tools' servers",
+    "text": "Plugins, updates and boss timers couldn't be downloaded, even after trying again. This is usually the internet connection: Cloudflare's free 1.1.1.1 app fixes it for most players.",
+    "ok": "OK",
+    "help": "How to fix it"
   },
   "sharingNotice": {
     "title": "Your fights help build the leaderboards",

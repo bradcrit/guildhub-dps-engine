@@ -1,6 +1,7 @@
 {
   "header": {
     "title": "A2Tools DPS Meter",
+"pluginDock": "外掛停駐列",
     "display": {
       "dps": "DPS",
       "total": "DMG",
@@ -342,6 +343,7 @@
     "title": "設定",
     "lockedPort": "偵測到的連線",
     "resetDetection": "重新偵測",
+    "mirroredCapture": "遊戲在另一台電腦上執行（鏡像擷取）",
     "characterName": "我的角色",
     "characterNamePlaceholder": "輸入你的角色名稱",
     "pinMeToTop": "將我的列置頂",
@@ -399,6 +401,10 @@
     },
     "showSuspendBtn": "顯示暫停擷取按鈕",
     "showLockBtn": "顯示點擊穿透鎖定按鈕",
+    "editLayout": "排列計量器、圖釘與小工具",
+    "editLayoutBtn": "編輯版面",
+    "editLayoutUnsupported": "此桌面會自行決定計量器視窗的位置，因此無法在這裡編輯版面。",
+    "showDockBtn": "顯示外掛停駐列按鈕",
     "playerLimit": {
       "label": "最大顯示人數"
     },
@@ -576,6 +582,7 @@
       "pressKeys": "請按下按鍵...",
       "tooManyKeys": "最多 3 個鍵",
       "plugins": "顯示/隱藏外掛視窗",
+      "layout": "編輯版面",
       "hidePins": "同時隱藏外掛圖釘",
       "notSet": "未設定",
       "restoreDefaults": "恢復預設",
@@ -650,6 +657,7 @@
       "characterName": "你的遊戲角色名稱和 ID，讓計量器知道哪一列是你。通常會自動識別。",
       "device": "計量器讀取遊戲流量的網路連線。自動偵測會找到它；使用 VPN 時請手動選擇。",
       "lockedPort": "發現遊戲所用的介面卡和連接埠。",
+      "mirroredCapture": "適用於 AION2 在另一台電腦執行、而這台電腦讀取遊戲流量鏡像副本的情況：以混雜模式讀取所有網路介面卡（包括沒有位址的），且這台電腦不需要 AION2 視窗。重新啟動計量器後生效。",
       "defaultMeterMode": "計量器啟動時的目標模式：首領、目標、訓練或全部。",
       "playerLimit": "計量器顯示的玩家列數，其餘的不顯示。",
       "pinMeToTop": "無論傷害多少，你的列都排在第一。",
@@ -660,6 +668,8 @@
       "roundDps": "13,412 顯示為 13k。",
       "showSuspendBtn": "在計量器上顯示一個按鈕，按下後停止讀取遊戲流量，再按一次恢復。",
       "showLockBtn": "讓計量器忽略滑鼠、點擊直接作用於遊戲的按鈕。",
+      "editLayout": "一次解鎖計量器、FP 圖釘與所有外掛小工具，拖曳到想要的位置。完成會保留新位置；取消會恢復原位。",
+      "showDockBtn": "在計量器上放一個開啟與關閉外掛停駐列的按鈕。",
       "windowOpacity": "計量器背景的透明程度。條形和文字不受影響。",
       "titleOpacity": "統計視窗標題列的透明程度，與下方背景分開設定。移動它之前，它跟隨背景不透明度。",
       "meterOpacity": "彩色傷害條的不透明程度。",
@@ -757,8 +767,9 @@
       "permFps": "顯示遊戲幀率（在 Windows 上，計量器會為此要求以系統管理員身分執行）",
       "permDeathRecap": "被玩家擊殺後：對方是誰，以及對你造成的傷害",
       "permLootRolls": "查看擲骰分配的戰利品：物品、誰擲出多少點，以及誰獲得了它",
+      "permLoot": "查看你的戰利品:撿到或獲得的物品,以及採集到的東西",
       "permBlackMarket": "打開商店時查看黑雲商人的貨品：物品及其價格",
-      "permKda": "統計你對玩家的擊殺、助攻與死亡次數（不含名稱）",
+      "permKda": "統計你對玩家的擊殺、助攻與死亡，並列出你擊殺或協助擊殺的玩家名稱",
       "permStats": "查看你角色的屬性，例如冷卻縮減",
       "permScreenshot": "擷取自身視窗的截圖，到剪貼簿與你的截圖資料夾",
       "testHint": "任何人都可以試用的早期版本，和其他外掛一樣經過簽署。它們可能會變動或尚不完善：發現問題請告訴我們。",
@@ -939,6 +950,7 @@
     "showControls": "顯示控制項",
     "popOut": "在獨立視窗中開啟",
     "pluginSettings": "外掛程式設定",
+    "editLayout": "編輯版面",
     "hide": "隱藏（外掛繼續執行）",
     "close": "隱藏停靠欄（外掛繼續執行）",
     "hideMeter": "隱藏 DPS 計量器",
@@ -962,6 +974,21 @@
     "never": "絕不會傳送電腦名稱和角色的完整名字。",
     "policy": "隱私權政策",
     "continue": "繼續"
+  },
+  "layout": {
+    "title": "編輯版面",
+    "hint": "拖曳各部分到想要的位置。靠近邊緣放下時會自動對齊。",
+    "snap": "對齊",
+    "gridOff": "格線：關",
+    "gridOn": "格線：{px} px",
+    "cancel": "取消",
+    "done": "完成"
+  },
+  "netNotice": {
+    "title": "無法連線到 A2 Tools 伺服器",
+    "text": "即使重試，仍無法下載外掛、更新和首領計時。這通常是網路連線的問題：Cloudflare 的免費 1.1.1.1 應用程式能幫大多數玩家解決。",
+    "ok": "確定",
+    "help": "解決方法"
   },
   "sharingNotice": {
     "title": "你的戰鬥正在幫忙建立排行榜",

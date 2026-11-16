@@ -57,6 +57,23 @@
 //                                              player } who won it. The highest roll wins. A roll can
 //                                              come before its "open" or without one. Once each, kept
 //                                              like a decoder's events
+//   a2.on("loot", (e) => ...)                 your loot (permission "events:loot", meter 2.0.98 on), once
+//                                              each, kept like a decoder's events. e = { kind: "items", at,
+//                                              items: [{ item (Item id), total (the stack after), change
+//                                              ("new" | "changed" | "removed"), gained (how many, when
+//                                              known, else null) }], atPlace } for items you pick up, are
+//                                              given or use up; or { kind: "gather", at, gather, atPlace },
+//                                              gather = { type: "started", node, n } | { type: "refused",
+//                                              node } | { type: "done", node, item, count, bonus (extra
+//                                              copies), extraItem, extraCount (the random add-on, 0 when
+//                                              none) }; or { kind: "drops", at, drops: [{ source (the entity
+//                                              it fell from), mob (its NPC code, when known), item, count,
+//                                              owner ("you" | "party" | "other": in a party each member gets
+//                                              drops of their own) }], atPlace }; or { kind: "kill", at,
+//                                              entity, mob, byYou, byParty, atPlace } for a monster that
+//                                              died in sight. atPlace = { map, dungeon, content, contentState }:
+//                                              the map, the dungeon (0: none) and the timed content the
+//                                              game last stated (00 61: 1 entered, 2 running, 3 cleared)
 //   a2.on("blackMarket", (m) => ...)           the Black Cloud Merchants' stock, each time a tab of the
 //                                              shop is opened (permission "events:black-market", meter
 //                                              2.0.93 on): m = { at, kind, refreshAt (unix ms, when the
@@ -81,15 +98,37 @@
 //                                              shortens cooldowns). The latest is kept for a window opened later
 //   a2.on("game", ({ running }) => ...)        whether AION2 is open, at start and on change
 //                                              (meter 2.0.65 on)
-//   a2.on("ping", ({ ms }) => ...)             the ping to the game server in ms (null while not known),
-//                                              at start and on change, about every 10 s (meter 2.0.73 on)
+//   a2.on("ping", ({ ms, jitter }) => ...)     the ping to the game server in ms (null while not known),
+//                                              at start and at each reading, about every 10 s (meter 2.0.73 on);
+//                                              jitter: the mean change between recent readings in ms, to 0.1
+//                                              (null until three readings; meter 2.0.99 on)
+//   a2.on("supplyBoards", ({ boards }) => ...)  the Supply Requests boards as the game sends them at
+//                                              login (meter 2.0.99 on): [{ tab (1 Emergency, 2 Weekly,
+//                                              3 Craft, 4 Boss), start, end (ms), requests: [SupplyRequest ids] }];
+//                                              the server's boards, not your progress on them
+//   a2.on("pairings", ({ server, abyss, rift, from }) => ...)  your character's server's opponents in
+//                                              the Abyss and the Spacetime Rift (server ids), from the list
+//                                              a2tools.app keeps of NC's Server Matchmaking notices; at start once
+//                                              known and when the list or your server changes (meter 2.0.99 on)
+//   a2.on("abyssPairing", ({ kind, servers }) => ...)  the servers sharing your Abyss, at start once
+//                                              known and on change (meter 2.0.99 on): servers [{ server, side }],
+//                                              yours among them on side 1 or 2 (the same faction can be on both);
+//                                              not the Spacetime Rift's opponent. kind: two bytes not yet understood
 //   a2.on("language", (code) => ...)           the meter's language ("en", "ko", "zh-Hans", ...), at start and on change
 //   a2.on("theme", ({ bg, panel, accent }) => ...)  the Settings colours (#rrggbb each), at start and on change
 //                                              (meter 2.0.76 on). The page has them as CSS too: var(--a2-accent),
 //                                              var(--a2-bg), var(--a2-panel); and selects, checkboxes, radios,
 //                                              sliders and scrollbars are styled to match unless the plugin styles them itself
 //   a2.on("compact", (on) => ...)              the window's fold button: show only the essentials
-//
+//   a2.on("visible", (shown) => ...)          whether the plugin's page is on view, at start and on change
+//                                              (meter 2.0.77 on): its window shown, or in the dock, the dock shown,
+//                                              its tab the open one (or stacked) and the dock not folded (2.1.0 on).
+//                                              The page keeps running either way; widgets stay up
+//   a2.on("layout", ({ editing }) => ...)      the player arranging the meter and every widget at once
+//                                              (Settings, Edit layout; meter 2.1.0 on), at start while on and
+//                                              on change. Every widget is unlocked and outlined meanwhile; a
+//                                              widget that shows only on an alert can open a stand-in to place
+////
 // Keep the page's background transparent: the window paints the panel at the
 // opacity the user picks.
 //   await a2.storage.get("state")              the plugin's own saved data
@@ -146,6 +185,8 @@
 //   a2.widget.post(data)                       to the plugin's page ("widget-message")
 //   a2.on("widget", (data) => ...)             what the plugin sent it
 //   a2.on("locked", (locked) => ...)           whether the widgets are locked, at start and on change
+//   a2.on("layout", ({ editing }) => ...)      the layout being edited (meter 2.1.0 on): the widget can
+//                                              be dragged whatever the lock, and is outlined with its name
 //
 //   a2.ready()                                 call once the handlers are set
 //

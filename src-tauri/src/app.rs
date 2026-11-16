@@ -739,6 +739,58 @@ impl Drop for InFlight {
     }
 }
 
+#[cfg(feature = "online")]
+/// Send again, once each, the fights the service refused for having no boss
+/// in their slice, with the boss this meter saw (`share::claim_sweep_candidates`):
+/// mostly Ludra's, refused before the meter kept spawns (2.0.98). Under the
+/// automatic upload's rules, one every few seconds. A fight the service
+/// answers is marked whatever the answer; one that could not reach it
+/// (offline, a locked keyring) ends the sweep unmarked, for the next start.
+async fn claim_sweep(app: tauri::AppHandle) {
+    const PACE: Duration = Duration::from_secs(5);
+    let Some(state) = app.try_state::<AppState>() else { return };
+    if !share::auto_uploads(&state.settings) {
+        return;
+    }
+    let dir = state.app_data_dir.clone();
+    let npcs = state.npc_lookup.clone();
+    let candidates = tauri::async_runtime::spawn_blocking(move || {
+        let history = crate::history::fight_history::FightHistoryManager::new(dir.clone());
+        share::claim_sweep_candidates(&dir, |id| history.load_fight(id).ok(), |code| npcs.is_boss(code))
+    })
+    .await
+    .unwrap_or_default();
+    if candidates.is_empty() {
+        return;
+    }
+    tracing::info!("Claim sweep: {} refused fight(s) to send again with their boss", candidates.len());
+    for (id, claim) in candidates {
+        if !share::auto_uploads(&state.settings) {
+            break;
+        }
+        let Some(_in_flight) = InFlight::start(&id) else { continue };
+        let Ok(record) = state.fight_history.load_fight(&id) else { continue };
+        match share::upload_claiming(&state.http, &state.app_data_dir, &record, &state.settings, Some(claim)).await {
+            Ok(result) => {
+                share::note_claim_swept(&state.app_data_dir, &id);
+                tracing::info!("Claim sweep: {id} ({} in {}) -> {}", claim.mob, claim.dungeon, result.url);
+                let _ = app.emit("fight-uploaded", serde_json::json!({
+                    "fightId": id, "url": result.url, "visibility": result.visibility,
+                }));
+            }
+            Err(failure) if failure.keyring_locked || (failure.retryable && failure.code.is_none()) => {
+                tracing::info!("Claim sweep stopped at {id}, for the next start: {}", failure.message);
+                break;
+            }
+            Err(failure) => {
+                share::note_claim_swept(&state.app_data_dir, &id);
+                tracing::info!("Claim sweep: {id} refused again: {}", failure.message);
+            }
+        }
+        tokio::time::sleep(PACE).await;
+    }
+}
+
 /// Which fights have a slice to upload, and which already have a link.
 #[tauri::command]
 async fn share_status(
@@ -1023,8 +1075,13 @@ struct Hotkeys {
 }
 
 /// The keybind settings: changing one registers the keys again.
-const HOTKEY_KEYS: [&str; 4] =
-    ["dpsMeter.hotkey", "dpsMeter.toggleWindowHotkey", "dpsMeter.lockHotkey", "dpsMeter.pluginWindowsHotkey"];
+const HOTKEY_KEYS: [&str; 5] = [
+    "dpsMeter.hotkey",
+    "dpsMeter.toggleWindowHotkey",
+    "dpsMeter.lockHotkey",
+    "dpsMeter.pluginWindowsHotkey",
+    "dpsMeter.layoutHotkey",
+];
 
 /// Open the desktop's own shortcut settings, where the keys are set on
 /// Linux (KDE keeps its own; see platform::hotkeys).
@@ -1075,12 +1132,13 @@ fn restart_global_hotkeys(app: &tauri::AppHandle) {
 }
 
 /// The keybind settings and their defaults, as Settings shows them: the
-/// plugin windows key has none (`""`), so it is off until one is set.
-pub const HOTKEY_DEFAULTS: [(&str, &str); 4] = [
+/// plugin windows and layout keys have none (`""`), so they are off until set.
+pub const HOTKEY_DEFAULTS: [(&str, &str); 5] = [
     ("dpsMeter.hotkey", "Ctrl+Alt+R"),
     ("dpsMeter.toggleWindowHotkey", "Ctrl+Alt+Up"),
     ("dpsMeter.lockHotkey", "Ctrl+Alt+L"),
     ("dpsMeter.pluginWindowsHotkey", ""),
+    ("dpsMeter.layoutHotkey", ""),
 ];
 
 /// A keybind setting's key: what is saved, else (unset or unreadable) its
@@ -1170,8 +1228,14 @@ fn start_hotkeys(app: &tauri::AppHandle, settings: &Settings) {
         });
     }));
 
+    let h = app.clone();
+    let layout = binding("layout", "dpsMeter.layoutHotkey", Box::new(move || {
+        tracing::info!("Hotkey: the layout editor");
+        crate::layout::toggle(&h);
+    }));
+
     hotkeys.manager.start(
-        vec![reload, toggle, lock, plugins],
+        vec![reload, toggle, lock, plugins, layout],
         move |key, state, assigned| {
             set_hotkey_status(&status_handle, |s| {
                 s.insert(key.to_string(), state.to_string());
@@ -1816,55 +1880,85 @@ async fn download_and_install_update(app: &tauri::AppHandle, url: &str, expected
     let app_clone = app.clone();
     let url_owned = url.to_string();
 
-    let response = app
-        .state::<AppState>()
-        .http
-        .get(&url_owned)
-        .timeout(Duration::from_secs(600))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
-    }
     // At most MAX_PACKAGE (packages are under 24 MB), counted as it comes,
     // since a server may give no length; and a download that fails leaves no
     // partial file (talyaseen, #140).
     const MAX_PACKAGE: u64 = 256 * 1024 * 1024;
+    // A connection that drops partway is picked up where it stopped (a range
+    // request), this many times: on a poor line a 20 MB package rarely comes
+    // in one go (a player in Egypt, 2026-11-15).
+    const RESUMES: u32 = 4;
     let too_big = || format!("the update package is larger than {MAX_PACKAGE} bytes");
-    let total_size = response.content_length().unwrap_or(0);
-    if total_size > MAX_PACKAGE {
-        return Err(too_big());
-    }
     let msi_path = update_download_path(&url_owned)?;
+    let http = app.state::<AppState>().http.clone();
 
     let mut file = tokio::fs::File::create(&msi_path).await.map_err(|e| e.to_string())?;
     let mut downloaded: u64 = 0;
-    let mut stream = response.bytes_stream();
+    let mut total_size: u64 = 0;
     let mut last_pct: u64 = 0;
     let mut hasher = Sha256::new();
 
     let saved: Result<(), String> = async {
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| e.to_string())?;
-            if downloaded + chunk.len() as u64 > MAX_PACKAGE {
-                return Err(too_big());
+        let mut resumes = 0;
+        loop {
+            // One go: from the start, or from `downloaded` on.
+            let attempt: Result<(), String> = async {
+                let mut request = http.get(&url_owned).timeout(Duration::from_secs(600));
+                if downloaded > 0 {
+                    request = request.header(reqwest::header::RANGE, format!("bytes={downloaded}-"));
+                }
+                let response = request.send().await.map_err(|e| e.to_string())?;
+                let status = response.status();
+                if downloaded > 0 && status == reqwest::StatusCode::OK {
+                    // The whole file again, not the rest: start over.
+                    use tokio::io::AsyncSeekExt;
+                    file.set_len(0).await.map_err(|e| e.to_string())?;
+                    file.seek(std::io::SeekFrom::Start(0)).await.map_err(|e| e.to_string())?;
+                    downloaded = 0;
+                    hasher = Sha256::new();
+                } else if !status.is_success() {
+                    return Err(format!("HTTP {status}"));
+                }
+                if total_size == 0 {
+                    total_size = downloaded + response.content_length().unwrap_or(0);
+                    if total_size > MAX_PACKAGE {
+                        return Err(too_big());
+                    }
+                }
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| e.to_string())?;
+                    if downloaded + chunk.len() as u64 > MAX_PACKAGE {
+                        return Err(too_big());
+                    }
+                    hasher.update(&chunk);
+                    file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+                    downloaded += chunk.len() as u64;
+                    if total_size > 0 {
+                        let pct = (downloaded * 100 / total_size).min(100);
+                        if pct != last_pct {
+                            last_pct = pct;
+                            let _ = app_clone.emit("download-progress", pct);
+                            tracing::info!("Download: {}%", pct);
+                        }
+                    }
+                }
+                Ok(())
             }
-            hasher.update(&chunk);
-            file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-            downloaded += chunk.len() as u64;
-            if total_size > 0 {
-                let pct = (downloaded * 100 / total_size).min(100);
-                if pct != last_pct {
-                    last_pct = pct;
-                    let _ = app_clone.emit("download-progress", pct);
-                    tracing::info!("Download: {}%", pct);
+            .await;
+            match attempt {
+                Ok(()) => return file.flush().await.map_err(|e| e.to_string()),
+                Err(e) if e == too_big() || resumes >= RESUMES => return Err(e),
+                Err(e) => {
+                    resumes += 1;
+                    tracing::info!("Download: {e} at {downloaded} bytes; resuming ({resumes} of {RESUMES})");
+                    tokio::time::sleep(Duration::from_secs(2 * u64::from(resumes))).await;
                 }
             }
         }
-        file.flush().await.map_err(|e| e.to_string())
     }
     .await;
+    crate::cdn::note(saved.is_ok());
     drop(file);
     if let Err(e) = saved {
         let _ = tokio::fs::remove_file(&msi_path).await;
@@ -1978,32 +2072,38 @@ enum RosterFetch {
 /// deliberate: this is a cosmetic, and there is no version of "the CDN is
 /// down" that should produce a visible error, a retry storm, or a wrong answer.
 async fn fetch_supporter_roster(client: &reqwest::Client, etag: Option<&str>) -> RosterFetch {
-    let mut request = client.get(SUPPORTER_ROSTER_URL).timeout(Duration::from_secs(30));
-    if let Some(tag) = etag {
-        request = request.header(reqwest::header::IF_NONE_MATCH, tag);
-    }
-    let Ok(response) = request.send().await else {
-        return RosterFetch::Failed;
-    };
-    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-        return RosterFetch::Unchanged;
-    }
-    if !response.status().is_success() {
-        return RosterFetch::Failed;
-    }
-    let tag = response
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    // A roster for ten thousand supporters is about 80 KB; anything far past
-    // that is not one of ours.
-    let Ok(bytes) = crate::update_check::read_capped(response, 8 * 1024 * 1024).await else {
-        return RosterFetch::Failed;
-    };
-    match crate::supporters::Roster::parse(&bytes) {
-        Some(roster) => RosterFetch::Fresh(roster, tag),
-        None => RosterFetch::Failed,
+    // Tried again on a poor connection (`crate::cdn`); "not modified" is an
+    // answer, not a failure.
+    let fetched = crate::cdn::retry(|| async {
+        let mut request = client.get(SUPPORTER_ROSTER_URL).timeout(Duration::from_secs(30));
+        if let Some(tag) = etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, tag);
+        }
+        let response = request.send().await.map_err(|e| e.to_string())?;
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(format!("HTTP {}", response.status()));
+        }
+        let tag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        // A roster for ten thousand supporters is about 80 KB; anything far past
+        // that is not one of ours.
+        let bytes = crate::update_check::read_capped(response, 8 * 1024 * 1024).await?;
+        Ok(Some((bytes, tag)))
+    })
+    .await;
+    match fetched {
+        Err(_) => RosterFetch::Failed,
+        Ok(None) => RosterFetch::Unchanged,
+        Ok(Some((bytes, tag))) => match crate::supporters::Roster::parse(&bytes) {
+            Some(roster) => RosterFetch::Fresh(roster, tag),
+            None => RosterFetch::Failed,
+        },
     }
 }
 
@@ -2503,10 +2603,26 @@ fn keep_on_top_while_ours(app: &tauri::AppHandle, label: &str, focused: bool) {
 /// raised without it never does, so it floated over the app clicked next.
 /// Watched until another app takes the front (unpinned then), the window
 /// takes focus (its own handler from then), it closes, or 30 minutes pass.
+/// One watcher per window: each click on a player while Details was open
+/// started another, each living its 30 minutes behind a game in front.
 fn unpin_when_left(app: &tauri::AppHandle, label: &str) {
+    static WATCHED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+    /// The window's watch, ended however the watcher returns.
+    struct Watch(String);
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            WATCHED.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        }
+    }
+    if !WATCHED.lock().unwrap_or_else(|e| e.into_inner()).insert(label.to_string()) {
+        return;
+    }
+    let watch = Watch(label.to_string());
     let app = app.clone();
     let label = label.to_string();
     std::thread::spawn(move || {
+        let _watch = watch;
         let mut ours = platform::window::front_is_ours_or_game();
         for _ in 0..(30 * 60 * 4) {
             std::thread::sleep(std::time::Duration::from_millis(250));
@@ -3688,6 +3804,13 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        // Every window but the meter itself asks its browser to keep its
+        // memory low: they draw a widget, a pin or the plugins' pages.
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished && webview.label() != "main" {
+                platform::window::lean_memory(webview);
+            }
+        })
         .append_invoke_initialization_script(format!(
             "window.__A2_WINDOW_STARTUP__ = {{loadsHidden:{},reusesSettings:{}}};",
             platform::window_startup::loads_hidden(),
@@ -3744,6 +3867,18 @@ pub fn run() {
                 && window.label().starts_with("details-")
             {
                 save_window_geometry(window.app_handle(), window.label(), FIGHT_WINDOW_KEY);
+            }
+            // The layout editor: a piece let go snaps into place.
+            if let tauri::WindowEvent::Moved(_) = event {
+                crate::layout::note_moved(window.app_handle(), window.label());
+            }
+            // The layout bar closed some other way (Alt+F4): editing ends,
+            // the new places kept.
+            if let tauri::WindowEvent::Destroyed = event
+                && window.label() == crate::layout::BAR_LABEL
+            {
+                tracing::debug!("Layout: its bar closed");
+                crate::layout::stop(window.app_handle(), true);
             }
             // The flight power pin opens where it was left.
             if let tauri::WindowEvent::Moved(at) = event
@@ -3961,6 +4096,8 @@ pub fn run() {
             if settings.get("dpsMeter.saveRawPackets").as_deref() == Some("true") {
                 logging::logger::set_packet_log_enabled(true, &app_data_dir);
             }
+            // The game on another PC, its traffic mirrored here (#84).
+            crate::capture::pcap_capturer::set_mirrored(settings.get("dpsMeter.mirroredCapture").as_deref() == Some("true"));
             // A capture device the player picked by hand (Settings, Auto-detect
             // off) is kept across restarts: it was held in memory only, so a
             // VPN adapter chosen over auto-detection was lost (#39).
@@ -4271,6 +4408,14 @@ pub fn run() {
                     tick_count += 1;
 
                     if let Some(state) = handle.try_state::<AppState>() {
+                        // Downloads from cdn.a2tools.app failing even after
+                        // their tries (crate::cdn): once a run, the meter shows
+                        // what usually fixes it.
+                        #[cfg(feature = "online")]
+                        if crate::cdn::hint_due() {
+                            tracing::info!("CDN: downloads keep failing; showing the connection hint");
+                            let _ = handle.emit("cdn-unreachable", ());
+                        }
                         // The ping changes about every 10 s; sent when it does,
                         // and every 2 s for a window opened since.
                         if let Some(ping) = state.ping_tracker.current_ping_ms() {
@@ -4519,6 +4664,17 @@ pub fn run() {
                 }
             });
 
+            // Fights refused for having no boss, sent once more with the boss
+            // this meter saw, once the start has settled.
+            #[cfg(feature = "online")]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(90)).await;
+                    claim_sweep(handle).await;
+                });
+            }
+
             // One blocking history job at a time; disk/JSON work never runs
             // on Tokio's cooperative workers. The next tick waits for completion.
             let handle_save = app.handle().clone();
@@ -4555,6 +4711,10 @@ pub fn run() {
                     }
                 }
             });
+
+            // Each server's Abyss and Spacetime Rift opponents (a2tools.app).
+            #[cfg(feature = "online")]
+            crate::pairings::spawn(app.state::<AppState>().http.clone());
 
             // Supporter roster: fetched, never queried. See `crate::supporters`
             // — asking the server "is this player a supporter?" would hand it a
@@ -4663,6 +4823,7 @@ pub fn run() {
             take_settings_section,
             crate::plugins::dock::dock_hello,
             crate::plugins::dock::dock_close,
+            crate::plugins::dock::dock_toggle,
             crate::plugins::dock::dock_fold,
             crate::plugins::dock::plugin_set_docked,
             crate::plugins::set_plugin_theme,
@@ -4676,6 +4837,11 @@ pub fn run() {
             crate::plugins::widgets::plugin_widget_drag,
             crate::fp_pin::fp_pin_show,
             crate::fp_pin::fp_pin_drag,
+            crate::layout::layout_edit_start,
+            crate::layout::layout_edit_stop,
+            crate::layout::layout_options,
+            crate::layout::layout_set_options,
+            crate::layout::layout_bar_drag,
             crate::plugins::boss_live::plugin_boss_follow,
             crate::plugins::fps::plugin_fps_watch,
             set_run_as_admin,

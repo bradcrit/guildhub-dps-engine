@@ -566,7 +566,7 @@ html:not(.detailsWindow):not(.historyWindow):not(.settingsWindow) .meter {
 }
 .header .headerBtns .headerBtn svg { width: 15px; height: 15px; }
 .header .headerBtns .headerBtn:hover { color: #fff; }
-.header .headerBtns.hasSuspendBtn { gap: 6px; }
+.header .headerBtns.hasSuspendBtn, .header .headerBtns.hasDockBtn { gap: 6px; }
 .header .headerBtns .suspendBtn { color: rgba(255, 255, 255, 0.55); }
 .header .headerBtns .suspendBtn.isSuspended { color: #ff6b6b; }
 /* An update waiting (meter or plugins): green, until clicked. */
@@ -3604,7 +3604,9 @@ body.noDeaths .list .item .deathCount { display: none !important; }
   font-variant-numeric: tabular-nums;
   font-size: 12px;
   line-height: 1;
-  pointer-events: none;
+  /* Takes the pointer for its jitter tooltip (#164); a press on it still
+     drags the meter. */
+  pointer-events: auto;
   white-space: nowrap;
   width: auto;
   flex: 0 0 auto;
@@ -5319,7 +5321,23 @@ body.noDeaths .list .item .deathCount { display: none !important; }
 .sharingNotice .sharingKeep { background: #8b5cf6; }
 .sharingPrompt .sharingContinue:hover,
 .sharingNotice .sharingKeep:hover { background: #7c4ddb; }
-.sharingNotice .discordPromoCard { width: min(420px, 95vw); }
+/* The layout being edited (layout.rs): the meter outlined, as every other
+   piece is. */
+body.layoutEditing .meter {
+  outline: 2px dashed rgba(62, 232, 255, 0.9);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.sharingNotice .discordPromoCard,
+.netNotice .discordPromoCard { width: min(420px, 95vw); }
+.netNotice .accountPromoActions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.netNotice .accountPromoLater {
+  border: none; border-radius: 8px; padding: 8px 14px; font-size: 14px; font-weight: 600;
+  color: rgba(255, 255, 255, 0.85); background: rgba(255, 255, 255, 0.12); cursor: pointer;
+}
+.netNotice .accountPromoLater:hover { background: rgba(255, 255, 255, 0.2); }
+.netNotice .discordPromoDone { padding: 8px 18px; font-size: 14px; }
 .sharingNotice .accountPromoActions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .sharingNotice .accountPromoLater {
   border: none; border-radius: 8px; padding: 8px 14px; font-size: 14px; font-weight: 600;

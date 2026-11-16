@@ -1,6 +1,7 @@
 {
   "header": {
     "title": "A2Tools DPS Meter",
+"pluginDock": "Dock des plugins",
     "display": {
       "dps": "DPS",
       "total": "DGT",
@@ -342,6 +343,7 @@
     "title": "Paramètres",
     "lockedPort": "Connexion détectée",
     "resetDetection": "Détecter à nouveau",
+    "mirroredCapture": "Le jeu tourne sur un autre PC (capture en miroir)",
     "characterName": "Ton personnage",
     "characterNamePlaceholder": "Saisissez le nom de votre personnage",
     "pinMeToTop": "Garder ma ligne en haut",
@@ -399,6 +401,10 @@
     },
     "showSuspendBtn": "Afficher le bouton de pause de capture",
     "showLockBtn": "Afficher le bouton de verrouillage (clic au travers)",
+    "editLayout": "Disposer le compteur, les épingles et les widgets",
+    "editLayoutBtn": "Modifier la disposition",
+    "editLayoutUnsupported": "Ce bureau place lui-même les fenêtres du compteur : la disposition ne peut pas être modifiée ici.",
+    "showDockBtn": "Afficher le bouton du dock des plugins",
     "playerLimit": {
       "label": "Joueurs affichés max."
     },
@@ -576,6 +582,7 @@
       "pressKeys": "Appuyez sur des touches...",
       "tooManyKeys": "3 touches au maximum",
       "plugins": "Afficher/masquer les fenêtres des plugins",
+      "layout": "Modifier la disposition",
       "hidePins": "Masquer aussi les épingles des plugins",
       "notSet": "Non défini",
       "restoreDefaults": "Rétablir par défaut",
@@ -650,6 +657,7 @@
       "characterName": "Ton nom et ton ID en jeu, pour que le compteur sache quelle ligne est la tienne. Il est en général trouvé tout seul.",
       "device": "La connexion réseau dont le compteur lit le trafic du jeu. La détection automatique la trouve ; avec un VPN, choisis-la à la main.",
       "lockedPort": "La carte et le port sur lesquels le jeu a été trouvé.",
+      "mirroredCapture": "Pour un PC qui lit une copie en miroir du trafic du jeu pendant qu'AION2 tourne sur un autre PC : toutes les cartes réseau sont lues, même sans adresse, en mode promiscuité, et aucune fenêtre AION2 n'est nécessaire ici. Redémarre le compteur pour l'appliquer.",
       "defaultMeterMode": "Le mode de cible à l'ouverture : Boss, Cible, Entraînement ou Tous.",
       "playerLimit": "Combien de lignes de joueurs le compteur affiche ; les autres sont masquées.",
       "pinMeToTop": "Ta ligne reste en premier, quels que soient tes dégâts.",
@@ -660,6 +668,8 @@
       "roundDps": "13 412 s'affiche 13k.",
       "showSuspendBtn": "Un bouton sur le compteur qui arrête la lecture du trafic du jeu jusqu'à ce que tu appuies à nouveau.",
       "showLockBtn": "Un bouton qui fait ignorer la souris au compteur, pour que les clics passent au jeu.",
+      "editLayout": "Déverrouille d'un coup le compteur, l'épingle FP et tous les widgets de plugins pour les faire glisser en place. Terminé garde les nouvelles places ; Annuler les remet.",
+      "showDockBtn": "Un bouton sur le meter qui ouvre et ferme le dock des plugins.",
       "windowOpacity": "La transparence du fond du compteur. Les barres et le texte ne changent pas.",
       "titleOpacity": "La transparence de la barre de titre du meter, à part du fond en dessous. Tant que vous ne le bougez pas, il suit le fond.",
       "meterOpacity": "L'opacité des barres de dégâts colorées.",
@@ -757,8 +767,9 @@
       "permFps": "Afficher les FPS du jeu (sous Windows, le compteur demande à s'exécuter en tant qu'administrateur pour cela)",
       "permDeathRecap": "Après qu'un joueur vous a tué : qui c'était et les dégâts qu'il vous a infligés",
       "permLootRolls": "Voir le butin aux dés : l'objet, qui a obtenu quel score et qui l'a remporté",
+      "permLoot": "Voir votre butin : les objets ramassés ou reçus, et ce que vous récoltez",
       "permBlackMarket": "Voir le stock du Marchand du Nuage noir quand vous ouvrez la boutique : les objets et leurs prix",
-      "permKda": "Compter vos éliminations, assistances et morts contre des joueurs (sans noms)",
+      "permKda": "Compter tes éliminations, assistances et morts contre des joueurs, avec le nom des joueurs que tu élimines ou aides à éliminer",
       "permStats": "Voir les statistiques de votre personnage, comme la réduction du temps de recharge",
       "permScreenshot": "Faire des captures de sa propre fenêtre, dans le presse-papiers et votre dossier de captures",
       "testHint": "Des versions précoces que tout le monde peut essayer, signées comme les autres. Elles peuvent changer ou avoir des défauts : dis-nous ce que tu trouves.",
@@ -939,6 +950,7 @@
     "showControls": "Afficher les commandes",
     "popOut": "Ouvrir dans sa propre fenêtre",
     "pluginSettings": "Réglages des plugins",
+    "editLayout": "Modifier la disposition",
     "hide": "Masquer (le plugin continue de tourner)",
     "close": "Masquer le dock (les plugins continuent de tourner)",
     "hideMeter": "Masquer le compteur DPS",
@@ -962,6 +974,21 @@
     "never": "Le nom de votre PC et le nom complet de votre personnage ne sont jamais envoyés.",
     "policy": "Politique de confidentialité",
     "continue": "Continuer"
+  },
+  "layout": {
+    "title": "Modifier la disposition",
+    "hint": "Fais glisser chaque élément en place. Lâché près d'un bord, il s'y aimante.",
+    "snap": "Aimanter",
+    "gridOff": "Grille : non",
+    "gridOn": "Grille : {px} px",
+    "cancel": "Annuler",
+    "done": "Terminé"
+  },
+  "netNotice": {
+    "title": "Impossible de joindre les serveurs d'A2 Tools",
+    "text": "Les plugins, mises à jour et minuteurs de boss n'ont pas pu être téléchargés, même après de nouveaux essais. C'est généralement la connexion internet : l'application gratuite 1.1.1.1 de Cloudflare règle le problème pour la plupart des joueurs.",
+    "ok": "OK",
+    "help": "Comment corriger"
   },
   "sharingNotice": {
     "title": "Vos combats aident à construire les classements",

@@ -323,8 +323,9 @@ impl StreamProcessor {
             tracing::info!("server move: the game goes to {ip}:{port}");
             crate::capture::combat_port_detector::announce_port(port);
         }
-        if let Some(id) = login_record_entity(packet) {
+        if let Some((dbid, id)) = login_record(packet) {
             self.data_storage.note_login_record(id);
+            self.data_storage.note_local_dbid(dbid);
         }
         self.parse_death_packet(packet);
         self.parse_zone_change_packet(packet);
@@ -340,6 +341,17 @@ impl StreamProcessor {
         // The objects in range (the Hidden Cube hint).
         if let Some(record) = crate::capture::objects::parse(packet) {
             self.data_storage.note_object(record);
+        }
+        if let Some(run) = dungeon_state(packet) {
+            self.data_storage.note_dungeon_state(run);
+        }
+        // Timed events' openings, logged to learn their schedule.
+        if let Some(line) = timed_event(packet) {
+            tracing::info!("Timed event: {line}");
+        }
+        // The server yours is matched against for PvP (Spacetime Rift).
+        if let Some(matchup) = crate::capture::matchup::parse(packet) {
+            crate::capture::matchup::note(matchup);
         }
         // The field bosses on a map the player opened (boss timers).
         if let Some(map) = crate::capture::boss_map::parse(packet, crate::clock::now_ms()) {
@@ -383,6 +395,16 @@ impl StreamProcessor {
         // Dice Roll loot: an item rolled for, each roll, and who won it.
         if let Some(roll) = crate::capture::loot_rolls::parse(packet) {
             self.data_storage.note_loot_roll(roll);
+        }
+        // Items gained (pickups, rewards), gathers and drops, for drop rates.
+        if let Some(entries) = crate::capture::loot::item_entries(packet) {
+            self.data_storage.note_items(&entries);
+        } else if let Some(gather) = crate::capture::loot::gather(packet) {
+            self.data_storage.note_gather(gather);
+        } else if let Some(drops) = crate::capture::loot::drops(packet) {
+            self.data_storage.note_drops(&drops);
+        } else if let Some(cards) = crate::capture::reward_cards::parse(packet) {
+            self.data_storage.note_reward_cards(cards);
         }
         // The Supply Requests boards (at login), for Profiteer.
         if let Some(boards) = crate::capture::supply_requests::parse(packet) {
@@ -739,7 +761,7 @@ impl StreamProcessor {
                 if (1..=1_000_000_000).contains(&limit) && points <= limit {
                     let now = self.override_timestamp.unwrap_or_else(crate::clock::now_ms);
                     self.data_storage.set_abyss_points(points, limit, now);
-                    self.data_storage.note_abyss_points_total(points, now);
+                    self.data_storage.note_abyss_points_total(points, limit, now);
                 }
             }
             _ => {}
@@ -1149,7 +1171,7 @@ impl StreamProcessor {
             }
             // Another player's death, for your kills and assists.
             let at = self.override_timestamp.unwrap_or_else(crate::clock::now_ms);
-            self.data_storage.note_player_killed(summon_id, owner_id, at);
+            self.data_storage.note_player_killed(summon_id, owner_id, r.server_id, at);
             if self.data_storage.is_confirmed_summon(summon_id) {
                 self.data_storage.append_summon(owner_id, summon_id);
             }
@@ -2659,9 +2681,11 @@ pub fn spawn_stagger_gauge(packet: &[u8]) -> Option<(u32, u32)> {
 /// <len> 16 36 <u16> <n u8> <IP, n ASCII bytes> <port u16> <8 bytes>
 /// ```
 ///
-/// Sent once as you entered the Shugo Festival (2026-11-12, Global):
-/// `16 36 ef10 0e "193.202.112.81" 1034 304c45effdbb1850`, port 13328, the
-/// game's connection to 54141 closing right after.
+/// Sent as you enter and leave the Shugo Festival (2026-11-12, Global):
+/// `16 36 ef10 0e "193.202.112.81" 1034 304c45effdbb1850`, the game's
+/// connection closing right after. The u16 after the address was 13328 each
+/// time, yet the new connection was on port 54141 as before: what it is, is
+/// not known.
 #[cfg(any(feature = "desktop", test))]
 fn server_move(packet: &[u8]) -> Option<(String, u16)> {
     let len = read_varint(packet, 0);
@@ -2677,6 +2701,76 @@ fn server_move(packet: &[u8]) -> Option<(String, u16)> {
     let p = packet.get(at + 5 + n..at + 7 + n)?;
     let port = u16::from_le_bytes([p[0], p[1]]);
     (port != 0).then(|| (String::from_utf8_lossy(ip).into_owned(), port))
+}
+
+/// The game's word on a dungeon run (or another timed content):
+///
+/// ```text
+/// <len> 00 61 <content id u32> <state u8> <time u64 ms> <deadline u64 ms>
+/// ```
+///
+/// From captures (2026-10-02 to -11-12, Global): state 1 entered (time =
+/// entry, no deadline); 2 running (time = the run's start, deadline = start +
+/// its limit: 60 min in 600002, 600011 and 600071, 15 in 400002; repeated
+/// mid-run unchanged); 3 cleared (time = the clear, deadline = the exit
+/// window's end, 10 min on); 4 the exit countdown, after field contents'
+/// state 3. Entering again starts with state 1. Same layout in 2.0.11 TW's
+/// Shugo Festival (500043: 1, 2, 3).
+fn dungeon_state(packet: &[u8]) -> Option<crate::combat::data_storage::DungeonRun> {
+    let len = read_varint(packet, 0);
+    let at = usize::try_from(len.length).ok().filter(|&n| n > 0)?;
+    if packet.get(at..at + 2)? != [0x00, 0x61] {
+        return None;
+    }
+    let b = packet.get(at + 2..at + 23)?;
+    let content = u32::from_le_bytes(b[0..4].try_into().ok()?);
+    let state = b[4];
+    // Unix ms as the game sends them; in a slice, ms from the fight's start
+    // (evidence_slice `run_times_relative`).
+    let time = i64::from_le_bytes(b[5..13].try_into().ok()?);
+    let deadline = i64::from_le_bytes(b[13..21].try_into().ok()?);
+    (content > 0 && (1..=9).contains(&state) && time != 0)
+        .then_some(crate::combat::data_storage::DungeonRun { content, state, time, deadline })
+}
+
+/// The game's timed-event schedule, as a log line:
+///
+/// ```text
+/// <len> 01 60 <kind u8> <event varint> <state u8> <start u64 ms> [<from u64 ms> <until u64 ms>]
+/// ```
+///
+/// Seen 2026-11-13 (Global, Elyos): kind 3 state 1 as entry opens (from and
+/// until the 3-minute entry window), state 2 as it runs (its length); kind 0
+/// with one time, after the run. Event ids: first digit the side (1 Elyos,
+/// 2 Asmodian), second the event (1 the Shugo Festival at :00, its nine
+/// venues 01-09; 2 the Dimensional Invasion at :30), then which. Neither runs
+/// every hour (invasions at 19:30, 20:30 and 23:30 that evening, not 17:30,
+/// 18:30, 21:30 or 22:30), so each is logged to learn when they do.
+fn timed_event(packet: &[u8]) -> Option<String> {
+    let len = read_varint(packet, 0);
+    let at = usize::try_from(len.length).ok().filter(|&n| n > 0)?;
+    if packet.get(at..at + 2)? != [0x01, 0x60] {
+        return None;
+    }
+    let kind = *packet.get(at + 2)?;
+    let event = read_varint(packet, at + 3);
+    let after = at + 3 + usize::try_from(event.length).ok().filter(|&n| n > 0)?;
+    let state = *packet.get(after)?;
+    let times: Vec<i64> = (0..3)
+        .filter_map(|i| packet.get(after + 1 + i * 8..after + 9 + i * 8))
+        .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    let name = match (event.value / 10_000) % 10 {
+        1 => "Shugo Festival",
+        2 => "Dimensional Invasion",
+        _ => "event",
+    };
+    let side = if event.value / 100_000 == 2 { "Asmodian" } else { "Elyos" };
+    let utc = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms).map_or_else(|| ms.to_string(), |t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+    };
+    let times: Vec<String> = times.into_iter().map(utc).collect();
+    Some(format!("{name} ({side}) {} kind {kind} state {state}: {}", event.value, times.join(" / ")))
 }
 
 /// The entity a login record names as you.
@@ -2695,7 +2789,7 @@ fn server_move(packet: &[u8]) -> Option<(String, u16)> {
 /// The one seen (2026-11-12, Global, 1,730 bytes) ended 4 bytes after the
 /// entity, which the self record 8 s later named as you. A result other than
 /// 0, or a layout that does not end within 8 bytes of the record, names no one.
-fn login_record_entity(packet: &[u8]) -> Option<i32> {
+fn login_record(packet: &[u8]) -> Option<(u64, i32)> {
     let len = read_varint(packet, 0);
     if len.length <= 0 {
         return None;
@@ -2728,7 +2822,8 @@ fn login_record_entity(packet: &[u8]) -> Option<i32> {
     }
     let id = read_varint(packet, at);
     let end = at + id.length.max(0) as usize;
-    (id.length > 0 && end <= packet.len() && packet.len() - end <= 8).then_some(id.value)
+    let dbid = u64::from_le_bytes(packet.get(len.length as usize + 2..len.length as usize + 10)?.try_into().ok()?);
+    (id.length > 0 && end <= packet.len() && packet.len() - end <= 8).then_some((dbid, id.value))
 }
 
 pub fn varint_ending_at(
@@ -5522,8 +5617,8 @@ mod tests {
         p.parse_perfect_packet(&hex("13abff6805020000000000a025260000000000"));
         p.parse_perfect_packet(&hex("13abfff908020000000000a025260000000000"));
         let (_, events) = storage.kda_since(0).unwrap();
-        let told: Vec<_> = events.iter().map(|e| (e.amount, e.abyss)).collect();
-        assert_eq!(told, vec![(None, Some(true)), (Some(913), None)]);
+        let told: Vec<_> = events.iter().map(|e| (e.amount, e.abyss, e.week)).collect();
+        assert_eq!(told, vec![(None, Some(true), None), (None, None, Some(132_456)), (Some(913), None, Some(133_369))]);
     }
 
     /// Kinah gained today at a login, then a pickup; the week's Abyss Points
@@ -5956,7 +6051,7 @@ mod tests {
     /// A login record shaped like the one of 2026-11-12 (Global): 1,347 bytes
     /// of option data, no skill customizing, char key 4385, 350 bytes of
     /// customizing data, then entity 15532 (`ac 79`) and 4 bytes more.
-    fn login_record(result: [u8; 2], skills: u8, tail: usize) -> Vec<u8> {
+    fn login_bytes(result: [u8; 2], skills: u8, tail: usize) -> Vec<u8> {
         let mut body = vec![0x53, 0x20];
         body.extend(367043369630931093i64.to_le_bytes());
         body.extend([0; 8]);
@@ -5976,6 +6071,32 @@ mod tests {
         packet
     }
 
+    /// A Dimensional Invasion opening (2026-11-13 20:30 UTC+8): its 3-minute
+    /// entry window.
+    #[test]
+    fn a_timed_event_reads_as_a_log_line() {
+        let line = timed_event(&hex("20016003a5aa070131e2e2d4a101000031e2e2d4a101000051a1e5d4a1010000")).unwrap();
+        assert!(line.starts_with("Dimensional Invasion (Elyos) 120101 kind 3 state 1:"), "{line}");
+        assert!(line.contains("2026-11-13 12:30:01 UTC") && line.ends_with("2026-11-13 12:33:01 UTC"), "{line}");
+        assert_eq!(timed_event(&hex("0d0160003d9f06008004d8d4a1010000")).map(|l| l.starts_with("Shugo Festival (Elyos) 110013")), Some(false));
+    }
+
+    /// Dungeon states of a 600071 run (2026-10-09) and the Shugo Festival's
+    /// (2026-11-12): entered, running with its 60-minute limit, cleared.
+    #[test]
+    fn dungeon_states_read_as_the_game_sends_them() {
+        let run = |s: &str| dungeon_state(&hex(s)).map(|r| (r.content, r.state, r.time, r.deadline));
+        assert_eq!(run("1700610728090001e1afea21a10100000000000000000000"), Some((600_071, 1, 1_791_570_391_009, 0)));
+        let (_, state, start, deadline) = run("1700610728090002d105eb21a101000051f42122a1010000").unwrap();
+        assert_eq!((state, deadline - start), (2, 60 * 60 * 1000), "a 60-minute run");
+        let (_, state, cleared, _) = run("1700610728090003a0e3f121a1010000600bfb21a1010000").unwrap();
+        assert_eq!((state, cleared - start), (3, 449_999), "cleared in 7.5 minutes");
+        assert_eq!(run("170061c32a02000246c2f41ea10100000000000000000000"), Some((142_019, 2, 1_791_520_719_430, 0)));
+        assert_eq!(run("1700614ba10700037acd12d0a1010000a26d13d0a1010000").map(|r| (r.0, r.1)), Some((500_043, 3)));
+        assert_eq!(run("1700614ba1070003"), None, "cut short");
+        assert_eq!(run("170062c32a02000246c2f41ea10100000000000000000000"), None, "another opcode");
+    }
+
     /// The move to the Shugo Festival's server (2026-11-12, Global).
     #[test]
     fn a_server_move_names_the_new_server() {
@@ -5987,18 +6108,19 @@ mod tests {
 
     #[test]
     fn a_login_record_names_you() {
-        assert_eq!(login_record_entity(&login_record([0, 0], 0, 4)), Some(15532));
-        assert_eq!(login_record_entity(&login_record([0, 0], 2, 0)), Some(15532), "skill entries are skipped");
-        assert_eq!(login_record_entity(&login_record([1, 0], 0, 4)), None, "a failed login");
-        assert_eq!(login_record_entity(&login_record([0, 0], 0, 40)), None, "not the layout");
-        let mut cut = login_record([0, 0], 0, 4);
+        let id = |p: &[u8]| login_record(p).map(|(_, id)| id);
+        assert_eq!(login_record(&login_bytes([0, 0], 0, 4)), Some((367_043_369_630_931_093, 15532)));
+        assert_eq!(id(&login_bytes([0, 0], 2, 0)), Some(15532), "skill entries are skipped");
+        assert_eq!(id(&login_bytes([1, 0], 0, 4)), None, "a failed login");
+        assert_eq!(id(&login_bytes([0, 0], 0, 40)), None, "not the layout");
+        let mut cut = login_bytes([0, 0], 0, 4);
         cut.truncate(400);
-        assert_eq!(login_record_entity(&cut), None);
+        assert_eq!(login_record(&cut), None);
 
         let storage = Arc::new(DataStorage::new());
         let mut p = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
         storage.set_local_identity_from_game(4451, Some("Naicha".into()));
-        p.parse_perfect_packet(&login_record([0, 0], 0, 4));
+        p.parse_perfect_packet(&login_bytes([0, 0], 0, 4));
         assert_eq!(storage.local_player_id(), Some(15532));
         assert_eq!(storage.local_character_name(), None, "the self record names this one");
     }

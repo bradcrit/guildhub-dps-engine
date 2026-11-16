@@ -1,6 +1,7 @@
 {
   "header": {
     "title": "A2Tools DPS Meter",
+"pluginDock": "插件停靠栏",
     "display": {
       "dps": "DPS",
       "total": "DMG",
@@ -342,6 +343,7 @@
     "title": "设置",
     "lockedPort": "检测到的连接",
     "resetDetection": "重新检测",
+    "mirroredCapture": "游戏在另一台电脑上运行（镜像捕获）",
     "characterName": "我的角色",
     "characterNamePlaceholder": "输入你的角色名称",
     "pinMeToTop": "将我的行置顶",
@@ -399,6 +401,10 @@
     },
     "showSuspendBtn": "显示暂停捕获按钮",
     "showLockBtn": "显示点击穿透锁定按钮",
+    "editLayout": "排列计量器、图钉与小部件",
+    "editLayoutBtn": "编辑布局",
+    "editLayoutUnsupported": "此桌面会自行决定计量器窗口的位置，因此无法在这里编辑布局。",
+    "showDockBtn": "显示插件停靠栏按钮",
     "playerLimit": {
       "label": "最大显示人数"
     },
@@ -576,6 +582,7 @@
       "pressKeys": "请按下按键...",
       "tooManyKeys": "最多 3 个键",
       "plugins": "显示/隐藏插件窗口",
+      "layout": "编辑布局",
       "hidePins": "同时隐藏插件图钉",
       "notSet": "未设置",
       "restoreDefaults": "恢复默认",
@@ -650,6 +657,7 @@
       "characterName": "你的游戏角色名和 ID，让计量器知道哪一行是你。通常会自动识别。",
       "device": "计量器读取游戏流量的网络连接。自动检测会找到它；使用 VPN 时请手动选择。",
       "lockedPort": "发现游戏所用的适配器和端口。",
+      "mirroredCapture": "适用于 AION2 在另一台电脑运行、而这台电脑读取游戏流量镜像副本的情况：以混杂模式读取所有网卡（包括没有地址的），且这台电脑不需要 AION2 窗口。重启计量器后生效。",
       "defaultMeterMode": "计量器启动时的目标模式：首领、目标、训练或全部。",
       "playerLimit": "计量器显示的玩家行数，其余的不显示。",
       "pinMeToTop": "无论伤害多少，你的行都排在第一。",
@@ -660,6 +668,8 @@
       "roundDps": "13,412 显示为 13k。",
       "showSuspendBtn": "在计量器上显示一个按钮，按下后停止读取游戏流量，再按一次恢复。",
       "showLockBtn": "让计量器忽略鼠标、点击直接作用于游戏的按钮。",
+      "editLayout": "一次解锁计量器、FP 图钉与所有插件小部件，拖动到想要的位置。完成会保留新位置；取消会恢复原位。",
+      "showDockBtn": "在计量器上放一个打开和关闭插件停靠栏的按钮。",
       "windowOpacity": "计量器背景的透明程度。条形和文字不受影响。",
       "titleOpacity": "统计窗口标题栏的透明程度，与下方背景分开设置。移动它之前，它跟随背景不透明度。",
       "meterOpacity": "彩色伤害条的不透明程度。",
@@ -757,8 +767,9 @@
       "permFps": "显示游戏帧率（在 Windows 上，计量器会为此请求以管理员身份运行）",
       "permDeathRecap": "被玩家击杀后：对方是谁，以及对你造成的伤害",
       "permLootRolls": "查看掷骰分配的战利品：物品、谁掷出多少点，以及谁获得了它",
+      "permLoot": "查看你的战利品:捡到或获得的物品,以及采集到的东西",
       "permBlackMarket": "打开商店时查看黑云商人的货品：物品及其价格",
-      "permKda": "统计你对玩家的击杀、助攻和死亡次数（不含名称）",
+      "permKda": "统计你对玩家的击杀、助攻和死亡，并给出你击杀或协助击杀的玩家名称",
       "permStats": "查看你角色的属性，例如冷却缩减",
       "permScreenshot": "截取自身窗口的截图，到剪贴板和你的截图文件夹",
       "testHint": "任何人都可以试用的早期版本，和其他插件一样经过签名。它们可能会变化或还不完善：发现问题请告诉我们。",
@@ -939,6 +950,7 @@
     "showControls": "显示控件",
     "popOut": "在单独窗口中打开",
     "pluginSettings": "插件设置",
+    "editLayout": "编辑布局",
     "hide": "隐藏（插件继续运行）",
     "close": "隐藏停靠栏（插件继续运行）",
     "hideMeter": "隐藏 DPS 计量器",
@@ -962,6 +974,21 @@
     "never": "绝不会发送电脑名称和角色的完整名字。",
     "policy": "隐私政策",
     "continue": "继续"
+  },
+  "layout": {
+    "title": "编辑布局",
+    "hint": "拖动各部分到想要的位置。靠近边缘放下时会自动对齐。",
+    "snap": "对齐",
+    "gridOff": "网格：关",
+    "gridOn": "网格：{px} px",
+    "cancel": "取消",
+    "done": "完成"
+  },
+  "netNotice": {
+    "title": "无法连接到 A2 Tools 服务器",
+    "text": "即使重试，仍无法下载插件、更新和首领计时。这通常是网络连接的问题：Cloudflare 的免费 1.1.1.1 应用能帮大多数玩家解决。",
+    "ok": "确定",
+    "help": "解决方法"
   },
   "sharingNotice": {
     "title": "你的战斗正在帮忙建立排行榜",

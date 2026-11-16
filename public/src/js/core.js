@@ -81,6 +81,7 @@ const REMOTE_APPLIED_SETTING_CONTROLS = {
   "dpsMeter.barTextureOffset": ".textureOffsetCheckbox",
   "dpsMeter.showSuspendBtn": ".showSuspendBtnCheckbox",
   "dpsMeter.showLockBtn": ".showLockBtnCheckbox",
+  "dpsMeter.showDockBtn": ".showDockBtnCheckbox",
   // Set from the main window by the account offer.
   "dpsMeter.autoUpload": ".autoUploadCheckbox",
 };
@@ -187,6 +188,7 @@ class DpsApp {
       detailsMonitor: "dpsMeter.detailsMonitor",
       showSuspendBtn: "dpsMeter.showSuspendBtn",
       showLockBtn: "dpsMeter.showLockBtn",
+      showDockBtn: "dpsMeter.showDockBtn",
       overlayLocked: "dpsMeter.overlayLocked",
     };
 
@@ -416,6 +418,7 @@ class DpsApp {
     this.suspendBtn = document.querySelector(".suspendBtn");
     this.updatesBtn = document.querySelector(".updatesBtn");
     this.lockBtn = document.querySelector(".lockBtn");
+    this.dockBtn = document.querySelector(".dockBtn");
     this.headerBtns = document.querySelector(".headerBtns");
     this.targetModeBtn = document.querySelector(".footerBtns .targetModeBtn");
     this.collapseBtn = document.querySelector(".collapseBtn");
@@ -2716,6 +2719,10 @@ class DpsApp {
     this.lockBtn?.addEventListener("click", () => {
       this._setOverlayLocked(!this._overlayLocked);
     });
+    // The plugin dock, opened or closed as by its own ×.
+    this.dockBtn?.addEventListener("click", () => {
+      window.__TAURI__?.core?.invoke?.("dock_toggle").catch((e) => console.warn("dock_toggle", e));
+    });
     this.bindTargetMenu();
     this.bindMetricMenu();
     this.bindFooterMenu();
@@ -3443,6 +3450,15 @@ class DpsApp {
       });
     }
     // And while not in a party (the same loop).
+    // The game on another PC, its traffic mirrored to this one (#84): read
+    // by the capture at start, so it applies after a restart.
+    const mirroredCaptureCheckbox = document.querySelector(".mirroredCaptureCheckbox");
+    if (mirroredCaptureCheckbox) {
+      mirroredCaptureCheckbox.checked = this.safeGetSetting("dpsMeter.mirroredCapture") === "true";
+      mirroredCaptureCheckbox.addEventListener("change", (event) => {
+        this.safeSetSetting("dpsMeter.mirroredCapture", String(!!event.target?.checked));
+      });
+    }
     this.hideWhenSoloCheckbox = document.querySelector(".hideWhenSoloCheckbox");
     if (this.hideWhenSoloCheckbox) {
       this.hideWhenSoloCheckbox.checked = this.safeGetSetting(this.storageKeys.hideWhenSolo) === "true";
@@ -3465,7 +3481,20 @@ class DpsApp {
         }
       });
     }
+    // Plugin dock button setting
+    this.showDockBtnCheckbox = document.querySelector(".showDockBtnCheckbox");
+    if (this.showDockBtnCheckbox) {
+      const showDock = this.safeGetSetting(this.storageKeys.showDockBtn) === "true";
+      this.showDockBtnCheckbox.checked = showDock;
+      this._applyDockBtnVisibility(showDock);
+      this.showDockBtnCheckbox.addEventListener("change", (event) => {
+        const isChecked = !!event.target?.checked;
+        this.safeSetSetting(this.storageKeys.showDockBtn, String(isChecked));
+        this._applyDockBtnVisibility(isChecked);
+      });
+    }
     this.initOverlayLock();
+    this.initLayoutEditor();
     // Restore suspend state from backend on load
     this._captureSuspended = !!window.javaBridge?.isCaptureSuspended?.();
     this._updateSuspendBtnIcon();
@@ -5004,6 +5033,7 @@ class DpsApp {
     const toggleBtn = document.querySelector(".toggleKeybindBtn");
     const lockKeyBtn = document.querySelector(".lockKeybindBtn");
     const pluginsKeyBtn = document.querySelector(".pluginsKeybindBtn");
+    const layoutKeyBtn = document.querySelector(".layoutKeybindBtn");
     const notSet = () => this.i18n?.t?.("settings.keybind.notSet", "Not set") ?? "Not set";
 
     this.refreshKeybindLabels = () => {
@@ -5024,6 +5054,11 @@ class DpsApp {
         pluginsKeyBtn.querySelector(".keybindText").textContent = label || notSet();
         pluginsKeyBtn.classList.toggle("isUnset", !label);
       }
+      if (layoutKeyBtn) {
+        const label = window.javaBridge?.getCurrentLayoutHotKey?.() || "";
+        layoutKeyBtn.querySelector(".keybindText").textContent = label || notSet();
+        layoutKeyBtn.classList.toggle("isUnset", !label);
+      }
     };
     this.refreshKeybindLabels();
 
@@ -5034,7 +5069,7 @@ class DpsApp {
     let lastHotkeyStatus = {};
     this.applyHotkeyStatus = (status) => {
       lastHotkeyStatus = status && typeof status === "object" ? status : {};
-      const rows = [[reloadBtn, "reload"], [toggleBtn, "toggle"], [lockKeyBtn, "lock"], [pluginsKeyBtn, "plugins"]]
+      const rows = [[reloadBtn, "reload"], [toggleBtn, "toggle"], [lockKeyBtn, "lock"], [pluginsKeyBtn, "plugins"], [layoutKeyBtn, "layout"]]
         .filter(([btn]) => btn && btn.closest?.(".settingsRowKeybind")?.style?.display !== "none")
         .filter(([btn]) => !btn.classList?.contains?.("isUnset"));
       const labelOf = (btn) => (btn.querySelector?.(".keybindText")?.textContent || "").trim().toLowerCase();
@@ -5129,6 +5164,7 @@ class DpsApp {
     toggleBtn?.addEventListener("click", () => handleKeybindClick(toggleBtn, "toggle"));
     lockKeyBtn?.addEventListener("click", () => handleKeybindClick(lockKeyBtn, "lock"));
     pluginsKeyBtn?.addEventListener("click", () => handleKeybindClick(pluginsKeyBtn, "plugins"));
+    layoutKeyBtn?.addEventListener("click", () => handleKeybindClick(layoutKeyBtn, "layout"));
     document.querySelector(".keybindDesktopBtn")?.addEventListener("click", () => {
       Promise.resolve(window.javaBridge?.openDesktopShortcuts?.()).catch(() => {});
     });
@@ -5201,6 +5237,8 @@ class DpsApp {
         if (lockKeyBtn) lockKeyBtn.querySelector(".keybindText").textContent = label;
       } else if (type === "plugins") {
         window.javaBridge?.setPluginWindowsHotkey?.(mods, vk);
+      } else if (type === "layout") {
+        window.javaBridge?.setLayoutHotkey?.(mods, vk);
       }
       this.refreshKeybindLabels();
     }, true);
@@ -7766,6 +7804,45 @@ class DpsApp {
     window.lucide?.createIcons?.({ root: this.lockBtn });
   }
 
+  // ===== Layout editor (layout.rs) =====
+  // Settings -> Meter Settings -> Edit layout: the meter, the FP pin and every
+  // plugin widget unlocked at once to drag into place, with a bar for Done
+  // and Cancel. The meter is outlined meanwhile, and its click-through lock
+  // lifted, then put back as it was.
+
+  initLayoutEditor() {
+    const button = document.querySelector(".editLayoutBtn");
+    button?.addEventListener("click", () => {
+      Promise.resolve(window.javaBridge?.editLayout?.()).catch(() => {
+        const t = (key, fallback) => this.i18n?.t(key, fallback) ?? fallback;
+        button.title = t("settings.editLayoutUnsupported",
+          "This desktop places the meter's windows itself, so the layout can't be edited here.");
+        button.disabled = true;
+      });
+    });
+  }
+
+  setLayoutEditing(on) {
+    if (window.A2_VIEW !== "main") return;
+    document.body.classList.toggle("layoutEditing", on);
+    if (on) {
+      this._lockedBeforeLayout = !!this._overlayLocked;
+      if (this._lockedBeforeLayout) window.javaBridge?.setOverlayLocked?.(false);
+      this.setMetricMenuOpen?.(false);
+      this.setTargetMenuOpen?.(false);
+      this.setFooterMenuOpen?.(false);
+    } else if (this._lockedBeforeLayout) {
+      this._lockedBeforeLayout = false;
+      this._sendLockBtnRect();
+      window.javaBridge?.setOverlayLocked?.(true);
+    }
+  }
+
+  _applyDockBtnVisibility(show) {
+    if (this.dockBtn) this.dockBtn.style.display = show ? "" : "none";
+    this.headerBtns?.classList.toggle("hasDockBtn", !!show);
+  }
+
   _applySuspendBtnVisibility(show) {
     if (this.suspendBtn) {
       this.suspendBtn.style.display = show ? "" : "none";
@@ -8257,6 +8334,24 @@ class DpsApp {
       notice.setAttribute("aria-hidden", "false");
     }, 2500);
     return true;
+  }
+
+  // The meter couldn't reach cdn.a2tools.app, even after trying again
+  // (crate::cdn): what usually fixes it, with the troubleshooter's entry.
+  showNetNotice() {
+    const notice = document.querySelector("#netNotice");
+    if (!notice || notice.classList.contains("isOpen")) return;
+    const close = () => {
+      notice.classList.remove("isOpen");
+      notice.setAttribute("aria-hidden", "true");
+    };
+    notice.querySelector(".netNoticeOk")?.addEventListener("click", close, { once: true });
+    notice.querySelector(".netNoticeHelp")?.addEventListener("click", () => {
+      this.openExternalLink("https://a2tools.app/tweaks/troubleshoot#issue-a2tools-unreachable");
+      close();
+    }, { once: true });
+    notice.classList.add("isOpen");
+    notice.setAttribute("aria-hidden", "false");
   }
 
   _updateSuspendStatusMessage() {

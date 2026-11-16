@@ -42,6 +42,7 @@
       if ((event === "bossMap" || event === "bossLive" || event === "abyss") && !allowed("feed:boss-timers")) return;
       if (event === "deathRecap" && !allowed("events:death-recap")) return;
       if (event === "lootRoll" && !allowed("events:loot-rolls")) return;
+      if (event === "loot" && !allowed("events:loot")) return;
       if (event === "blackMarket" && !allowed("events:black-market")) return;
       if (event === "kda" && !allowed("events:kda")) return;
       if (event === "stats" && !allowed("events:stats")) return;
@@ -218,7 +219,16 @@
       // Its window (or dock tab) shown or hidden (meter 2.0.77 on).
       if (typeof hello.visible === "boolean") out.push(["visible", hello.visible]);
       // The ping to the game server (meter 2.0.73 on); null until it is known.
-      if ("ping" in hello) out.push(["ping", { ms: typeof hello.ping === "number" ? hello.ping : null }]);
+      // The Supply Requests boards, once the game has sent them (meter 2.0.99 on).
+      if (hello.supplyBoards) out.push(["supplyBoards", hello.supplyBoards]);
+      // The character's server's opponents, from a2tools.app (meter 2.0.99 on).
+      if (hello.pairings) out.push(["pairings", hello.pairings]);
+      // The Abyss pairing, once the game has said it (meter 2.0.99 on).
+      if (hello.abyssPairing) out.push(["abyssPairing", hello.abyssPairing]);
+      // The layout being edited as it starts (meter 2.1.0 on).
+      if (hello.layout) out.push(["layout", { editing: true }]);
+      // Its jitter too (meter 2.0.99 on).
+      if ("ping" in hello) out.push(["ping", { ms: typeof hello.ping === "number" ? hello.ping : null, jitter: typeof hello.jitter === "number" ? hello.jitter : null }]);
       return out;
     };
 
