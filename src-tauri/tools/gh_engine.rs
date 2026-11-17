@@ -108,6 +108,22 @@
 //! null: not read), `item` the game's item id (a pet's is its soul item's
 //! + 100000), `tier` the discount (0 −10 %, 1 −20 %, 2 −30 %, 3 −50 %),
 //! `price` and `original` in Kinah.
+//! The Closet (the skins collected, shared by the account's characters; read
+//! 2026-11-17 from a login, two combines and a skin bought): `closet`
+//! (`{"server","at","skins":[{"skin","copies"}],"points":[{"slot","points"}]}`,
+//! `5B 8D`) once per world entry — every skin held and how many copies, then
+//! each collection slot's points, the slots without any left out — and
+//! `closetChange` (the same, `5C 8D`) when skins are added or used up (a
+//! combine, a skin unlocked): only the skins and slots that changed, each
+//! with its new count. `skin` is the game's skin id: its first digit the
+//! kind (1 weapon, 3 and 4 armor, 5 accessory, 7 and 8 others), digits 2–5
+//! the design, the last two the slot (a weapon's 01 Greatsword … 08 Staff,
+//! armor 01 Top, 02 Legs, 03 Helm, 04 Pauldrons, 05 Gloves, 06 Shoes, 07
+//! Cloak, accessories 01 Earrings, 03 Necklace). `slot` is the Collection
+//! Effect window's: 01 Helm, 02 Pauldrons, 03 Top, 04 Legs, 05 Gloves, 06
+//! Shoes, 07 Cloak, 08–0F the weapon types (only your class's has points),
+//! 10 Earrings, 11 Necklace — the points matched the window's to the one.
+//! Both wait for the server like the pets (PET_LIST_SETTLE_MS too).
 //! `npcs` (`{"npcs":[{"npc","count"}],"target"}`) on every change and once on
 //! connecting: the living mobs in sight by NPC code, from their spawn until
 //! they die, despawn or a zone load — what the pet tracker farms nearby.
@@ -276,8 +292,19 @@ const PET_LIST_SETTLE_MS: i64 = 3_000;
 const MAX_PENDING_PETS: usize = 256;
 /// Most loot records kept until the next SELF_RATE tick passes them on.
 const MAX_PENDING_LOOT: usize = 256;
-/// The pet records, as `plugins::decoder` specs; each name's event in `pet_event`.
+/// The pet and Closet records, as `plugins::decoder` specs; each name's event
+/// in `take_pet_events`.
 const PET_DECODERS: &str = r#"[
+    { "name": "closet-list", "opcode": "5B 8D", "fields": [
+        { "name": "skins", "type": "list", "count": "varint", "fields": [
+            { "name": "skin", "type": "u32" }, { "name": "copies", "type": "u32" } ] },
+        { "name": "points", "type": "list", "count": "u8", "fields": [
+            { "name": "slot", "type": "u8" }, { "name": "points", "type": "u32" } ] } ] },
+    { "name": "closet-change", "opcode": "5C 8D", "fields": [
+        { "name": "skins", "type": "list", "count": "varint", "fields": [
+            { "name": "skin", "type": "u32" }, { "name": "copies", "type": "u32" } ] },
+        { "name": "points", "type": "list", "count": "u8", "fields": [
+            { "name": "slot", "type": "u8" }, { "name": "points", "type": "u32" } ] } ] },
     { "name": "pet-list", "opcode": "00 90", "fields": [
         { "type": "skip:4" },
         { "name": "levels", "type": "list", "count": "varint", "fields": [
@@ -874,6 +901,8 @@ impl Engine {
                     "pet-list" => "petList",
                     "pet-souls" => "petSouls",
                     "pet-level" => "petLevel",
+                    "closet-list" => "closet",
+                    "closet-change" => "closetChange",
                     _ => return None,
                 };
                 Some((event, serde_json::Value::Object(body).to_string()))
@@ -2116,13 +2145,39 @@ mod tests {
     fn the_pet_decoders_read_a_soul_pickup() {
         let specs: Vec<DecoderSpec> = serde_json::from_str(PET_DECODERS).unwrap();
         let decoders: Vec<Decoder> = specs.iter().map(|s| Decoder::compile(s).unwrap()).collect();
-        assert_eq!(decoders.len(), 3);
+        assert_eq!(decoders.len(), 5);
         let souls = decoders.iter().find(|d| d.opcode == [0x0D, 0x90]).unwrap();
         let body = [0x02, 0xF7, 0x03, 0, 0, 1, 0, 0, 0, 0x60, 0x04, 0, 0, 1, 0, 0, 0];
         assert_eq!(
             souls.decode(&body).unwrap(),
             serde_json::json!({"souls": [{"pet": 1015, "amount": 1}, {"pet": 1120, "amount": 1}]})
         );
+    }
+
+    /// The Closet's records (a capture of ours, 2026-11-17 18:51): a skin
+    /// unlocked (one Staff skin, the Staff slot's points 0 — not this
+    /// character's class), and the head and tail of a login's list (395
+    /// skins cut to two, then the ten slots with points, as the game's
+    /// Collection Effect window showed them: Helm 80, Pauldrons 78 …).
+    #[test]
+    fn the_closet_decoders_read_a_change_and_a_list() {
+        let specs: Vec<DecoderSpec> = serde_json::from_str(PET_DECODERS).unwrap();
+        let decoders: Vec<Decoder> = specs.iter().map(|s| Decoder::compile(s).unwrap()).collect();
+        let change = decoders.iter().find(|d| d.name == "closet-change").unwrap();
+        let body = [0x01, 0x0C, 0x62, 0x99, 0x00, 0x01, 0, 0, 0, 0x01, 0x0F, 0, 0, 0, 0];
+        assert_eq!(
+            change.decode(&body).unwrap(),
+            serde_json::json!({"skins": [{"skin": 10052108, "copies": 1}], "points": [{"slot": 15, "points": 0}]})
+        );
+        let list = decoders.iter().find(|d| d.name == "closet-list").unwrap();
+        let hex = "02CD9A980002000000CE9A9800030000000A015000000002\
+                   4E00000003450000000446000000055800000006680000000745000000083800000010210000001129000000\
+                   0400000000";
+        let body: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let read = list.decode(&body).unwrap();
+        assert_eq!(read["skins"], serde_json::json!([{"skin": 10001101, "copies": 2}, {"skin": 10001102, "copies": 3}]));
+        let points: Vec<(u64, u64)> = read["points"].as_array().unwrap().iter().map(|p| (p["slot"].as_u64().unwrap(), p["points"].as_u64().unwrap())).collect();
+        assert_eq!(points, [(1, 80), (2, 78), (3, 69), (4, 70), (5, 88), (6, 104), (7, 69), (8, 56), (16, 33), (17, 41)]);
     }
 
     /// The Pets tab of the Black Cloud Merchant (a capture of ours,
