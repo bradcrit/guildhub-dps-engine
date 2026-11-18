@@ -825,7 +825,7 @@ impl StreamProcessor {
         }
     }
 
-    // ===== ZONE CHANGE (23 36, 51 96 since 2026-11-11) =====
+    // ===== ZONE CHANGE (23 36, 51 96 since 2026-11-11, F8 4E since 2026-11-18) =====
 
     /// Self/world teleport packet. This fires once on entering a zone/instance
     /// (the local player is teleported in) and not during combat, so it drives a
@@ -2512,6 +2512,7 @@ impl StreamProcessor {
 /// ```text
 /// until 2026-11-10: <len> 23 36 00 <5 × 00> <x f32> <y f32> <z f32> <u32> <u16>
 /// from 2026-11-11:  <len> 51 96 <u16> <x f32> <y f32> <z f32> <u32> <6 × 00>
+/// from 2026-11-18:  <len> F8 4E <4 × 00> <u16> <x f32> <y f32> <z f32> <u32> <u16>
 /// ```
 ///
 /// The old one: entity id 0 (you), as opposed to another entity's routine
@@ -2519,7 +2520,9 @@ impl StreamProcessor {
 /// altogether; `51 96` came in its place, 26 bytes past the length, with the
 /// map load's position, 3 to 4 s after each of the 6 map loads of that
 /// morning's capture and never otherwise. The June 2026 +1 opcode shift left
-/// the old one alone.
+/// the old one alone. By 2026-11-18 `51 96` was gone too and `F8 4E` (27
+/// bytes) carried the map load's position, 2 to 5.5 s after each of the 5
+/// map loads of that morning's capture and never otherwise.
 fn is_self_teleport(packet: &[u8]) -> bool {
     let length_info = read_varint(packet, 0);
     if length_info.length <= 0 {
@@ -2529,6 +2532,9 @@ fn is_self_teleport(packet: &[u8]) -> bool {
     match packet.get(offset..offset + 3) {
         Some([0x23, 0x36, 0x00]) => true,
         Some([0x51, 0x96, _]) => packet.len() - offset >= 2 + 2 + 12,
+        Some([0xF8, 0x4E, 0x00]) => {
+            packet.len() - offset >= 2 + 4 + 2 + 12 && packet[offset + 2..offset + 6] == [0, 0, 0, 0]
+        }
         _ => false,
     }
 }
@@ -6155,7 +6161,8 @@ mod tests {
     }
 
     /// Teleports from the captures of 2026-11-10 (`23 36 00`) and 2026-11-11
-    /// (`51 96`, after NC's patch); another entity's `23 36` is no teleport.
+    /// (`51 96`, after NC's patch) and 2026-11-18 (`F8 4E`); another entity's
+    /// `23 36` is no teleport.
     #[test]
     fn self_teleports_old_and_new() {
         let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
@@ -6163,6 +6170,11 @@ mod tests {
         assert!(is_self_teleport(&hex("1B5196963ECA8DD147C19592470040654400000100000000000000")));
         assert!(!is_self_teleport(&hex("1B2336A10F0000D98FEF476FA33B470040F64402000000C715")));
         assert!(!is_self_teleport(&hex("055196963E")), "too short for a position");
+        // 2026-11-18: `F8 4E`, the map load's position after 4 zero bytes.
+        assert!(is_self_teleport(&hex("1EF84E00000000CC59E72DEBC601D36BC6000C14C6020000000000")));
+        assert!(is_self_teleport(&hex("1EF84E00000000AB4E41AEEF4778F948470080F744040000000000")));
+        assert!(!is_self_teleport(&hex("1EF84E00010000CC59E72DEBC601D36BC6000C14C6020000000000")));
+        assert!(!is_self_teleport(&hex("07F84E00000000")), "too short for a position");
     }
 
     #[test]
