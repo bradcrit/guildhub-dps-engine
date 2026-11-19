@@ -175,8 +175,30 @@ pub(crate) fn keep_something_on_screen(app: &tauri::AppHandle, except: &str) {
     }
 }
 
+/// The meter is wanted but out of sight: hidden, hidden in place, or
+/// minimised by auto-hide or the out-of-combat or solo rule (which Windows
+/// still calls visible).
+fn meter_out_of_sight(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    let window = app.get_webview_window("main")?;
+    (meter_wanted(app)
+        && (!window.is_visible().unwrap_or(true)
+            || window.is_minimized().unwrap_or(false)
+            || platform::window::is_hidden_in_place(&window)))
+    .then_some(window)
+}
+
+/// The dock's and the plugin bar's meter button. Its pressed state follows
+/// the setting, so with the meter minimised by auto-hide the first click hid
+/// it for good and the second brought it back (Hirai, 2026-11-18): as the
+/// keybind (`toggle_meter`), a hide asked by a button (`toggle`) of a meter
+/// out of sight shows it. Settings' checkbox asks plainly: unticked, hidden.
 #[tauri::command]
-fn set_meter_shown(app: tauri::AppHandle, shown: bool) {
+fn set_meter_shown(app: tauri::AppHandle, shown: bool, toggle: Option<bool>) {
+    if !shown && toggle == Some(true) && let Some(window) = meter_out_of_sight(&app) {
+        show_meter_again(&app, &window);
+        let _ = app.emit("meter-shown", true);
+        return;
+    }
     set_meter_wanted(&app, shown);
 }
 
@@ -859,6 +881,15 @@ async fn account_status(
 }
 
 #[cfg(feature = "online")]
+/// Party naming on a2tools.app: named in full, and ranked, in the logs party
+/// members upload. `enabled` sets it; without, only asks. None when this
+/// account can't use it (shown only signed in).
+#[tauri::command]
+async fn account_party_names(state: tauri::State<'_, AppState>, enabled: Option<bool>) -> Result<Option<bool>, String> {
+    crate::account::party_names(&state.http, &state.app_data_dir, enabled).await
+}
+
+#[cfg(feature = "online")]
 /// "Stop sharing" (the sharing notice, 2.0.80 on): no more uploads without an
 /// account, and the fights this PC already uploaded that way deleted from
 /// a2tools.app, in the background.
@@ -1159,12 +1190,7 @@ fn hotkey_of(settings: &Settings, key: &str) -> (u32, u32) {
 /// visible: the first press took it for shown and hid it for good, so the
 /// keybind needed two presses to bring it back (2026-11-09).
 pub(crate) fn toggle_meter(app: &tauri::AppHandle) {
-    if meter_wanted(app)
-        && let Some(window) = app.get_webview_window("main")
-        && (!window.is_visible().unwrap_or(true)
-            || window.is_minimized().unwrap_or(false)
-            || platform::window::is_hidden_in_place(&window))
-    {
+    if let Some(window) = meter_out_of_sight(app) {
         show_meter_again(app, &window);
         return;
     }
@@ -2135,6 +2161,13 @@ async fn account_status() -> Result<Option<serde_json::Value>, String> {
 #[tauri::command]
 fn account_status_cached() -> Option<Option<serde_json::Value>> {
     None
+}
+
+#[cfg(not(feature = "online"))]
+#[tauri::command]
+async fn account_party_names(enabled: Option<bool>) -> Result<Option<bool>, String> {
+    let _ = enabled;
+    Err(NOT_IN_THIS_BUILD.into())
 }
 
 #[cfg(not(feature = "online"))]
@@ -4873,6 +4906,7 @@ pub fn run() {
             share_status,
             account_status,
             account_status_cached,
+            account_party_names,
             discord_activity_available,
             stream_overlay_status,
             stream_overlay_configure,

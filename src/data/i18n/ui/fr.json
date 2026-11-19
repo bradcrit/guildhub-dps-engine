@@ -232,6 +232,7 @@
     },
     "fightTimeline": "Chronologie du combat",
     "replay": {
+      "noOthersTiming": "La relecture exclut les autres joueurs, car les instants de leurs coups n’ont pas été enregistrés. Quittez la relecture pour voir le total observé.",
       "label": "Relecture",
       "title": "Relecture",
       "play": "Lancer la relecture",
@@ -630,13 +631,15 @@
       "failed": "Échec de la connexion : {error}",
       "supporter": "Soutien",
       "guestUpload": "Envoyer les combats de boss sans compte",
-      "guestUploadHint": "À la fin d'un combat de boss, il est envoyé sur a2tools.app, public, sans compte. Les autres joueurs restent masqués. Connecte-toi plus tard et les combats envoyés depuis ce PC deviennent les tiens.",
+      "guestUploadHint": "À la fin d'un combat de boss, il est envoyé sur a2tools.app, public, sans compte. Les autres joueurs restent masqués. Les membres du groupe qui ont choisi d'être nommés sur a2tools.app apparaissent en entier. Connecte-toi plus tard et les combats envoyés depuis ce PC deviennent les tiens.",
       "guestClaimHint": "Les combats envoyés depuis ce PC sont gardés pour toi. Connecte-toi ici pour qu'ils deviennent les tiens, ou obtiens un code pour les récupérer depuis un autre appareil.",
       "guestClaimButton": "Obtenir un code",
       "guestClaimCode": "Saisis {code} sur {url} en étant connecté. Le code expire dans 15 minutes.",
       "claimed": "{count} combats envoyés depuis ce PC sont maintenant à toi.",
       "autoUpload": "Envoyer automatiquement les combats de boss",
-      "autoUploadHint": "À la fin d'un combat de boss, il est envoyé sur votre compte avec la visibilité choisie sur a2tools.app. Les autres joueurs restent masqués. Les mannequins d'entraînement ne sont jamais envoyés."
+      "autoUploadHint": "À la fin d'un combat de boss, il est envoyé sur votre compte avec la visibilité choisie sur a2tools.app. Les autres joueurs restent masqués. Les membres du groupe qui ont choisi d'être nommés sur a2tools.app apparaissent en entier. Les mannequins d'entraînement ne sont jamais envoyés.",
+      "partyNames": "Afficher mon nom dans les journaux de mon groupe",
+      "partyNamesHint": "Le nom de ton personnage apparaît en entier, et compte dans les classements, dans les journaux envoyés par les membres de ton groupe. Activé : ton personnage est lié lors de ton prochain envoi de groupe connecté, puis les 30 derniers jours sont parcourus. Désactivé : tu quittes les classements aussitôt et les journaux enregistrés sont de nouveau masqués en quelques heures."
     },
     "sendLogs": {
       "hint": "Envoie ton journal de débogage et tes derniers journaux de paquets (3 fichiers en tout) au développeur, pour un rapport de bug.",
@@ -974,7 +977,8 @@
     "never": "Le nom de votre PC et le nom complet de votre personnage ne sont jamais envoyés.",
     "policy": "Politique de confidentialité",
     "continue": "Continuer"
-  },
+  },
+
   "layout": {
     "title": "Modifier la disposition",
     "hint": "Fais glisser chaque élément en place. Lâché près d'un bord, il s'y aimante.",

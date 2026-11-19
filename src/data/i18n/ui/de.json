@@ -232,6 +232,7 @@
     },
     "fightTimeline": "Kampfverlauf",
     "replay": {
+      "noOthersTiming": "Andere sind im Replay nicht enthalten, da ihre Trefferzeiten fehlen. Beende das Replay, um die beobachtete Gesamtsumme zu sehen.",
       "label": "Wiedergabe",
       "title": "Wiedergabe",
       "play": "Wiedergabe abspielen",
@@ -630,13 +631,15 @@
       "failed": "Anmeldung fehlgeschlagen: {error}",
       "supporter": "Unterstützer",
       "guestUpload": "Bosskämpfe ohne Konto hochladen",
-      "guestUploadHint": "Wenn ein Bosskampf endet, wird er öffentlich und ohne Konto auf a2tools.app hochgeladen. Andere Spieler bleiben maskiert. Meldest du dich später an, gehören die von diesem PC hochgeladenen Kämpfe dir.",
+      "guestUploadHint": "Wenn ein Bosskampf endet, wird er öffentlich und ohne Konto auf a2tools.app hochgeladen. Andere Spieler bleiben maskiert. Gruppenmitglieder, die auf a2tools.app genannt werden wollen, erscheinen mit vollem Namen. Meldest du dich später an, gehören die von diesem PC hochgeladenen Kämpfe dir.",
       "guestClaimHint": "Von diesem PC hochgeladene Kämpfe werden für dich aufbewahrt. Melde dich hier an, um sie zu übernehmen, oder hol dir einen Code, um sie von einem anderen Gerät aus zu beanspruchen.",
       "guestClaimButton": "Code anfordern",
       "guestClaimCode": "Gib {code} auf {url} ein, während du angemeldet bist. Der Code läuft in 15 Minuten ab.",
       "claimed": "{count} von diesem PC hochgeladene Kämpfe gehören jetzt dir.",
       "autoUpload": "Bosskämpfe automatisch hochladen",
-      "autoUploadHint": "Wenn ein Bosskampf endet, wird er mit der auf a2tools.app gewählten Sichtbarkeit in dein Konto hochgeladen. Andere Spieler bleiben maskiert. Trainingspuppen werden nie hochgeladen."
+      "autoUploadHint": "Wenn ein Bosskampf endet, wird er mit der auf a2tools.app gewählten Sichtbarkeit in dein Konto hochgeladen. Andere Spieler bleiben maskiert. Gruppenmitglieder, die auf a2tools.app genannt werden wollen, erscheinen mit vollem Namen. Trainingspuppen werden nie hochgeladen.",
+      "partyNames": "Meinen Namen in Logs meiner Gruppe zeigen",
+      "partyNamesHint": "Der Name deines Charakters erscheint vollständig und zählt in den Bestenlisten, in Logs, die deine Gruppenmitglieder hochladen. An: Dein Charakter wird bei deinem nächsten angemeldeten Gruppen-Upload verknüpft, dann werden die letzten 30 Tage durchsucht. Aus: Du verschwindest sofort aus den Bestenlisten, gespeicherte Logs werden innerhalb weniger Stunden wieder maskiert."
     },
     "sendLogs": {
       "hint": "Sendet dein Debug-Log und deine neuesten Paket-Logs (insgesamt 3 Dateien) für einen Fehlerbericht an den Entwickler.",
@@ -974,7 +977,8 @@
     "never": "Der Name deines PCs und der volle Name deines Charakters werden nie gesendet.",
     "policy": "Datenschutzerklärung",
     "continue": "Weiter"
-  },
+  },
+
   "layout": {
     "title": "Layout bearbeiten",
     "hint": "Ziehe jedes Teil an seinen Platz. Nahe einer Kante rastet es dort ein.",

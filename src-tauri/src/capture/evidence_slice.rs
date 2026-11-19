@@ -228,6 +228,16 @@ fn frame_packet(body: &[u8]) -> Option<Vec<u8>> {
 /// the fight window, so the prelude cannot carry another fight's numbers.
 const EVENT_OPCODES: &[[u8; 2]] = &[[0x04, 0x38], [0x05, 0x38], [0x1B, 0x92]];
 
+/// Packets that hold no text, whose bytes no name pass looks in. The dungeon
+/// run's state (`00 61`: content, state, start and deadline) carries its times
+/// relative to the fight in a slice (2.0.98): the state byte `02` before a
+/// small negative time reads as a two-letter name (`02 77 49` is "wI"), and
+/// the service refused some 26,000 uploads of 2.0.98 and 2.0.99 as not
+/// blinded (2026-11-14 to 19).
+/// Each with its record's length after the length header (`00 61`: opcode,
+/// content u32, state u8, two i64 times; 23 in every capture of 2026-11).
+const TEXTLESS_OPCODES: &[([u8; 2], usize)] = &[([0x00, 0x61], 23)];
+
 /// Buff changes (`2b 38`), kept from the lead-in on but not in the prelude.
 /// A change renews an instance the add (`2a 38`, kept) began, so the lead-in's
 /// changes still give each buff on at the pull with its start. In a crowd the
@@ -674,7 +684,7 @@ impl Blinder {
         // Every buffer handed to the blinder is one framed packet: skip its
         // length and opcode.
         let header = super::stream_processor::read_varint(buf, 0);
-        if is_event(buf) {
+        if is_event(buf) || is_textless(buf) {
             return 0;
         }
         let start = if header.length > 0 { header.length as usize + 2 } else { 0 };
@@ -747,6 +757,17 @@ impl Blinder {
             start >= (from + 1).saturating_sub(n) && end <= (to + n - 1).min(buf.len())
         })
     }
+}
+
+/// A packet of `TEXTLESS_OPCODES`, at its record's exact length: a longer
+/// packet with the same opcode gets every name pass (security check of
+/// 2.1.0: an opcode alone let any length through unscanned).
+fn is_textless(packet: &[u8]) -> bool {
+    let header = super::stream_processor::read_varint(packet, 0);
+    let o = header.length.max(0) as usize;
+    header.length > 0
+        && packet.len() >= o + 2
+        && TEXTLESS_OPCODES.iter().any(|(op, len)| *op == [packet[o], packet[o + 1]] && packet.len() == o + len)
 }
 
 /// Damage, damage over time and HP updates are ids and numbers only: no
@@ -2105,6 +2126,18 @@ mod tests {
         assert_eq!(leaked_names(&raw, &["Grandine".to_string(), "Misti".to_string()]), 1);
     }
 
+    /// A dungeon run's state with its time relative to the fight, as 2.0.98 and
+    /// 2.0.99 slice it (from refused uploads, 2026-11-18): no name in it.
+    #[test]
+    fn a_run_state_with_a_relative_time_is_no_name() {
+        let state = hex("1b0061430d0300027749e8ffffffffff0000000000000000");
+        assert_eq!(unblinded_names(&[(0, state)], &HashMap::new()), 0);
+        let cleared = hex("1b00611d28090002dd93fdffffffffff5d82340000000000");
+        assert_eq!(unblinded_names(&[(0, cleared)], &HashMap::new()), 0);
+        // Names elsewhere are still found.
+        assert_eq!(unblinded_names(&[(0, spawn_named("Grandine"))], &HashMap::new()), 1);
+    }
+
     /// `leaked_names` as it was: each name looked for in turn.
     fn leaked_names_one_at_a_time(records: &[(i32, Vec<u8>)], names: &[String]) -> usize {
         let plaintext: Vec<Vec<u8>> = records.iter().map(|(_, p)| expand(p)).collect();
@@ -2458,6 +2491,21 @@ mod tests {
         let time = i64::from_le_bytes(kept[8..16].try_into().unwrap());
         let deadline = i64::from_le_bytes(kept[16..24].try_into().unwrap());
         assert_eq!((time, deadline - time), (1_791_570_413_009 - start, 3_600_000));
+    }
+
+    /// Only a dungeon state of its exact length skips the name passes.
+    #[test]
+    fn only_a_whole_dungeon_state_is_textless() {
+        let mut state = vec![0x18, 0x00, 0x61];
+        state.extend(600_071u32.to_le_bytes());
+        state.push(2);
+        state.extend((-450_000i64).to_le_bytes());
+        state.extend(150_000i64.to_le_bytes());
+        assert!(is_textless(&state));
+        let mut longer = state.clone();
+        longer.extend(b"\x06Jinwoo");
+        assert!(!is_textless(&longer));
+        assert!(!is_textless(&state[..state.len() - 1]));
     }
 
     #[test]

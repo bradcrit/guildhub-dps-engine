@@ -237,6 +237,7 @@
     },
     "fightTimeline": "Fight timeline",
     "replay": {
+      "noOthersTiming": "Replay excludes Others because their hit times were not recorded. End replay to see the observed total.",
       "label": "Replay",
       "title": "Replay",
       "play": "Play replay",
@@ -638,9 +639,11 @@
       "failed": "Sign-in failed: {error}",
       "supporter": "Supporter",
       "autoUpload": "Upload boss fights automatically",
-      "autoUploadHint": "When a boss fight ends it is uploaded to your account, with the visibility you chose on a2tools.app. Other players stay masked. Training dummies are never uploaded.",
+      "autoUploadHint": "When a boss fight ends it is uploaded to your account, with the visibility you chose on a2tools.app. Other players stay masked. Party members who chose to be named on a2tools.app show in full. Training dummies are never uploaded.",
+      "partyNames": "Show my name in my party's logs",
+      "partyNamesHint": "Your character's name shows in full, and counts on the leaderboards, in logs your party members upload. On: your character is linked from your next signed-in party upload, then the last 30 days are looked through. Off: you leave the leaderboards at once, and stored logs are masked again within a few hours.",
       "guestUpload": "Upload boss fights without an account",
-      "guestUploadHint": "When a boss fight ends it is uploaded to a2tools.app, public, without an account. Other players stay masked. Sign in later and the fights uploaded from this PC become yours.",
+      "guestUploadHint": "When a boss fight ends it is uploaded to a2tools.app, public, without an account. Other players stay masked. Party members who chose to be named on a2tools.app show in full. Sign in later and the fights uploaded from this PC become yours.",
       "guestClaimHint": "Fights uploaded from this PC are kept for you. Sign in here to make them yours, or get a code to claim them from another device.",
       "guestClaimButton": "Get a claim code",
       "guestClaimCode": "Enter {code} at {url} while signed in. The code expires in 15 minutes.",
@@ -974,7 +977,8 @@
     "never": "Your PC's name and your character's full name are never sent.",
     "policy": "Privacy policy",
     "continue": "Continue"
-  },
+  },
+
   "layout": {
     "title": "Edit layout",
     "hint": "Drag any piece into place. Dropped near an edge, it snaps to it.",

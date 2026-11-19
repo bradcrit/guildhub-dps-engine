@@ -82,6 +82,17 @@ killed them), and the Supply Request boards after each reset
 (`src-tauri/src/boss_report.rs`, `src-tauri/src/supply_report.rs`). **Nothing
 about your character** is in these reports.
 
+Under the same setting (since 2.1.0), the meter shares your gathers, so
+A2Tools can check the game's listed gathering chances against many players':
+your server, and for each gather its time (to the second), the item, the
+result (quality, count, extra copies, any add-on item), whether it was
+upgraded, a critical or Lady Luck, and the levels of the gathering skills you
+had learned. They go in batches, once 50 are waiting or the oldest has waited 15 minutes
+(`src-tauri/src/gather_report.rs`). Not your character's name, nor where you
+gathered; but **these are your own gathers and skill levels**, and the site
+could link a batch to your other reports from the same address. Turn the
+setting off to stop them.
+
 **Logs for the developer, when you send them.** *Settings → Advanced → Send Logs
 to Dev* sends your debug log and your most recent packet logs (see below),
 listing each file and its size before it asks. Only the developer can open them,
@@ -232,7 +243,8 @@ different token in every slice. That does not make a person unlinkable across
 uploads: the party roster record in a slice still carries each member's roster
 id, a stable per-character number, beside their token.
 Separately, the upload sends the names the saved fight already holds: signed
-in, **yours in full, everyone else masked**; shared anonymously without an
+in, **yours in full, everyone else masked** (except party members who chose to
+be named, below); shared anonymously without an
 account, **everyone masked, you too**; masked the way
 the meter shows them (`Ta****x`: first two characters, last character, at most
 four stars). The service applies that masking again itself, so a modified client
@@ -247,6 +259,17 @@ it. The slice is stored so a log can be re-derived later; it is never served,
 and the ids are removed from the record that is. The separate table in the slice
 that paired each blinded name with its roster id is blanked before the slice is
 saved.
+
+**Party naming, only if you turn it on.** On a2tools.app (Your logs, "Show my
+character name, and rank me, in logs my party members upload") you can choose to
+be named in full and ranked in the logs your party members upload. The site then
+links your character to your account by its roster id, taken only from fights
+you upload yourself while signed in, and from then on names you in a party
+member's log with your account's character name (never a name their meter
+sent). When you turn it on it also looks through the last 30 days of public logs
+in your region for fights you were in. Turning it off takes you off the boards
+at once, and your name is masked again in stored logs within hours. Off, nothing
+changes: your party members' uploads keep you masked.
 
 **Who can see a log.** You choose whether your logs are public or private, as a
 default and per log. A private log is not listed anywhere, but anyone you give

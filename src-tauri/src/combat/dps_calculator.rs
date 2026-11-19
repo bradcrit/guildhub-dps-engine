@@ -88,6 +88,17 @@ impl TargetSelectionMode {
     }
 }
 
+/// The HP baseline and last sampled aggregate of one field-boss fight.
+/// Sampling advances only with that target's hits: a late name or another
+/// target's hit must not add later HP loss to an already ended duration.
+struct WorldBossObservation {
+    first_hit: i64,
+    last_hit: i64,
+    tracked_damage: i64,
+    start_hp: i64,
+    damage: i64,
+}
+
 pub struct DpsCalculator {
     data_storage: Arc<DataStorage>,
     skill_lookup: Arc<SkillLookup>,
@@ -107,10 +118,9 @@ pub struct DpsCalculator {
     /// when nothing shown times out. The snapshot is computed again then,
     /// with no new damage to ask for it.
     boss_shown_until: i64,
-    /// The open-world boss being fought (entity, first hit of this fight) and
-    /// its HP when this meter first saw the fight, the start of what Others
-    /// counts (`world_boss_rows`).
-    world_boss_start: Option<(i32, i64, i64)>,
+    /// Retain the HP baseline when switching targets, and the matching
+    /// aggregate for History. Bounded and cleared with combat data.
+    world_boss_observations: HashMap<i32, WorldBossObservation>,
     target_selection_mode: TargetSelectionMode,
     last_known_local_id: Option<i64>,
     all_targets_window_ms: i64,
@@ -141,7 +151,7 @@ impl DpsCalculator {
             last_names_gen: 0,
             last_party_rows: false,
             boss_shown_until: i64::MAX,
-            world_boss_start: None,
+            world_boss_observations: HashMap::new(),
             target_selection_mode: TargetSelectionMode::BossTargets,
             last_known_local_id: None,
             all_targets_window_ms: 120_000,
@@ -195,6 +205,7 @@ impl DpsCalculator {
         self.last_damage_gen = -1;
         self.boss_shown_until = i64::MAX;
         if clear_damage {
+            self.world_boss_observations.clear();
             self.data_storage.flush();
         }
         self.data_storage.set_current_target(0);
@@ -205,6 +216,7 @@ impl DpsCalculator {
         // state so the meter resets this cycle instead of returning the stale snapshot.
         if self.data_storage.take_combat_reset_requested() {
             self.last_dps_snapshot = None;
+            self.world_boss_observations.clear();
             self.saved_boss_targets.clear();
             self.last_damage_gen = -1;
             self.current_target = 0;
@@ -740,21 +752,34 @@ impl DpsCalculator {
         let listed: f64 = dps_data.map.values().map(|d| d.amount).sum();
 
         let hp_now = if self.data_storage.is_entity_dead(target) { 0 } else { current_hp };
-        let first_hit = combat_data.get(&target).map(|t| t.first_damage_time).unwrap_or(0);
+        let fight = combat_data.get(&target)?;
         let mut others = 0.0;
         if hp_now >= 0 {
+            self.world_boss_observations.retain(|id, observation| {
+                combat_data.get(id).is_some_and(|fight| fight.first_damage_time == observation.first_hit)
+            });
+            if !self.world_boss_observations.contains_key(&target) && self.world_boss_observations.len() >= 64 {
+                if let Some(oldest) = self.world_boss_observations.iter().min_by_key(|(_, v)| v.last_hit).map(|(&id, _)| id) {
+                    self.world_boss_observations.remove(&oldest);
+                }
+            }
             // The first look at a fight takes its HP then, plus what was
             // already tracked: the hits before that look are counted, the
             // fight before this meter came is not.
-            let start = match self.world_boss_start {
-                Some((t, at, hp)) if t == target && at == first_hit => hp,
-                _ => {
-                    let hp = hp_now + tracked as i64;
-                    self.world_boss_start = Some((target, first_hit, hp));
-                    hp
-                }
-            };
-            others = ((start - hp_now) as f64 - listed).max(0.0);
+            let observation = self.world_boss_observations.entry(target).or_insert_with(|| WorldBossObservation {
+                first_hit: fight.first_damage_time,
+                last_hit: fight.last_damage_time,
+                tracked_damage: fight.total_damage as i64,
+                start_hp: hp_now + tracked as i64,
+                damage: tracked as i64,
+            });
+            let observed = (observation.start_hp - hp_now).max(0);
+            if fight.last_damage_time > observation.last_hit {
+                observation.last_hit = fight.last_damage_time;
+                observation.tracked_damage = fight.total_damage as i64;
+                observation.damage = observed;
+            }
+            others = (observed as f64 - listed).max(0.0);
         }
         if others > 0.0 {
             let mut row = PersonalData::new("Others".to_string());
@@ -1354,6 +1379,12 @@ impl DpsCalculator {
                 start_time_ms: target_data.first_damage_time,
                 duration_ms: battle_time,
                 total_damage: target_data.total_damage as i32,
+                world_boss_observed_damage: self.world_boss_observations.get(&target_id)
+                    .filter(|o| o.first_hit == target_data.first_damage_time
+                        && o.last_hit == target_data.last_damage_time
+                        && o.tracked_damage == target_data.total_damage as i64)
+                    .map(|o| o.damage)
+                    .filter(|&damage| damage > target_data.total_damage as i64),
                 jobs,
                 job_ids,
                 details,
@@ -1893,6 +1924,8 @@ impl DpsCalculator {
         // else's heals (the saved fight's players come from these too).
         let own_only = (self.data_storage.train_limit_on() && self.data_storage.is_dummy(target_id))
             .then(|| self.data_storage.local_player_id().map(|id| id as i32));
+        // The fight's window, which the heals counted must fall in.
+        let (from, to) = (target_data.first_damage_time, target_data.last_damage_time);
         for (&actor_id, skills) in &self.data_storage.get_heal_snapshot() {
             let raw_uid = summon_resolver::resolve(actor_id, &summon_data);
             if raw_uid <= 0 { continue; }
@@ -1904,6 +1937,22 @@ impl DpsCalculator {
                 if !filter.contains(&uid) { continue; }
             }
             for (&(skill_code, is_hot), hd) in skills {
+                // Only the heals inside this fight's window count: healing is
+                // kept for the whole session, so the totals used to include
+                // every heal since the last reset (777 ticks for both bosses of
+                // the 2026-10-02 capture). Their times, from the fight's first
+                // hit as damage's are, feed HEAL's HPS chart and cast lanes.
+                //
+                // A skill with no heal in the window gets no row at all. Its
+                // empty row used to stay, and a row is what makes a healer one
+                // of the fight's players (`snapshot_boss_fights_inner`): a
+                // two-player Krao Cave kill was saved with 115 players, 113 of
+                // them seen healing in the open world earlier that evening
+                // (1,204 heal rows, nearly all zero; 2026-11-17).
+                let mut ticks = hd.ticks.iter().enumerate().filter(|(_, (t, _))| *t >= from && *t <= to).peekable();
+                if ticks.peek().is_none() {
+                    continue;
+                }
                 let mut skill_name = self.skill_lookup.lookup_skill_name(skill_code);
                 if is_hot && !skill_name.is_empty() {
                     skill_name = format!("{} - HoT", skill_name);
@@ -1942,15 +1991,9 @@ impl DpsCalculator {
                     specs: Vec::new(),
                     effective: 0,
                 });
-                // Only the heals inside this fight's window count: healing is
-                // kept for the whole session, so the totals used to include
-                // every heal since the last reset (777 ticks for both bosses of
-                // the 2026-10-02 capture). Their times, from the fight's first
-                // hit as damage's are, feed HEAL's HPS chart and cast lanes.
-                let (from, to) = (target_data.first_damage_time, target_data.last_damage_time);
                 let mut healed: i64 = 0;
                 let mut effective: i64 = 0;
-                for (i, &(t, amount)) in hd.ticks.iter().enumerate().filter(|(_, (t, _))| *t >= from && *t <= to) {
+                for (i, &(t, amount)) in ticks {
                     healed += amount;
                     effective += hd.effective.get(i).copied().unwrap_or(amount);
                     entry.time += 1;
@@ -2630,6 +2673,214 @@ mod tests {
         assert!((share - 100.0).abs() < 0.01);
     }
 
+    fn observed_boss() -> (Arc<DataStorage>, DpsCalculator) {
+        let storage = Arc::new(DataStorage::new());
+        storage.set_local_player_id(Some(7983));
+        storage.append_nickname_authoritative(7983, "Naicha");
+        let mut calc = boss_meter(&storage);
+        storage.append_mob_hp(44_090, 1_000_000);
+        // Arrive after other players already took 400,000 HP.
+        storage.set_mob_current_hp(44_090, 600_000);
+        storage.append_damage(hit(7983, 44_090, 1_000));
+        calc.get_dps();
+        (storage, calc)
+    }
+
+    #[test]
+    fn history_keeps_observed_others_separate_from_recorded_and_personal_damage() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        let (storage, mut calc) = observed_boss();
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(2653, 44_090, 6_000));
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        calc.get_dps();
+        let record = calc.snapshot_boss_fights_force().pop().unwrap();
+        assert_eq!(record.world_boss_observed_damage, Some(500_500));
+        assert_eq!(record.total_damage, 1_500);
+        assert_eq!(record.details.total_target_damage, 1_500);
+        assert_eq!(record.details.skills.iter().map(|s| s.dmg).sum::<i32>(), 1_500);
+        #[cfg(feature = "desktop")]
+        {
+            let summary = crate::history::summary::of(&record);
+            assert_eq!(summary.total_damage, 1_500);
+            assert_eq!(summary.my_damage, 1_000);
+            assert_eq!(summary.world_boss_observed_damage, Some(500_500));
+        }
+    }
+
+    #[test]
+    fn history_does_not_add_idle_hp_loss_or_the_death_bars_full_max_hp() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        let (storage, mut calc) = observed_boss();
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        calc.get_dps();
+        // The target receives no further tracked hits. A late name forces a
+        // live recomputation, but this later HP loss is outside its duration.
+        storage.mark_entity_dead(44_090);
+        storage.append_nickname_authoritative(999, "LateName");
+        let shown = calc.get_dps();
+        assert_eq!(shown.target_total_damage, 1_000_000, "the HP bar empties on death");
+        let record = calc.snapshot_boss_fights_force().pop().unwrap();
+        assert_eq!(record.world_boss_observed_damage, Some(500_500));
+        assert_eq!(record.duration_ms, 6_000);
+    }
+
+    #[test]
+    fn history_drops_an_estimate_when_the_final_hit_has_not_been_sampled() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        let (storage, mut calc) = observed_boss();
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        calc.get_dps();
+        storage.append_damage(hit(7983, 44_090, 8_000));
+        assert_eq!(calc.snapshot_boss_fights_force()[0].world_boss_observed_damage, None);
+
+        let storage = Arc::new(DataStorage::new());
+        storage.set_local_player_id(Some(7983));
+        let mut unsampled = boss_meter(&storage);
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(7983, 44_090, 1_000));
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        assert_eq!(unsampled.snapshot_boss_fights_force()[0].world_boss_observed_damage, None);
+    }
+
+    #[test]
+    fn another_hit_at_the_same_millisecond_invalidates_the_saved_sample() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        let (storage, mut calc) = observed_boss();
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        calc.get_dps();
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        // An unchanged end time is not proof that all recorded hits were in
+        // the HP sample. Fall back rather than claim a mismatched aggregate.
+        assert_eq!(calc.snapshot_boss_fights_force()[0].world_boss_observed_damage, None);
+    }
+
+    #[test]
+    fn a_new_fight_on_the_same_entity_never_reuses_the_old_hp_baseline() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        let (storage, mut calc) = observed_boss();
+        storage.flush();
+        storage.set_local_player_id(Some(7983));
+        storage.append_mob(44_090, 2100708);
+        storage.set_mob_current_hp(44_090, 2_000_000);
+        storage.append_damage(hit(7983, 44_090, 10_000));
+        calc.get_dps();
+        storage.set_mob_current_hp(44_090, 1_900_000);
+        storage.append_damage(hit(7983, 44_090, 16_000));
+        calc.get_dps();
+        assert_eq!(calc.snapshot_boss_fights_force()[0].world_boss_observed_damage, Some(100_500));
+    }
+
+    #[test]
+    fn missing_hp_or_all_targets_mode_keeps_only_the_recorded_hits() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        for all_targets in [false, true] {
+            let storage = Arc::new(DataStorage::new());
+            storage.set_local_player_id(Some(7983));
+            let mut calc = boss_meter(&storage);
+            if all_targets {
+                calc.set_target_selection_mode("allTargets");
+                storage.set_mob_current_hp(44_090, 100_000);
+            }
+            storage.append_damage(hit(7983, 44_090, 1_000));
+            storage.append_damage(hit(7983, 44_090, 7_000));
+            calc.get_dps();
+            assert_eq!(calc.snapshot_boss_fights_force()[0].world_boss_observed_damage, None);
+        }
+    }
+
+    #[test]
+    fn a_world_boss_keeps_its_baseline_across_target_switches() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        let (storage, mut calc) = observed_boss();
+        calc.set_target_selection_mode("mostRecent");
+        storage.set_mob_current_hp(44_090, 400_000);
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        calc.get_dps();
+        storage.append_mob(44_091, 2100708);
+        storage.set_mob_current_hp(44_091, 200_000);
+        storage.append_damage(hit(7983, 44_091, 8_000));
+        assert_eq!(calc.get_dps().target_id, 44_091);
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(7983, 44_090, 9_000));
+        assert_eq!(calc.get_dps().target_id, 44_090);
+        let record = calc.snapshot_boss_fights_force().into_iter().find(|r| r.target_id == 44_090).unwrap();
+        assert_eq!(record.world_boss_observed_damage, Some(500_500));
+    }
+
+    #[test]
+    fn healing_and_reset_never_turn_into_extra_observed_damage() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        let (storage, mut calc) = observed_boss();
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        calc.get_dps();
+        storage.set_mob_current_hp(44_090, 500_000);
+        storage.append_damage(hit(7983, 44_090, 8_000));
+        calc.get_dps();
+        assert_eq!(calc.world_boss_observations[&44_090].damage, 100_500);
+        storage.set_mob_current_hp(44_090, 700_000);
+        storage.append_damage(hit(7983, 44_090, 9_000));
+        calc.get_dps();
+        let record = calc.snapshot_boss_fights_force().pop().unwrap();
+        assert_eq!(record.world_boss_observed_damage, None, "recorded hits exceed observed net HP loss");
+        assert_eq!(record.total_damage, 2_000);
+        calc.restart_target_selection(true);
+        assert!(calc.world_boss_observations.is_empty());
+    }
+
+    #[test]
+    fn a_party_fight_can_keep_others_without_a_local_damage_row() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        use crate::combat::data_storage::PartyMember;
+        let storage = Arc::new(DataStorage::new());
+        storage.set_local_player_id(Some(7983));
+        storage.append_nickname_authoritative(7983, "Naicha");
+        storage.append_nickname_authoritative(15_130, "Oppi");
+        storage.set_party_roster(vec![("Oppi".into(), PartyMember { slot: 2, ..Default::default() })], true);
+        let mut calc = boss_meter(&storage);
+        storage.set_mob_current_hp(44_090, 600_000);
+        storage.append_damage(hit(15_130, 44_090, 1_000));
+        calc.get_dps();
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(15_130, 44_090, 7_000));
+        calc.get_dps();
+        let record = calc.snapshot_boss_fights_force().pop().unwrap();
+        assert_eq!(record.world_boss_observed_damage, Some(500_500));
+        #[cfg(feature = "desktop")]
+        assert_eq!(crate::history::summary::of(&record).my_damage, 0);
+    }
+
+    #[test]
+    fn a_party_change_does_not_change_the_observed_world_boss_aggregate() {
+        // Boss mode drops a world boss five minutes after its last hit (now).
+        let _clock = pin_clock(10_000);
+        use crate::combat::data_storage::PartyMember;
+        let (storage, mut calc) = observed_boss();
+        storage.append_nickname_authoritative(15_130, "Oppi");
+        storage.set_mob_current_hp(44_090, 100_000);
+        storage.append_damage(hit(15_130, 44_090, 6_000));
+        storage.append_damage(hit(7983, 44_090, 7_000));
+        calc.get_dps();
+        storage.set_party_roster(vec![("Oppi".into(), PartyMember { slot: 2, ..Default::default() })], true);
+        calc.get_dps();
+        let record = calc.snapshot_boss_fights_force().pop().unwrap();
+        assert_eq!(record.world_boss_observed_damage, Some(500_500));
+        assert_eq!(record.total_damage, 1_500);
+    }
+
     /// Someone joining between fights shows at once, not at the next hit:
     /// the roster changes no damage and binds no name, and the cached
     /// result was returned until one of those did (2026-10-13: Boushii
@@ -2773,6 +3024,38 @@ mod tests {
         assert_eq!(calc.get_dps().map[&4227].nickname, "4227");
         storage.append_nickname_authoritative(4227, "Ab");
         assert_eq!(calc.get_dps().map[&4227].nickname, "Ab");
+    }
+
+    /// Healing is kept for the whole session, a fight's record only has what
+    /// fell inside it. A stranger who healed before the pull has no heal row
+    /// in the fight, and so is not one of its players; a party member who
+    /// only healed during it still is (a Cleric who never hit the boss).
+    #[test]
+    fn a_healer_from_before_the_pull_is_not_one_of_the_fights_players() {
+        let storage = Arc::new(DataStorage::new());
+        storage.set_local_player_id(Some(2259));
+        // In town, long before: a stranger's heal, and one of your own.
+        storage.append_heal(7_000, 7_000, 17010000, 900, false, 10_000);
+        storage.append_heal(2259, 2259, 11010000, 300, true, 12_000);
+        // The pull: you hit the boss for half a minute, the Cleric heals twice.
+        for at in [100_000, 110_000, 130_000] {
+            storage.append_damage(hit(2259, 44_090, at));
+        }
+        storage.append_heal(2260, 2260, 17010000, 1_200, false, 105_000);
+        storage.append_heal(2260, 2260, 17010000, 800, false, 120_000);
+        // And a heal after the last hit, which is not the fight's either.
+        storage.append_heal(7_001, 7_001, 17010000, 500, false, 140_000);
+        let mut calc = boss_meter(&storage);
+
+        let details = calc.get_target_details(44_090, None);
+        let healers: Vec<(i32, i32, i32)> = details.heal_skills.iter().map(|s| (s.actor_id, s.dmg, s.time)).collect();
+        assert_eq!(healers, vec![(2260, 2_000, 2)], "only the heals inside the fight have a row");
+        assert_eq!(details.heal_skills[0].hit_timestamps, vec![5_000, 20_000]);
+
+        let record = calc.snapshot_boss_fights_force().pop().expect("the boss fight");
+        let mut players: Vec<i32> = record.actors.iter().map(|a| a.actor_id).collect();
+        players.sort();
+        assert_eq!(players, vec![2259, 2260], "you and the Cleric, not the healers of before and after");
     }
 
     #[test]
