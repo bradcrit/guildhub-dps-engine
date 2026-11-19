@@ -4265,14 +4265,19 @@ fn legion_server(data: &[u8], after: usize) -> Option<u16> {
     })
 }
 
-/// A player's Abyss rank, at the end of their spawn: 19 Trainee, 18 Ninth-
-/// Class Soldier … 10 First-Class Soldier (the ranks above not seen yet).
+/// A player's Abyss rank, at the end of their spawn: 1-19 as the death
+/// recap's (`death_recap::Profile::abyss_grade`) — 19 Trainee, 18 Ninth-
+/// Class … 10 First-Class Soldier, 9-5 1-Star to 5-Star Officer, 4 General,
+/// 3 Marshal, 2 Commander, 1 Supreme Commander.
 ///
 /// `<tag> f4 cb 1f <u32> <rank u32> <u32> 00 … [01]`, the tag 21, 24 or 26
 /// (one player's changed between two of his spawns), 21 or 22 bytes before
 /// the record's end. As dr89mh/aion2-cube-radar found it (docs/FINDINGS.md O7
 /// to O9: 19, 17, 16, 15, 14 against the game's own display); of 274 spawns
 /// of 2026-10-25 in Verteron, every one of 247 so ended had a rank 10–19.
+/// Officers and up were dropped until 2026-11-19 (only 10–19 taken): high
+/// item level enemies in the Abyss showed no rank at all — their tag is
+/// unverified, so any tag counts now (the marker, place and zeros still must).
 fn pvp_rank(data: &[u8]) -> Option<u8> {
     [21, 22].into_iter().find_map(|back| {
         let at = data.len().checked_sub(back)?;
@@ -4280,7 +4285,7 @@ fn pvp_rank(data: &[u8]) -> Option<u8> {
         let rest = &end[16..];
         let zeros = rest[..rest.len() - 1].iter().all(|&b| b == 0) && rest[rest.len() - 1] <= 1;
         let rank = u32::from_le_bytes(end[8..12].try_into().unwrap());
-        (matches!(end[0], 0x21 | 0x24 | 0x26) && end[1..4] == [0xF4, 0xCB, 0x1F] && zeros && (10..=19).contains(&rank)).then_some(rank as u8)
+        (end[1..4] == [0xF4, 0xCB, 0x1F] && zeros && (1..=19).contains(&rank)).then_some(rank as u8)
     })
 }
 
@@ -4818,9 +4823,13 @@ mod tests {
         assert_eq!(rank("21 F4 CB 1F EC 03 00 00 13 00 00 00 9A 2B 00 00 00 00 00 00 00"), Some(19));
         assert_eq!(rank("21 F4 CB 1F E9 03 00 00 0A 00 00 00 01 4C 91 02 00 00 00 00 00 00"), Some(10));
         assert_eq!(rank("26 F4 CB 1F EA 03 00 00 0F 00 00 00 19 C5 01 00 00 00 00 00 00 01"), Some(15));
-        // Another tag, a rank out of the known ones, more after it: none.
-        assert_eq!(rank("25 F4 CB 1F EC 03 00 00 13 00 00 00 9A 2B 00 00 00 00 00 00 00"), None);
+        // Officers and up (any tag): a 3-Star Officer, a Supreme Commander.
+        assert_eq!(rank("21 F4 CB 1F EC 03 00 00 07 00 00 00 9A 2B 00 00 00 00 00 00 00"), Some(7));
+        assert_eq!(rank("25 F4 CB 1F EC 03 00 00 01 00 00 00 9A 2B 00 00 00 00 00 00 00"), Some(1));
+        // Another marker, a rank out of the known ones, more after it: none.
+        assert_eq!(rank("21 F4 CB 1E EC 03 00 00 13 00 00 00 9A 2B 00 00 00 00 00 00 00"), None);
         assert_eq!(rank("21 F4 CB 1F EC 03 00 00 00 00 00 00 9A 2B 00 00 00 00 00 00 00"), None);
+        assert_eq!(rank("21 F4 CB 1F EC 03 00 00 14 00 00 00 9A 2B 00 00 00 00 00 00 00"), None);
         assert_eq!(rank("21 F4 CB 1F EC 03 00 00 13 00 00 00 9A 2B 00 00 00 05 00 00 00"), None);
         assert_eq!(pvp_rank(&[1, 2, 3]), None);
     }

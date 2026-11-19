@@ -66,7 +66,9 @@ pub struct NearbyPlayer {
     pub paired: bool,
     /// Their server, from their legion's entry in the spawn; None out of one.
     pub server: Option<u16>,
-    /// The Abyss rank: 19 Trainee, 18 Ninth-Class … 10 First-Class Soldier.
+    /// The Abyss rank: 19 Trainee, 18 Ninth-Class … 10 First-Class Soldier,
+    /// 9-5 1-Star to 5-Star Officer, 4 General, 3 Marshal, 2 Commander, 1
+    /// Supreme Commander.
     pub rank: Option<u8>,
     pub last_seen_ms: i64,
     /// The last time they hit you.
