@@ -2401,7 +2401,11 @@ impl DataStorage {
             (me, bosses, inner.mob_storage.clone())
         };
         let code_of = |id: i32| codes.get(&id).copied().unwrap_or(if id == target { target_code } else { 0 });
-        crate::combat::fight_track::for_fight(&self.track.lock(), start_ms, end_ms, me, actors, &bosses, code_of)
+        // Your max HP from the login record (no `1b 92` for you solo).
+        let max_hp_of = |id: i32| {
+            self.resources.lock().get(&id).and_then(|r| r.wide(resources::HP)).map_or(0, |g| i32::try_from(g.max).unwrap_or(i32::MAX))
+        };
+        crate::combat::fight_track::for_fight(&self.track.lock(), start_ms, end_ms, me, actors, &bosses, code_of, max_hp_of)
     }
 
     pub fn fight_stagger(&self, start_ms: i64, end_ms: i64) -> Vec<StaggerWindow> {
@@ -3838,6 +3842,9 @@ impl DataStorage {
             inner.party_hp_at.insert(entity_id, now_ms());
         }
         let before = inner.last_hp.insert(entity_id, hp);
+        // The replay's HP bars (`combat::fight_track`).
+        let max_now = max_hp.filter(|&m| m > 0).or_else(|| inner.party_max_hp.get(&entity_id).copied()).unwrap_or(0);
+        self.track.lock().note_hp(now_ms(), entity_id, hp, max_now);
         if hp == 0 && before.is_some_and(|b| b > 0) {
             let at = now_ms();
             inner.death_log.push_back((entity_id, at, None));

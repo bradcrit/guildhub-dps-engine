@@ -3,6 +3,9 @@
 //! its boss and the mobs and helper NPCs around it, and the NPC skill casts
 //! aimed at a spot (a boss's ground mechanics).
 //!
+//! The players' HP over the fight too (`1b 92` for the party, `00 8d` for
+//! you and players named): each change, kept as a share of their maximum.
+//!
 //! Every spot is logged as it comes (at most one per entity every `STEP_MS`
 //! unless it jumped), for the last `KEEP_MS`; a saved fight takes its window
 //! from the log (`DataStorage::fight_track`).
@@ -23,6 +26,9 @@ pub const KEEP_MS: i64 = 20 * 60_000;
 /// And at most this many spots (a crowd in the open world).
 const MAX_POINTS: usize = 400_000;
 const MAX_CASTS: usize = 40_000;
+const MAX_HP_POINTS: usize = 200_000;
+/// HP samples per player in a saved fight; more keep every n-th.
+const MAX_ENTITY_HP: usize = 6_000;
 /// One spot per entity this often, unless it moved further than `JUMP_CM`.
 const STEP_MS: i64 = 150;
 const JUMP_CM: f32 = 300.0;
@@ -71,9 +77,23 @@ pub struct TrackLog {
     /// Entity → (its kind, its NPC code — 0 when none), as last logged.
     kinds: HashMap<i32, (Kind, i32)>,
     casts: VecDeque<Cast>,
+    /// (time, entity, HP, max HP — 0 when not known then).
+    hp: VecDeque<(i64, i32, i32, i32)>,
+    last_hp: HashMap<i32, i32>,
 }
 
 impl TrackLog {
+    /// An entity's HP as the game told it; only changes are kept.
+    pub fn note_hp(&mut self, at: i64, id: i32, hp: i32, max: i32) {
+        if self.last_hp.insert(id, hp) == Some(hp) {
+            return;
+        }
+        self.hp.push_back((at, id, hp, max));
+        while self.hp.front().is_some_and(|h| at - h.0 > KEEP_MS) || self.hp.len() > MAX_HP_POINTS {
+            self.hp.pop_front();
+        }
+    }
+
     pub fn note(&mut self, at: i64, id: i32, pos: Position, kind: Kind, code: i32) {
         if let Some((t, p)) = self.last.get(&id) {
             let moved = ((p.x - pos.x).powi(2) + (p.y - pos.y).powi(2)).sqrt();
@@ -104,6 +124,7 @@ impl TrackLog {
     pub fn map_loaded(&mut self) {
         self.last.clear();
         self.kinds.clear();
+        self.last_hp.clear();
     }
 
     fn kind(&self, id: i32) -> (Kind, i32) {
@@ -121,6 +142,11 @@ pub struct FightTrack {
     /// fight's start, the spot in decimetres (the game's units / 10).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub casts: String,
+    /// Each player's HP over the fight, by actor id: `t,permille;…` — the
+    /// share of their max HP in thousandths, `t` as in `pts`. The HP before
+    /// the window, when known, comes first at the window's start.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hp: std::collections::BTreeMap<i32, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,6 +207,7 @@ fn near(a: &Position, b: &Position) -> bool {
 /// `me`: your id then; `actors`: the fight's players; `bosses`: the target
 /// and any other boss. Players who weren't in the fight are left out; mobs
 /// and NPCs only near the boss.
+#[allow(clippy::too_many_arguments)]
 pub fn for_fight(
     log: &TrackLog,
     start: i64,
@@ -189,6 +216,7 @@ pub fn for_fight(
     actors: &[i32],
     bosses: &[i32],
     code_of: impl Fn(i32) -> i32,
+    max_hp_of: impl Fn(i32) -> i32,
 ) -> Option<FightTrack> {
     let (from, to) = (start - LEAD_MS, end + TAIL_MS);
     let mut by_id: HashMap<i32, Vec<(i64, Position)>> = HashMap::new();
@@ -271,7 +299,69 @@ pub fn for_fight(
         }
         cast_text.push_str(&format!("{},{},{},{},{},{}", c.at - start, c.caster, c.skill, dm(c.pos.x), dm(c.pos.y), dm(c.pos.z)));
     }
-    (!ents.is_empty()).then_some(FightTrack { v: 1, ents, casts: cast_text })
+    let hp = hp_tracks(log, from, to, start, me, actors, max_hp_of);
+    (!ents.is_empty()).then_some(FightTrack { v: 1, ents, casts: cast_text, hp })
+}
+
+/// The players' HP in the window, as thousandths of their max HP.
+fn hp_tracks(
+    log: &TrackLog,
+    from: i64,
+    to: i64,
+    start: i64,
+    me: Option<i32>,
+    actors: &[i32],
+    max_hp_of: impl Fn(i32) -> i32,
+) -> std::collections::BTreeMap<i32, String> {
+    let wanted = |id: i32| actors.contains(&id) || Some(id) == me;
+    let mut by_id: HashMap<i32, Vec<(i64, i32, i32)>> = HashMap::new();
+    let mut before: HashMap<i32, (i32, i32)> = HashMap::new();
+    for &(at, id, hp, max) in &log.hp {
+        if !wanted(id) || at > to {
+            continue;
+        }
+        if at < from {
+            before.insert(id, (hp, max));
+        } else {
+            by_id.entry(id).or_default().push((at, hp, max));
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for id in actors.iter().copied().chain(me) {
+        if out.contains_key(&id) {
+            continue;
+        }
+        let mut rows: Vec<(i64, i32, i32)> = before.get(&id).map(|&(hp, max)| vec![(from, hp, max)]).unwrap_or_default();
+        rows.extend(by_id.remove(&id).unwrap_or_default());
+        if rows.is_empty() {
+            continue;
+        }
+        // A max told along (`1b 92`) holds until the next; else the
+        // highest known (yours from the login record).
+        let fallback = rows.iter().map(|r| r.2).max().unwrap_or(0).max(max_hp_of(id)).max(rows.iter().map(|r| r.1).max().unwrap_or(0));
+        if fallback <= 0 {
+            continue;
+        }
+        let step = rows.len().div_ceil(MAX_ENTITY_HP).max(1);
+        let mut text = String::new();
+        let mut max = 0;
+        for (i, &(at, hp, m)) in rows.iter().enumerate() {
+            if m > 0 {
+                max = m;
+            }
+            if i % step != 0 && i + 1 != rows.len() {
+                continue;
+            }
+            let base = if max > 0 { max.max(hp) } else { fallback };
+            let permille = ((hp.max(0) as i64 * 1000) / base as i64).clamp(0, 1000);
+            if !text.is_empty() {
+                text.push(';');
+            }
+            text.push_str(&format!("{},{}", at - start, permille));
+        }
+        out.insert(id, text);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -295,7 +385,13 @@ mod tests {
             log.note(t, 99, at(1_400.0, 2_000.0), Kind::Player, 0);
         }
         log.note_cast(Cast { at: 11_000, caster: 70, skill: 1801182, target: 70, pos: at(1_650.0, 2_050.0) });
-        let track = for_fight(&log, 10_500, 13_000, Some(5), &[5, 7], &[50], |_| 0).unwrap();
+        log.note_hp(4_000, 5, 900, 1_000);
+        log.note_hp(11_000, 5, 450, 0);
+        log.note_hp(11_500, 5, 450, 0);
+        log.note_hp(12_000, 7, 0, 2_000);
+        let track = for_fight(&log, 10_500, 13_000, Some(5), &[5, 7], &[50], |_| 0, |_| 0).unwrap();
+        assert_eq!(track.hp.get(&5).map(String::as_str), Some("-5000,900;500,450"));
+        assert_eq!(track.hp.get(&7).map(String::as_str), Some("1500,0"));
         let kinds: Vec<(&str, i32)> = track.ents.iter().map(|e| (e.kind.as_str(), e.id)).collect();
         assert_eq!(kinds, vec![("you", 5), ("player", 7), ("boss", 50), ("mob", 60)]);
         assert_eq!(track.ents[2].code, 2300371);
