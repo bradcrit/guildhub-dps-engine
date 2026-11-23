@@ -108,6 +108,30 @@ fn skill_target(packet: &[u8], i: usize) -> Option<Spotted> {
     position_at(packet, i + 7 + target.length as usize + 4).map(|pos| Spotted::Entity(target.value, pos))
 }
 
+/// A skill cast at a spot (`02 38` with flags & 2): caster, skill, target and
+/// the spot — for a fight's replay (an NPC's ground mechanic).
+pub fn cast(packet: &[u8]) -> Option<(i32, u32, i32, Position)> {
+    let length = read_varint(packet, 0);
+    if length.length <= 0 {
+        return None;
+    }
+    let at = length.length as usize;
+    if packet.get(at..at + 2)? != [0x02, 0x38] {
+        return None;
+    }
+    let caster = read_varint(packet, at + 2);
+    if caster.length <= 0 {
+        return None;
+    }
+    let i = at + 2 + caster.length as usize;
+    let b = packet.get(i + 1..i + 5)?;
+    let skill = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    match skill_target(packet, i)? {
+        Spotted::Entity(target, pos) => Some((caster.value, skill, target, pos)),
+        Spotted::You(_) => None,
+    }
+}
+
 fn varint_len(packet: &[u8], i: usize) -> Option<usize> {
     let v = read_varint(packet, i);
     (v.length > 0).then_some(v.length as usize)

@@ -4,6 +4,7 @@ pub mod death_recap;
 pub mod dps_calculator;
 pub mod entry_ledger;
 pub mod fight_buffs;
+pub mod fight_track;
 pub mod kda;
 pub mod nearby_players;
 pub mod ping_tracker;

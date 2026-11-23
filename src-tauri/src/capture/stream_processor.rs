@@ -338,6 +338,12 @@ impl StreamProcessor {
         if let Some(spotted) = crate::capture::positions::parse(packet) {
             self.data_storage.note_spotted(spotted);
         }
+        // An NPC's cast at a spot (a fight's replay).
+        if let Some((caster, skill, target, pos)) = crate::capture::positions::cast(packet) {
+            if !self.data_storage.is_player(caster) {
+                self.data_storage.note_cast(caster, skill, target, pos);
+            }
+        }
         // The objects in range (the Hidden Cube hint).
         if let Some(record) = crate::capture::objects::parse(packet) {
             self.data_storage.note_object(record);

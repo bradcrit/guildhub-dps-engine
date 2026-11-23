@@ -59,6 +59,7 @@ fn record_spanning(start_ms: i64, duration_ms: i64) -> FightRecord {
         killed: None,
         max_hp_from_spawn: None,
         player_stats: None,
+        track: None,
     }
 }
 

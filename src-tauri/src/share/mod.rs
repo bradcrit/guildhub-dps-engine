@@ -493,6 +493,7 @@ mod tests {
             killed: None,
             max_hp_from_spawn: None,
             player_stats: None,
+            track: None,
         }
     }
 

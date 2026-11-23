@@ -1023,6 +1023,9 @@ pub struct DataStorage {
     /// lock, as `abnormals`: fed by its own records, read when a fight is
     /// saved.
     stagger: Mutex<StaggerLog>,
+    /// Where everyone was lately, for a fight's replay (see
+    /// `combat::fight_track`). Its own lock, as `stagger`.
+    track: Mutex<crate::combat::fight_track::TrackLog>,
     /// Your cooldowns, what the monsters cast and the bosses' time limits
     /// (see `combat::skill_timers`). Its own lock, as `abnormals`.
     skill_timers: Mutex<SkillTimers>,
@@ -1575,6 +1578,7 @@ impl DataStorage {
             nearby: Mutex::new(NearbyPlayers::default()),
             arena: Mutex::new(ArenaTracker::default()),
             stagger: Mutex::new(StaggerLog::default()),
+            track: Mutex::new(Default::default()),
             skill_timers: Mutex::new(SkillTimers::default()),
             resources: Mutex::new(HashMap::new()),
             resources_self: Mutex::new(None),
@@ -1838,9 +1842,24 @@ impl DataStorage {
 
     /// A spot the game told of (`capture::positions`): yours, or another entity's.
     pub fn note_spotted(&self, spotted: Spotted) {
+        use crate::combat::fight_track::{Kind, SELF_KEY};
         let mut inner = self.inner.write();
         let me = inner.local_player_id;
         let spawned = inner.pending_spawn.take();
+        let (id, pos) = match spotted {
+            Spotted::You(pos) => (me.and_then(|m| i32::try_from(m).ok()).unwrap_or(SELF_KEY), pos),
+            Spotted::Entity(id, pos) => (id, pos),
+        };
+        let (kind, code) = if Some(id as i64) == me || id == SELF_KEY || inner.known_player_ids.contains(&id) {
+            (Kind::Player, 0)
+        } else if let Some(&code) = inner.mob_storage.get(&id) {
+            (Kind::Mob, code)
+        } else {
+            (Kind::Other, spawned.filter(|&(mid, _)| mid == id).map_or(0, |(_, code)| code))
+        };
+        if !inner.dead_entity_ids.contains(&id) {
+            self.track.lock().note(now_ms(), id, pos, kind, code);
+        }
         match spotted {
             Spotted::You(pos) => {
                 inner.self_position = Some((pos, now_ms()));
@@ -2364,6 +2383,27 @@ impl DataStorage {
     /// The stagger windows with a deduction from `start_ms` to `end_ms`
     /// (`StaggerLog::windows_between`), for a fight starting at `start_ms`:
     /// times from its start, summons resolved to their owners.
+    /// An NPC's skill cast at a spot (`capture::positions::cast`), for a fight's replay.
+    pub fn note_cast(&self, caster: i32, skill: u32, target: i32, pos: Position) {
+        self.track.lock().note_cast(crate::combat::fight_track::Cast { at: now_ms(), caster, skill, target, pos });
+    }
+
+    /// Where everyone was in the fight from `start_ms` to `end_ms` (first and
+    /// last hit), see `combat::fight_track::for_fight`.
+    /// `target_code`: the target's NPC code, when its spawn wasn't seen.
+    pub fn fight_track(&self, start_ms: i64, end_ms: i64, target: i32, target_code: i32, actors: &[i32]) -> Option<crate::combat::fight_track::FightTrack> {
+        let (me, bosses, codes) = {
+            let inner = self.inner.read();
+            let me = inner.local_player_id.and_then(|m| i32::try_from(m).ok());
+            let mut bosses: Vec<i32> = inner.boss_entity_ids.iter().copied().collect();
+            bosses.retain(|&b| b != target);
+            bosses.insert(0, target);
+            (me, bosses, inner.mob_storage.clone())
+        };
+        let code_of = |id: i32| codes.get(&id).copied().unwrap_or(if id == target { target_code } else { 0 });
+        crate::combat::fight_track::for_fight(&self.track.lock(), start_ms, end_ms, me, actors, &bosses, code_of)
+    }
+
     pub fn fight_stagger(&self, start_ms: i64, end_ms: i64) -> Vec<StaggerWindow> {
         let windows = self.stagger.lock().windows_between(start_ms, end_ms);
         let inner = self.inner.read();
@@ -4564,6 +4604,7 @@ impl DataStorage {
         inner.players_in_sight.clear();
         inner.entity_positions.clear();
         inner.self_guess = None;
+        self.track.lock().map_loaded();
         // Logged with the cubes it drops: one the game sent just before the
         // load (a login or teleport next to it) would be lost here.
         tracing::info!("Map load: {from:?} -> {map_id}, {} Hidden Cube(s) dropped", inner.hidden_cubes.len());

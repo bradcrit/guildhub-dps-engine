@@ -86,6 +86,11 @@ pub struct FightRecord {
     /// when the meter started after the login sheet with no change since.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_stats: Option<crate::capture::abnormal::FightStats>,
+    /// Where everyone was over the fight, for the Companion's replay
+    /// (`combat::fight_track`). `None` before GuildHub's 2.1.5 and when no
+    /// spot was told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<crate::combat::fight_track::FightTrack>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

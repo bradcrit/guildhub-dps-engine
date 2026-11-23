@@ -989,6 +989,8 @@ fn canonicalise(record: &mut FightRecord) {
     record.local_actor_id = None;
     record.killed = None;
     record.max_hp_from_spawn = None;
+    // The replay's track is the Companion's (GuildHub), never the service's.
+    record.track = None;
     // Buffs come from the slice's abnormal records (meter 2.0.56 on). A slice
     // from an older meter has none, so its timeline is empty: say "no buff
     // data" (None) rather than "no buffs were seen". Every real fight has some.

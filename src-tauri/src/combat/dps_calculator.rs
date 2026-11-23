@@ -1370,6 +1370,14 @@ impl DpsCalculator {
             // target's. A window still open is saved as missed, and stays
             // open here: this fight is saved again while it goes on.
             let stagger = self.data_storage.fight_stagger(target_data.first_damage_time, target_data.last_damage_time);
+            let actor_ids: Vec<i32> = actors.iter().map(|a| a.actor_id).collect();
+            let track = self.data_storage.fight_track(
+                target_data.first_damage_time,
+                target_data.last_damage_time,
+                target_id,
+                mob_data.get(&target_id).copied().unwrap_or(0),
+                &actor_ids,
+            );
             let dungeon_id = fight_dungeon(&self.npc_lookup, mob_code, roster_dungeon);
             let run_at = if dungeon_id > 0 { self.data_storage.run_started_at(target_data.first_damage_time) } else { 0 };
             let record = FightRecord {
@@ -1401,6 +1409,7 @@ impl DpsCalculator {
                 killed: Some(self.data_storage.get_dead_entities().contains(&target_id)),
                 max_hp_from_spawn: Some(self.data_storage.spawn_max_hp(target_id).is_some()),
                 player_stats: self.data_storage.fight_stats(target_data.first_damage_time, target_data.last_damage_time),
+                track,
             };
 
             if is_ended {

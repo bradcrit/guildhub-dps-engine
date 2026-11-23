@@ -1,0 +1,315 @@
+//! Where everyone was over a fight, for a replay (GuildHub Companion): the
+//! spots the game told (`capture::positions`) of you, the fight's players,
+//! its boss and the mobs and helper NPCs around it, and the NPC skill casts
+//! aimed at a spot (a boss's ground mechanics).
+//!
+//! Every spot is logged as it comes (at most one per entity every `STEP_MS`
+//! unless it jumped), for the last `KEEP_MS`; a saved fight takes its window
+//! from the log (`DataStorage::fight_track`).
+//!
+//! Measured on two captures (2026-11-18, 2026-11-22, `tests/replay_density_scan.rs`):
+//! your spot comes every 100–250 ms (median), a party member's every
+//! 100–200 ms, a mob's ~100 ms while it is hit, with gaps of a second at most
+//! in a fight — enough to draw everyone moving.
+
+use std::collections::{HashMap, VecDeque};
+
+use serde::{Deserialize, Serialize};
+
+use crate::capture::positions::Position;
+
+/// The log keeps this long.
+pub const KEEP_MS: i64 = 20 * 60_000;
+/// And at most this many spots (a crowd in the open world).
+const MAX_POINTS: usize = 400_000;
+const MAX_CASTS: usize = 40_000;
+/// One spot per entity this often, unless it moved further than `JUMP_CM`.
+const STEP_MS: i64 = 150;
+const JUMP_CM: f32 = 300.0;
+/// Your spot, when the game tells it without your id (`Spotted::You`) or
+/// before your id is known.
+pub const SELF_KEY: i32 = 0;
+/// Entities kept around the fight: within this of the boss's (else your) spots.
+const AROUND_CM: f32 = 9_000.0;
+/// At most this many mobs and NPCs in a saved fight, the most spots first.
+const MAX_OTHERS: usize = 80;
+/// Spots per entity in a saved fight; a longer track keeps every n-th.
+const MAX_ENTITY_POINTS: usize = 8_000;
+const MAX_SAVED_CASTS: usize = 6_000;
+/// A fight's track starts this long before the first hit and ends this long after the last.
+pub const LEAD_MS: i64 = 5_000;
+pub const TAIL_MS: i64 = 3_000;
+
+/// What an entity was when its spot was logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Player,
+    Mob,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Point {
+    at: i64,
+    id: i32,
+    pos: Position,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Cast {
+    pub at: i64,
+    pub caster: i32,
+    pub skill: u32,
+    pub target: i32,
+    pub pos: Position,
+}
+
+#[derive(Default)]
+pub struct TrackLog {
+    points: VecDeque<Point>,
+    last: HashMap<i32, (i64, Position)>,
+    /// Entity → (its kind, its NPC code — 0 when none), as last logged.
+    kinds: HashMap<i32, (Kind, i32)>,
+    casts: VecDeque<Cast>,
+}
+
+impl TrackLog {
+    pub fn note(&mut self, at: i64, id: i32, pos: Position, kind: Kind, code: i32) {
+        if let Some((t, p)) = self.last.get(&id) {
+            let moved = ((p.x - pos.x).powi(2) + (p.y - pos.y).powi(2)).sqrt();
+            if at - t < STEP_MS && moved < JUMP_CM {
+                return;
+            }
+        }
+        self.last.insert(id, (at, pos));
+        if kind != Kind::Other || code != 0 || !self.kinds.contains_key(&id) {
+            self.kinds.insert(id, (kind, code));
+        }
+        self.points.push_back(Point { at, id, pos });
+        while self.points.front().is_some_and(|p| at - p.at > KEEP_MS) || self.points.len() > MAX_POINTS {
+            self.points.pop_front();
+        }
+    }
+
+    pub fn note_cast(&mut self, cast: Cast) {
+        let at = cast.at;
+        self.casts.push_back(cast);
+        while self.casts.front().is_some_and(|c| at - c.at > KEEP_MS) || self.casts.len() > MAX_CASTS {
+            self.casts.pop_front();
+        }
+    }
+
+    /// A map load: the entity ids start over, so what was logged under one
+    /// no longer says what it is.
+    pub fn map_loaded(&mut self) {
+        self.last.clear();
+        self.kinds.clear();
+    }
+
+    fn kind(&self, id: i32) -> (Kind, i32) {
+        self.kinds.get(&id).copied().unwrap_or((Kind::Other, 0))
+    }
+}
+
+/// A fight's track as saved with it (`FightRecord::track`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FightTrack {
+    /// The format: 1.
+    pub v: u8,
+    pub ents: Vec<TrackEntity>,
+    /// NPC casts at a spot, `t,caster,skill,x,y,z;…` — `t` in ms from the
+    /// fight's start, the spot in decimetres (the game's units / 10).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub casts: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackEntity {
+    /// An actor's id (as in `FightRecord::actors`), the boss's, or a mob's.
+    pub id: i32,
+    /// "you", "player", "boss", "mob" or "npc".
+    pub kind: String,
+    /// The NPC code (mobs, bosses, NPCs); 0 for players.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub code: i32,
+    /// `t,x,y,z;…` — `t` in ms from the fight's start (negative before the
+    /// first hit), the spot in decimetres.
+    pub pts: String,
+}
+
+fn is_zero(n: &i32) -> bool {
+    *n == 0
+}
+
+fn dm(v: f32) -> i32 {
+    (v / 10.0).round() as i32
+}
+
+fn encode(points: &[(i64, Position)], start: i64) -> String {
+    let step = points.len().div_ceil(MAX_ENTITY_POINTS).max(1);
+    let mut out = String::with_capacity(points.len() / step * 24);
+    for (i, (t, p)) in points.iter().enumerate() {
+        if i % step != 0 && i + 1 != points.len() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(';');
+        }
+        out.push_str(&format!("{},{},{},{}", t - start, dm(p.x), dm(p.y), dm(p.z)));
+    }
+    out
+}
+
+fn centre(points: &[(i64, Position)]) -> Option<Position> {
+    if points.is_empty() {
+        return None;
+    }
+    let n = points.len() as f32;
+    Some(Position {
+        x: points.iter().map(|(_, p)| p.x).sum::<f32>() / n,
+        y: points.iter().map(|(_, p)| p.y).sum::<f32>() / n,
+        z: points.iter().map(|(_, p)| p.z).sum::<f32>() / n,
+    })
+}
+
+fn near(a: &Position, b: &Position) -> bool {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt() <= AROUND_CM
+}
+
+/// The track of a fight from `start` to `end` (first and last hit, unix ms).
+///
+/// `me`: your id then; `actors`: the fight's players; `bosses`: the target
+/// and any other boss. Players who weren't in the fight are left out; mobs
+/// and NPCs only near the boss.
+pub fn for_fight(
+    log: &TrackLog,
+    start: i64,
+    end: i64,
+    me: Option<i32>,
+    actors: &[i32],
+    bosses: &[i32],
+    code_of: impl Fn(i32) -> i32,
+) -> Option<FightTrack> {
+    let (from, to) = (start - LEAD_MS, end + TAIL_MS);
+    let mut by_id: HashMap<i32, Vec<(i64, Position)>> = HashMap::new();
+    for p in log.points.iter().filter(|p| p.at >= from && p.at <= to) {
+        let id = if p.id == SELF_KEY { me.unwrap_or(SELF_KEY) } else { p.id };
+        by_id.entry(id).or_default().push((p.at, p.pos));
+    }
+    if let Some(me) = me {
+        if let Some(v) = by_id.get_mut(&me) {
+            v.sort_by_key(|(t, _)| *t);
+        }
+    }
+    let casters: std::collections::HashSet<i32> = log.casts.iter().filter(|c| c.at >= from && c.at <= to).map(|c| c.caster).collect();
+    let anchor = bosses
+        .iter()
+        .find_map(|b| by_id.get(b).and_then(|v| centre(v)))
+        .or_else(|| me.and_then(|m| by_id.get(&m)).and_then(|v| centre(v)))?;
+
+    let mut ents = Vec::new();
+    let mut others: Vec<(usize, TrackEntity)> = Vec::new();
+    for (id, points) in &by_id {
+        let (kind, code) = log.kind(*id);
+        let label = if Some(*id) == me {
+            "you"
+        } else if bosses.contains(id) {
+            "boss"
+        } else if actors.contains(id) {
+            "player"
+        } else if kind == Kind::Player {
+            continue;
+        } else if kind == Kind::Mob {
+            "mob"
+        } else {
+            "npc"
+        };
+        // Only what's near the boss: a party teleported in at the pull was
+        // a kilometre away a few seconds before (Transcendent Bakarma, 2026-11-18).
+        let points: Vec<(i64, Position)> = points.iter().copied().filter(|(_, p)| near(p, &anchor)).collect();
+        if points.is_empty() {
+            continue;
+        }
+        // Something told of a few times with no code and no cast (an object,
+        // a stranger's summon) says nothing in a replay.
+        if label == "npc" && code == 0 && !casters.contains(id) {
+            continue;
+        }
+        let entity = TrackEntity {
+            id: *id,
+            kind: label.to_string(),
+            code: match (label, code) {
+                ("you" | "player", _) => 0,
+                (_, 0) => code_of(*id),
+                _ => code,
+            },
+            pts: encode(&points, start),
+        };
+        if matches!(label, "mob" | "npc") {
+            others.push((points.len(), entity));
+        } else {
+            ents.push(entity);
+        }
+    }
+    // Helper NPCs that stand still and only cast: their spot is the cast's.
+    let casts: Vec<&Cast> = log
+        .casts
+        .iter()
+        .filter(|c| c.at >= from && c.at <= to)
+        .filter(|c| !actors.contains(&c.caster) && Some(c.caster) != me && log.kind(c.caster).0 != Kind::Player)
+        .filter(|c| near(&c.pos, &anchor))
+        .take(MAX_SAVED_CASTS)
+        .collect();
+    others.sort_by(|a, b| b.0.cmp(&a.0));
+    ents.extend(others.into_iter().take(MAX_OTHERS).map(|(_, e)| e));
+    ents.sort_by_key(|e| (["you", "player", "boss", "mob", "npc"].iter().position(|k| *k == e.kind), e.id));
+
+    let mut cast_text = String::new();
+    for c in casts {
+        if !cast_text.is_empty() {
+            cast_text.push(';');
+        }
+        cast_text.push_str(&format!("{},{},{},{},{},{}", c.at - start, c.caster, c.skill, dm(c.pos.x), dm(c.pos.y), dm(c.pos.z)));
+    }
+    (!ents.is_empty()).then_some(FightTrack { v: 1, ents, casts: cast_text })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(x: f32, y: f32) -> Position {
+        Position { x, y, z: 100.0 }
+    }
+
+    #[test]
+    fn keeps_the_fight_and_whats_near_it() {
+        let mut log = TrackLog::default();
+        for i in 0..20 {
+            let t = 10_000 + i * 200;
+            log.note(t, SELF_KEY, at(1_000.0 + i as f32 * 10.0, 2_000.0), Kind::Player, 0);
+            log.note(t, 7, at(1_500.0, 2_000.0), Kind::Player, 0);
+            log.note(t, 50, at(1_600.0, 2_100.0), Kind::Mob, 2300371);
+            log.note(t, 60, at(1_700.0, 2_100.0), Kind::Mob, 123);
+            log.note(t, 61, at(900_000.0, 2_100.0), Kind::Mob, 124);
+            log.note(t, 99, at(1_400.0, 2_000.0), Kind::Player, 0);
+        }
+        log.note_cast(Cast { at: 11_000, caster: 70, skill: 1801182, target: 70, pos: at(1_650.0, 2_050.0) });
+        let track = for_fight(&log, 10_500, 13_000, Some(5), &[5, 7], &[50], |_| 0).unwrap();
+        let kinds: Vec<(&str, i32)> = track.ents.iter().map(|e| (e.kind.as_str(), e.id)).collect();
+        assert_eq!(kinds, vec![("you", 5), ("player", 7), ("boss", 50), ("mob", 60)]);
+        assert_eq!(track.ents[2].code, 2300371);
+        assert!(track.ents[0].pts.starts_with("-500,100,200,10;"));
+        assert_eq!(track.casts, "500,70,1801182,165,205,10");
+    }
+
+    #[test]
+    fn throttles_but_keeps_jumps() {
+        let mut log = TrackLog::default();
+        log.note(0, 1, at(0.0, 0.0), Kind::Mob, 0);
+        log.note(50, 1, at(10.0, 0.0), Kind::Mob, 0);
+        log.note(100, 1, at(5_000.0, 0.0), Kind::Mob, 0);
+        log.note(400, 1, at(5_010.0, 0.0), Kind::Mob, 0);
+        assert_eq!(log.points.len(), 3);
+    }
+}
