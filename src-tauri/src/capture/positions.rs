@@ -108,6 +108,18 @@ fn skill_target(packet: &[u8], i: usize) -> Option<Spotted> {
     position_at(packet, i + 7 + target.length as usize + 4).map(|pos| Spotted::Entity(target.value, pos))
 }
 
+/// Whether the spot `parse` reads from this packet is where the entity is: a
+/// move, a spawn, a map load or a teleport — not an effect's (`2A 38`) or a
+/// skill target's (`02 38`) spot, which can be off (`combat::fight_track`).
+pub fn is_exact(packet: &[u8]) -> bool {
+    let length = read_varint(packet, 0);
+    if length.length <= 0 {
+        return false;
+    }
+    let at = length.length as usize;
+    matches!(packet.get(at..at + 2), Some([0x1A | 0x1B | 0x1C | 0x3C, 0x37] | [0x41 | 0x21 | 0x23, 0x36]))
+}
+
 /// A skill cast at a spot (`02 38` with flags & 2): caster, skill, target and
 /// the spot — for a fight's replay (an NPC's ground mechanic).
 pub fn cast(packet: &[u8]) -> Option<(i32, u32, i32, Position)> {

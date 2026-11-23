@@ -6,6 +6,14 @@
 //! The players' HP over the fight too (`1b 92` for the party, `00 8d` for
 //! you and players named): each change, kept as a share of their maximum.
 //!
+//! Not every record tells a spot as well: a move (`1A/1B/1C/3C 37`), a spawn
+//! or a teleport is where the entity is, but an effect's spot (`2A 38`) or a
+//! skill's target spot (`02 38`) is off by 5 m and more one time in ten
+//! (`tests/track_jitter_scan.rs`, 2026-11-18: p90 5.4 m off the moves' path,
+//! back and forth) — a replay's players jumped. A saved track keeps those only
+//! where no move was told near them, and drops a spot that goes off and comes
+//! straight back faster than anyone runs (`clean`).
+//!
 //! Every spot is logged as it comes (at most one per entity every `STEP_MS`
 //! unless it jumped), for the last `KEEP_MS`; a saved fight takes its window
 //! from the log (`DataStorage::fight_track`).
@@ -32,6 +40,11 @@ const MAX_ENTITY_HP: usize = 6_000;
 /// One spot per entity this often, unless it moved further than `JUMP_CM`.
 const STEP_MS: i64 = 150;
 const JUMP_CM: f32 = 300.0;
+/// A spot not from a move is dropped within this of one that is.
+const TRUST_MS: i64 = 700;
+/// A spike: off by more than this plus running speed for the time between.
+const SPIKE_CM: f32 = 250.0;
+const RUN_CM_PER_MS: f32 = 0.8;
 /// Your spot, when the game tells it without your id (`Spotted::You`) or
 /// before your id is known.
 pub const SELF_KEY: i32 = 0;
@@ -59,6 +72,8 @@ struct Point {
     at: i64,
     id: i32,
     pos: Position,
+    /// From a move, spawn or teleport record: where the entity is.
+    exact: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,7 +88,7 @@ pub struct Cast {
 #[derive(Default)]
 pub struct TrackLog {
     points: VecDeque<Point>,
-    last: HashMap<i32, (i64, Position)>,
+    last: HashMap<i32, (i64, Position, bool)>,
     /// Entity → (its kind, its NPC code — 0 when none), as last logged.
     kinds: HashMap<i32, (Kind, i32)>,
     casts: VecDeque<Cast>,
@@ -94,18 +109,19 @@ impl TrackLog {
         }
     }
 
-    pub fn note(&mut self, at: i64, id: i32, pos: Position, kind: Kind, code: i32) {
-        if let Some((t, p)) = self.last.get(&id) {
+    /// `exact`: told by a move, spawn or teleport (see the module's doc).
+    pub fn note(&mut self, at: i64, id: i32, pos: Position, kind: Kind, code: i32, exact: bool) {
+        if let Some((t, p, was_exact)) = self.last.get(&id) {
             let moved = ((p.x - pos.x).powi(2) + (p.y - pos.y).powi(2)).sqrt();
-            if at - t < STEP_MS && moved < JUMP_CM {
+            if at - t < STEP_MS && moved < JUMP_CM && (*was_exact || !exact) {
                 return;
             }
         }
-        self.last.insert(id, (at, pos));
+        self.last.insert(id, (at, pos, exact));
         if kind != Kind::Other || code != 0 || !self.kinds.contains_key(&id) {
             self.kinds.insert(id, (kind, code));
         }
-        self.points.push_back(Point { at, id, pos });
+        self.points.push_back(Point { at, id, pos, exact });
         while self.points.front().is_some_and(|p| at - p.at > KEEP_MS) || self.points.len() > MAX_POINTS {
             self.points.pop_front();
         }
@@ -186,6 +202,62 @@ fn encode(points: &[(i64, Position)], start: i64) -> String {
     out
 }
 
+fn dist(a: &Position, b: &Position) -> f32 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// One entity's spots, oldest first, without the ones that make it jump: a
+/// spot not from a move near one that is, and spikes — one or two spots off
+/// and straight back, further than running gets in the time.
+fn clean(mut v: Vec<(i64, Position, bool)>) -> Vec<(i64, Position)> {
+    v.sort_by_key(|p| p.0);
+    let exact: Vec<i64> = v.iter().filter(|p| p.2).map(|p| p.0).collect();
+    if !exact.is_empty() {
+        v.retain(|p| {
+            p.2 || {
+                let i = exact.partition_point(|&t| t < p.0 - TRUST_MS);
+                exact.get(i).is_none_or(|&t| t > p.0 + TRUST_MS)
+            }
+        });
+    }
+    let mut pts: Vec<(i64, Position)> = v.into_iter().map(|p| (p.0, p.1)).collect();
+    let reach = |dt: i64| SPIKE_CM + dt.max(0) as f32 * RUN_CM_PER_MS;
+    for _ in 0..4 {
+        let mut keep = vec![true; pts.len()];
+        let mut any = false;
+        let mut i = 1;
+        while i + 1 < pts.len() {
+            let a = pts[i - 1];
+            let mut dropped = false;
+            for span in 1..=2usize {
+                let Some(&c) = pts.get(i + span) else { break };
+                if dist(&a.1, &c.1) > reach(c.0 - a.0) {
+                    continue;
+                }
+                let off = (i..i + span).all(|j| dist(&pts[j].1, &a.1) > reach(pts[j].0 - a.0) && dist(&pts[j].1, &c.1) > reach(c.0 - pts[j].0));
+                if off {
+                    for k in keep.iter_mut().skip(i).take(span) {
+                        *k = false;
+                    }
+                    i += span;
+                    dropped = true;
+                    any = true;
+                    break;
+                }
+            }
+            if !dropped {
+                i += 1;
+            }
+        }
+        if !any {
+            break;
+        }
+        let mut k = keep.into_iter();
+        pts.retain(|_| k.next().unwrap_or(true));
+    }
+    pts
+}
+
 fn centre(points: &[(i64, Position)]) -> Option<Position> {
     if points.is_empty() {
         return None;
@@ -219,16 +291,12 @@ pub fn for_fight(
     max_hp_of: impl Fn(i32) -> i32,
 ) -> Option<FightTrack> {
     let (from, to) = (start - LEAD_MS, end + TAIL_MS);
-    let mut by_id: HashMap<i32, Vec<(i64, Position)>> = HashMap::new();
+    let mut raw: HashMap<i32, Vec<(i64, Position, bool)>> = HashMap::new();
     for p in log.points.iter().filter(|p| p.at >= from && p.at <= to) {
         let id = if p.id == SELF_KEY { me.unwrap_or(SELF_KEY) } else { p.id };
-        by_id.entry(id).or_default().push((p.at, p.pos));
+        raw.entry(id).or_default().push((p.at, p.pos, p.exact));
     }
-    if let Some(me) = me {
-        if let Some(v) = by_id.get_mut(&me) {
-            v.sort_by_key(|(t, _)| *t);
-        }
-    }
+    let by_id: HashMap<i32, Vec<(i64, Position)>> = raw.into_iter().map(|(id, v)| (id, clean(v))).collect();
     let casters: std::collections::HashSet<i32> = log.casts.iter().filter(|c| c.at >= from && c.at <= to).map(|c| c.caster).collect();
     let anchor = bosses
         .iter()
@@ -377,12 +445,12 @@ mod tests {
         let mut log = TrackLog::default();
         for i in 0..20 {
             let t = 10_000 + i * 200;
-            log.note(t, SELF_KEY, at(1_000.0 + i as f32 * 10.0, 2_000.0), Kind::Player, 0);
-            log.note(t, 7, at(1_500.0, 2_000.0), Kind::Player, 0);
-            log.note(t, 50, at(1_600.0, 2_100.0), Kind::Mob, 2300371);
-            log.note(t, 60, at(1_700.0, 2_100.0), Kind::Mob, 123);
-            log.note(t, 61, at(900_000.0, 2_100.0), Kind::Mob, 124);
-            log.note(t, 99, at(1_400.0, 2_000.0), Kind::Player, 0);
+            log.note(t, SELF_KEY, at(1_000.0 + i as f32 * 10.0, 2_000.0), Kind::Player, 0, true);
+            log.note(t, 7, at(1_500.0, 2_000.0), Kind::Player, 0, true);
+            log.note(t, 50, at(1_600.0, 2_100.0), Kind::Mob, 2300371, true);
+            log.note(t, 60, at(1_700.0, 2_100.0), Kind::Mob, 123, true);
+            log.note(t, 61, at(900_000.0, 2_100.0), Kind::Mob, 124, true);
+            log.note(t, 99, at(1_400.0, 2_000.0), Kind::Player, 0, true);
         }
         log.note_cast(Cast { at: 11_000, caster: 70, skill: 1801182, target: 70, pos: at(1_650.0, 2_050.0) });
         log.note_hp(4_000, 5, 900, 1_000);
@@ -400,12 +468,26 @@ mod tests {
     }
 
     #[test]
+    fn effect_spots_near_moves_and_spikes_are_dropped() {
+        let p = |x: f32| at(x, 0.0);
+        // Moves every 300 ms walking +1 m; an effect spot 10 m off between two moves.
+        let v = vec![(0, p(0.0), true), (300, p(100.0), true), (450, p(1_000.0), false), (600, p(200.0), true)];
+        assert_eq!(clean(v).iter().map(|q| q.0).collect::<Vec<_>>(), vec![0, 300, 600]);
+        // Effects only (you): a spike of two spots 8 m off and back is dropped; a real 20 m dash that stays isn't.
+        let v = vec![
+            (0, p(0.0), false), (200, p(50.0), false), (400, p(900.0), false), (500, p(905.0), false),
+            (700, p(120.0), false), (900, p(150.0), false), (1_000, p(2_150.0), false), (1_300, p(2_200.0), false),
+        ];
+        assert_eq!(clean(v).iter().map(|q| q.0).collect::<Vec<_>>(), vec![0, 200, 700, 900, 1_000, 1_300]);
+    }
+
+    #[test]
     fn throttles_but_keeps_jumps() {
         let mut log = TrackLog::default();
-        log.note(0, 1, at(0.0, 0.0), Kind::Mob, 0);
-        log.note(50, 1, at(10.0, 0.0), Kind::Mob, 0);
-        log.note(100, 1, at(5_000.0, 0.0), Kind::Mob, 0);
-        log.note(400, 1, at(5_010.0, 0.0), Kind::Mob, 0);
+        log.note(0, 1, at(0.0, 0.0), Kind::Mob, 0, true);
+        log.note(50, 1, at(10.0, 0.0), Kind::Mob, 0, true);
+        log.note(100, 1, at(5_000.0, 0.0), Kind::Mob, 0, true);
+        log.note(400, 1, at(5_010.0, 0.0), Kind::Mob, 0, true);
         assert_eq!(log.points.len(), 3);
     }
 }

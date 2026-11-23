@@ -1842,6 +1842,13 @@ impl DataStorage {
 
     /// A spot the game told of (`capture::positions`): yours, or another entity's.
     pub fn note_spotted(&self, spotted: Spotted) {
+        self.note_spotted_from(spotted, true);
+    }
+
+    /// `note_spotted`, `exact`: told by a move, spawn or teleport record
+    /// (`capture::positions::is_exact`) — the replay trusts those over an
+    /// effect's or a skill's spot (`combat::fight_track`).
+    pub fn note_spotted_from(&self, spotted: Spotted, exact: bool) {
         use crate::combat::fight_track::{Kind, SELF_KEY};
         let mut inner = self.inner.write();
         let me = inner.local_player_id;
@@ -1858,7 +1865,7 @@ impl DataStorage {
             (Kind::Other, spawned.filter(|&(mid, _)| mid == id).map_or(0, |(_, code)| code))
         };
         if !inner.dead_entity_ids.contains(&id) {
-            self.track.lock().note(now_ms(), id, pos, kind, code);
+            self.track.lock().note(now_ms(), id, pos, kind, code, exact);
         }
         match spotted {
             Spotted::You(pos) => {

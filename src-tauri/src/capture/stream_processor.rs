@@ -336,7 +336,7 @@ impl StreamProcessor {
         }
         // Where you and the mobs are (the pet tracker's distances).
         if let Some(spotted) = crate::capture::positions::parse(packet) {
-            self.data_storage.note_spotted(spotted);
+            self.data_storage.note_spotted_from(spotted, crate::capture::positions::is_exact(packet));
         }
         // An NPC's cast at a spot (a fight's replay).
         if let Some((caster, skill, target, pos)) = crate::capture::positions::cast(packet) {
