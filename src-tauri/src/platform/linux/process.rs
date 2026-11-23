@@ -47,14 +47,28 @@ pub(crate) fn is_hyprland() -> bool {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
 }
 
+/// KDE through XWayland, asked for (`A2TOOLS_XWAYLAND=1`). KWin 6.8.3 can
+/// show a WebKitGTK window's previous frame for a moment after it changes
+/// (KDE bug 528950): the overlay flickered as its tooltips opened and closed
+/// (#198), and XWayland avoids that. 2.1.1 switched every KDE player on KWin
+/// 6.8.3+ to it, and there the meter took no clicks for some (Hirai,
+/// 2026-11-21) and every window lost the place KWin kept for it (they came
+/// up in the top left): so only for those who ask, until that is fixed.
+fn kde_xwayland_requested(desktop: &str) -> bool {
+    crate::platform::kwin_rules::is_kde(desktop) && std::env::var("A2TOOLS_XWAYLAND").is_ok_and(|v| v.trim() == "1")
+}
+
 /// GNOME, for keep-above; COSMIC too (its windows are made sticky either way,
 /// `cosmic_sticky`; under XWayland the meter places them itself), unless its
-/// overlay mode is asked for, which needs native Wayland.
-fn prefer_xwayland(backend_set: bool, desktop: &str, wayland: bool, x11_available: bool) -> bool {
+/// overlay mode is asked for, which needs native Wayland; and KDE when asked
+/// (`kde_xwayland`, `kde_xwayland_requested`).
+fn prefer_xwayland(backend_set: bool, desktop: &str, wayland: bool, x11_available: bool, kde_xwayland: bool) -> bool {
     !backend_set
         && wayland
         && x11_available
-        && (desktop_is_gnome(desktop) || (desktop_is_cosmic(desktop) && !cosmic_overlay_requested()))
+        && (desktop_is_gnome(desktop)
+            || (desktop_is_cosmic(desktop) && !cosmic_overlay_requested())
+            || kde_xwayland)
 }
 
 /// Returns a note for the log when it changed anything.
@@ -65,12 +79,20 @@ pub fn prepare() -> Option<String> {
     let wayland = nonempty("WAYLAND_DISPLAY")
         || std::env::var("XDG_SESSION_TYPE").is_ok_and(|value| value.eq_ignore_ascii_case("wayland"));
     // GTK's Wayland backend cannot request keep-above on GNOME, nor sticky on
-    // COSMIC. Prefer XWayland for the meter, with native Wayland as an
+    // COSMIC; on KDE, XWayland avoids KWin 6.8.3's stale frames for those who
+    // ask. Prefer XWayland for the meter there, with native Wayland as an
     // availability fallback.
-    if prefer_xwayland(std::env::var_os("GDK_BACKEND").is_some(), &desktop, wayland, nonempty("DISPLAY")) {
+    let backend_set = std::env::var_os("GDK_BACKEND").is_some();
+    let kde_xwayland = kde_xwayland_requested(&desktop);
+    if prefer_xwayland(backend_set, &desktop, wayland, nonempty("DISPLAY"), kde_xwayland) {
         // SAFETY: prepare runs before the UI or any worker thread starts.
         unsafe { std::env::set_var("GDK_BACKEND", "x11,wayland") };
-        notes.push("GDK_BACKEND=x11,wayland (GNOME/COSMIC overlay; explicit GDK_BACKEND overrides this)".to_string());
+        let why = if kde_xwayland && !desktop_is_gnome(&desktop) && !desktop_is_cosmic(&desktop) {
+            "KDE, A2TOOLS_XWAYLAND=1"
+        } else {
+            "GNOME/COSMIC overlay"
+        };
+        notes.push(format!("GDK_BACKEND=x11,wayland ({why}; explicit GDK_BACKEND overrides this)"));
     }
     if std::env::var_os(DISABLE).is_none() && std::env::var_os(FORCE_SHM).is_none() {
         // SAFETY: prepare runs before the UI or any worker thread starts.
@@ -113,20 +135,20 @@ mod tests {
         }
         for desktop in ["", "KDE", "Hyprland", "sway", "i3", "X-Cinnamon", "not-gnome"] {
             assert!(!desktop_is_gnome(desktop), "{desktop}");
-            assert!(!prefer_xwayland(false, desktop, true, true), "{desktop}");
+            assert!(!prefer_xwayland(false, desktop, true, true, false), "{desktop}");
         }
     }
 
     #[test]
     fn backend_choice_respects_desktop_session_and_overrides() {
-        assert!(prefer_xwayland(false, "ubuntu:GNOME", true, true));
-        assert!(prefer_xwayland(false, "gnome", true, true));
-        assert!(!prefer_xwayland(true, "GNOME", true, true));
-        assert!(!prefer_xwayland(false, "KDE", true, true));
-        assert!(!prefer_xwayland(false, "sway", true, true));
-        assert!(!prefer_xwayland(false, "", true, true));
-        assert!(!prefer_xwayland(false, "GNOME", false, true));
-        assert!(!prefer_xwayland(false, "GNOME", true, false));
+        assert!(prefer_xwayland(false, "ubuntu:GNOME", true, true, false));
+        assert!(prefer_xwayland(false, "gnome", true, true, false));
+        assert!(!prefer_xwayland(true, "GNOME", true, true, false));
+        assert!(!prefer_xwayland(false, "KDE", true, true, false));
+        assert!(!prefer_xwayland(false, "sway", true, true, false));
+        assert!(!prefer_xwayland(false, "", true, true, false));
+        assert!(!prefer_xwayland(false, "GNOME", false, true, false));
+        assert!(!prefer_xwayland(false, "GNOME", true, false, false));
     }
 
     /// Pop!_OS 24.04 says `COSMIC` (a player's neofetch, 2026-11-14): through
@@ -136,8 +158,20 @@ mod tests {
         assert!(desktop_is_cosmic("COSMIC"));
         assert!(desktop_is_cosmic("pop:COSMIC"));
         assert!(!desktop_is_cosmic("pop:GNOME"));
-        assert!(prefer_xwayland(false, "COSMIC", true, true));
-        assert!(!prefer_xwayland(true, "COSMIC", true, true));
-        assert!(!prefer_xwayland(false, "COSMIC", true, false));
+        assert!(prefer_xwayland(false, "COSMIC", true, true, false));
+        assert!(!prefer_xwayland(true, "COSMIC", true, true, false));
+        assert!(!prefer_xwayland(false, "COSMIC", true, false, false));
+    }
+
+    /// KDE goes through XWayland only when asked (`A2TOOLS_XWAYLAND=1`):
+    /// 2.1.1 did it for every KWin 6.8.3+, and the meter took no clicks for
+    /// some and lost its places. A GDK_BACKEND the player set still wins.
+    #[test]
+    fn kde_runs_through_xwayland_only_when_asked() {
+        assert!(prefer_xwayland(false, "KDE", true, true, true));
+        assert!(!prefer_xwayland(false, "KDE", true, true, false));
+        assert!(!prefer_xwayland(true, "KDE", true, true, true));
+        assert!(!prefer_xwayland(false, "KDE", false, true, true));
+        assert!(!prefer_xwayland(false, "KDE", true, false, true));
     }
 }

@@ -252,6 +252,14 @@ function gone(w) {
 }
 if (workspace.windowRemoved) workspace.windowRemoved.connect(gone);
 else if (workspace.clientRemoved) workspace.clientRemoved.connect(gone);
+// The window active as the script loads (the game, at a meter started with
+// it in front): the one to hand the focus back to. lastOther was set only
+// when the active window changed, so a meter window the meter showed on its
+// own at start (the dock) had nothing to give the focus back to and kept it,
+// the game losing the keyboard (2026-11-21, the VM).
+var startActive = workspace.activeWindow || workspace.activeClient;
+current = startActive || null;
+if (startActive && !mine(startActive)) lastOther = startActive;
 followAnchor(mainAnchor);
 if (workspace.windowActivated) {
     workspace.windowActivated.connect(onActivated);
@@ -316,8 +324,89 @@ const HEARD_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 pub fn keep_places(places: Places) {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         X11_IN_WAYLAND.store(places_own_windows(), Ordering::Relaxed);
-        let _ = PLACES.set(places);
+        if PLACES.set(places).is_ok() && hyprland_native() {
+            spawn_hyprland_keeper();
+        }
     }
+}
+
+/// How often the keeper asks Hyprland where the meter's windows are.
+const HYPRLAND_KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// On Hyprland with the meter on native Wayland, a window can neither read
+/// nor set its place, so places were kept only as a window was hidden and
+/// put back only as one hidden was shown: moved and then quit, or opened at
+/// start, a window came up in the middle of the screen (a Hyprland player,
+/// 2026-11-21). Every `HYPRLAND_KEEP_EVERY` this asks hyprctl once: a window
+/// of the meter's just come up goes to its kept place (on a screen), and one
+/// already up has where it is kept (when on a screen).
+fn spawn_hyprland_keeper() {
+    std::thread::spawn(|| {
+        let mut up: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            std::thread::sleep(HYPRLAND_KEEP_EVERY);
+            let Some(clients) = hyprland_clients() else { continue };
+            let screens = hyprland_monitors().unwrap_or_default();
+            let mut now = std::collections::HashSet::new();
+            for c in own_clients(&clients, std::process::id()) {
+                now.insert(c.address.clone());
+                let kept = place_of_title(&c.title);
+                if !up.contains(&c.address) {
+                    // Just came up (at start, or shown again): to its place.
+                    if let Some((x, y)) = kept.filter(|&p| p != c.at && on_a_screen(&screens, p)) {
+                        tracing::debug!(target: "windows", "{}: back to {x},{y} (Hyprland keeper)", c.title);
+                        hyprland_dispatch_move(&c.address, x, y);
+                    }
+                    continue;
+                }
+                if c.size.0 > 0 && c.size.1 > 0 && on_a_screen(&screens, c.at) && kept != Some(c.at) {
+                    save_place_at(&c.title, (c.at.0, c.at.1, c.size.0, c.size.1));
+                }
+            }
+            up = now;
+        }
+    });
+}
+
+/// `hyprctl clients -j`, the windows Hyprland has.
+fn hyprland_clients() -> Option<serde_json::Value> {
+    let out = std::process::Command::new("hyprctl").args(["clients", "-j"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// One of the meter's windows as Hyprland lists it.
+#[derive(Debug, PartialEq)]
+struct Client {
+    address: String,
+    title: String,
+    at: (i32, i32),
+    size: (i32, i32),
+}
+
+/// The meter's (process `pid`) windows on screen in `hyprctl clients -j`'s list.
+fn own_clients(clients: &serde_json::Value, pid: u32) -> Vec<Client> {
+    let pair = |v: &serde_json::Value| {
+        let n = |i: usize| v.get(i).and_then(serde_json::Value::as_i64).and_then(|v| i32::try_from(v).ok());
+        Some((n(0)?, n(1)?))
+    };
+    clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["pid"].as_u64() == Some(u64::from(pid)))
+        .filter(|c| c["mapped"].as_bool() != Some(false) && c["hidden"].as_bool() != Some(true) && !tiled(c))
+        .filter_map(|c| {
+            Some(Client {
+                address: c["address"].as_str()?.to_string(),
+                title: c["title"].as_str()?.to_string(),
+                at: pair(&c["at"])?,
+                size: pair(&c["size"])?,
+            })
+        })
+        .collect()
 }
 
 /// Whether the meter places and remembers its own windows, KWin placing only
@@ -362,6 +451,11 @@ pub fn save_place(window: &tauri::WebviewWindow) {
         },
         false => at,
     };
+    // Off every monitor: not kept, or each show would put it out of sight.
+    if super::process::is_hyprland() && !hyprland_place_on_screen((at.x, at.y)) {
+        tracing::debug!(target: "windows", "{title}: at {},{}, off every monitor: its place not kept", at.x, at.y);
+        return;
+    }
     // A window mapped but not placed yet has no size (and sits at 0,0): kept,
     // that place would move it to the corner on the show.
     if size.width == 0 || size.height == 0 {
@@ -388,12 +482,20 @@ fn hyprland_client(title: &str) -> Option<(String, i32, i32)> {
     hyprland_find(&clients, std::process::id(), title)
 }
 
-/// `hyprland_client` over `hyprctl clients -j`'s list.
+/// A window Hyprland tiles (the player's rules say so: a dock wanted as a
+/// normal window, 2026-11-22) is placed by Hyprland alone: the meter neither
+/// moves it nor keeps its place.
+fn tiled(client: &serde_json::Value) -> bool {
+    client["floating"].as_bool() == Some(false)
+}
+
+/// `hyprland_client` over `hyprctl clients -j`'s list. None for a tiled window.
 fn hyprland_find(clients: &serde_json::Value, pid: u32, title: &str) -> Option<(String, i32, i32)> {
     let client = clients
         .as_array()?
         .iter()
-        .find(|c| c["pid"].as_u64() == Some(u64::from(pid)) && c["title"].as_str() == Some(title))?;
+        .find(|c| c["pid"].as_u64() == Some(u64::from(pid)) && c["title"].as_str() == Some(title))
+        .filter(|c| !tiled(c))?;
     let at = client["at"].as_array()?;
     let n = |v: Option<&serde_json::Value>| v.and_then(serde_json::Value::as_i64).and_then(|v| i32::try_from(v).ok());
     Some((client["address"].as_str()?.to_string(), n(at.first())?, n(at.get(1))?))
@@ -430,6 +532,52 @@ fn hyprland_dispatch_move(address: &str, x: i32, y: i32) {
     if !run(&["dispatch", &hyprland_lua_move(address, x, y)]) {
         run(&["dispatch", "movewindowpixel", &format!("exact {x} {y},address:{address}")]);
     }
+}
+
+/// Hyprland's monitors as `(x, y, width, height)` in its layout's
+/// coordinates (where a window's `at` is): each one's pixels over its scale,
+/// turned for a rotated one. None when hyprctl can't say.
+fn hyprland_monitors() -> Option<Vec<Rect>> {
+    let out = std::process::Command::new("hyprctl").args(["monitors", "-j"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let monitors: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some(monitor_rects(&monitors))
+}
+
+/// `hyprland_monitors` over `hyprctl monitors -j`'s list.
+fn monitor_rects(monitors: &serde_json::Value) -> Vec<Rect> {
+    let n = |v: &serde_json::Value| v.as_f64();
+    monitors
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let scale = n(&m["scale"]).filter(|s| *s > 0.0).unwrap_or(1.0);
+            let (w, h) = (n(&m["width"])? / scale, n(&m["height"])? / scale);
+            // Transforms 1, 3, 5 and 7 turn the monitor a quarter.
+            let turned = m["transform"].as_i64().is_some_and(|t| t % 2 == 1);
+            let (w, h) = if turned { (h, w) } else { (w, h) };
+            Some((n(&m["x"])? as i32, n(&m["y"])? as i32, w.round() as i32, h.round() as i32))
+        })
+        .collect()
+}
+
+/// Whether a window whose corner is at `(x, y)` shows on one of `screens`:
+/// a point just inside its corner, where its title or first row is.
+fn on_a_screen(screens: &[Rect], (x, y): (i32, i32)) -> bool {
+    let (px, py) = (x + 40, y + 20);
+    screens.iter().any(|&(sx, sy, w, h)| px >= sx && px < sx + w && py >= sy && py < sy + h)
+}
+
+/// Whether a saved place is on one of Hyprland's monitors. A place off every
+/// one (a monitor gone, or a window kept while Hyprland had it out of sight)
+/// sent the plugin dock out of sight each time it was shown: it flashed in
+/// the middle and went (a Hyprland player, 2026-11-21). Yes when hyprctl
+/// can't say, as before.
+pub fn hyprland_place_on_screen(at: (i32, i32)) -> bool {
+    hyprland_monitors().filter(|m| !m.is_empty()).is_none_or(|m| on_a_screen(&m, at))
 }
 
 /// `hyprland_dispatch_move`'s Lua (0.57 on).
@@ -597,6 +745,7 @@ impl Focus {
     fn geometry(&self, caption: String, x: String, y: String, width: String, height: String) {
         // On X11 the meter saves its own windows' places as they move.
         if places_own_windows() {
+            tracing::debug!(target: "windows", "KWin: \"{caption}\" now at {x},{y} {width}x{height} (not kept: the meter places its own)");
             return;
         }
         let Some(places) = PLACES.get() else { return };
@@ -605,6 +754,7 @@ impl Focus {
             && w > 0
             && h > 0
         {
+            tracing::debug!(target: "windows", "KWin: \"{caption}\" kept at {x},{y} {w}x{h}");
             (places.save)(&caption, (x, y, w, h));
         }
     }
@@ -621,11 +771,16 @@ impl Focus {
     /// to leave it where KWin put it. The overlay's height is the one it had
     /// there, for the edge it keeps; it sizes itself.
     fn placement(&self, caption: String) -> String {
-        PLACES
+        let answer = PLACES
             .get()
             .and_then(|places| (places.load)(&caption))
             .map(|(x, y, w, h)| format!("{x},{y},{w},{h}"))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        match answer.as_str() {
+            "" => tracing::debug!(target: "windows", "KWin asks where \"{caption}\" goes: no kept place, left where KWin put it"),
+            at => tracing::debug!(target: "windows", "KWin asks where \"{caption}\" goes: {at}"),
+        }
+        answer
     }
 
     /// The edge the overlay keeps (Settings → Meter stays fixed at), and
@@ -713,6 +868,46 @@ pub fn watch(on_change: impl Fn() + Send + Sync + 'static) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hyprland_monitors_are_in_layout_coordinates() {
+        // A 4K monitor at scale 2, and a 1080p one turned on its side to its right.
+        let monitors = serde_json::json!([
+            { "x": 0, "y": 0, "width": 3840, "height": 2160, "scale": 2.0, "transform": 0 },
+            { "x": 1920, "y": 0, "width": 1920, "height": 1080, "scale": 1.0, "transform": 1 },
+        ]);
+        assert_eq!(monitor_rects(&monitors), vec![(0, 0, 1920, 1080), (1920, 0, 1080, 1920)]);
+    }
+
+    #[test]
+    fn the_keeper_sees_only_the_meters_windows_on_screen() {
+        let clients = serde_json::json!([
+            { "address": "0x1", "pid": 42, "title": "A2Tools DPS Meter", "at": [120, 80], "size": [398, 55], "mapped": true, "hidden": false },
+            { "address": "0x2", "pid": 42, "title": "A2Tools Plugins", "at": [900, 300], "size": [600, 500], "mapped": false, "hidden": false },
+            { "address": "0x3", "pid": 7, "title": "AION2", "at": [0, 0], "size": [2560, 1440], "mapped": true, "hidden": false },
+            // Tiled by the player's rules: Hyprland's to place, not the meter's.
+            { "address": "0x4", "pid": 42, "title": "A2Tools Plugins (plugin)", "at": [0, 0], "size": [1280, 1440], "mapped": true, "hidden": false, "floating": false },
+        ]);
+        assert_eq!(hyprland_find(&clients, 42, "A2Tools Plugins (plugin)"), None);
+        assert_eq!(hyprland_find(&clients, 42, "A2Tools DPS Meter"), Some(("0x1".to_string(), 120, 80)));
+        assert_eq!(own_clients(&clients, 42), vec![Client {
+            address: "0x1".into(), title: "A2Tools DPS Meter".into(), at: (120, 80), size: (398, 55),
+        }]);
+    }
+
+    #[test]
+    fn a_place_off_every_monitor_is_not_on_a_screen() {
+        let screens = [(0, 0, 1920, 1080), (1920, 0, 1080, 1920)];
+        assert!(on_a_screen(&screens, (100, 100)));
+        // On the turned monitor, below the first one's bottom.
+        assert!(on_a_screen(&screens, (2000, 1500)));
+        // Off to the left, far below, and just past the right edge.
+        assert!(!on_a_screen(&screens, (-600, 200)));
+        assert!(!on_a_screen(&screens, (300, 5000)));
+        assert!(!on_a_screen(&screens, (2990, 100)));
+        // A window hanging off the top-left still shows its first row.
+        assert!(on_a_screen(&screens, (-30, -10)));
+    }
 
     #[test]
     fn a_place_kept_for_a_window_comes_back_from_the_store() {

@@ -1860,9 +1860,13 @@ const POSITION_PREFIX: &str = "dpsMeter.pluginWindow.";
 /// Where to put a plugin window: where it was left, if that is still on a
 /// screen (a monitor unplugged or rearranged since leaves it out of reach).
 fn saved_position(app: &tauri::AppHandle, window: &tauri::WebviewWindow, id: &str) -> Option<(i32, i32)> {
-    let value = app.try_state::<AppState>()?.settings.get(&format!("{POSITION_PREFIX}{id}"))?;
-    let (x, y) = value.split_once(',')?;
-    let (x, y) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
+    let own = app.try_state::<AppState>()?.settings.get(&format!("{POSITION_PREFIX}{id}")).and_then(|value| {
+        let (x, y) = value.split_once(',')?;
+        Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+    });
+    // Through XWayland on KDE, a place of its own that is 0,0 gives way to
+    // KWin's (`own_place_or_kwins`).
+    let (x, y) = crate::app::own_place_or_kwins(app, window.label(), own)?;
     let width = window.outer_size().map(|size| size.width).unwrap_or(240);
     let screens: Vec<_> = window
         .available_monitors()
@@ -2440,6 +2444,8 @@ pub fn plugin_hello(app: tauri::AppHandle, window: tauri::WebviewWindow, plugin:
             .and_then(|_| crate::pairings::for_server(pairing_server(&app))),
         "jitter": app.try_state::<AppState>().map(|s| ping_event(&s.ping_tracker)["jitter"].clone()).unwrap_or(Value::Null),
         "layout": crate::layout::editing(),
+        // Server minus local clock, ms (meter 2.1.4 on).
+        "clock": crate::server_clock::event(),
     }))
 }
 
@@ -2661,7 +2667,12 @@ async fn feed_file(app: &tauri::AppHandle, feed: &'static str, server: u32) -> R
     let url = format!("https://cdn.a2tools.app/feeds/{feed}/{server}.json");
     // Tried again on a poor connection (`crate::cdn`).
     let value = crate::cdn::retry(|| async {
+        let (sent, started) = (crate::clock::now_ms(), Instant::now());
         let res = state.http.get(&url).timeout(Duration::from_secs(15)).send().await.map_err(|e| e.to_string())?;
+        // The CDN's clock, for countdowns against the game's times on a PC
+        // whose clock is off (crate::server_clock): no request of its own.
+        let date = res.headers().get(reqwest::header::DATE).and_then(|d| d.to_str().ok());
+        crate::server_clock::note_answer(app, date, sent, crate::clock::now_ms(), started.elapsed());
         match res.status() {
             s if s == reqwest::StatusCode::NOT_FOUND => Ok(None),
             s if s.is_success() => Ok(Some(serde_json::from_str::<Value>(&res.text().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?)),
