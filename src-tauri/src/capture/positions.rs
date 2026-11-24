@@ -108,6 +108,58 @@ fn skill_target(packet: &[u8], i: usize) -> Option<Spotted> {
     position_at(packet, i + 7 + target.length as usize + 4).map(|pos| Spotted::Entity(target.value, pos))
 }
 
+/// The way a mover faces, from its move record (`1A/1B/1C/3C 37`): a `u16`
+/// right after the spot, a full turn in 65,536 steps, counted as
+/// `atan2(dy, dx)` on the map (x right, y down). Read off the capture of
+/// 2026-11-18: Predator Saraswati's `0x078A` = 10.6° while it walked at 11°,
+/// `0x47AC` = 100.8° at 101°, a player's `0xB293` = −108.9° at −109°.
+/// Returns the entity and the heading in degrees (−180 – 180).
+pub fn heading(packet: &[u8]) -> Option<(i32, f32)> {
+    let length = read_varint(packet, 0);
+    if length.length <= 0 {
+        return None;
+    }
+    let at = length.length as usize;
+    if !matches!(packet.get(at..at + 2)?, [0x1A | 0x1B | 0x1C | 0x3C, 0x37]) {
+        return None;
+    }
+    let entity = read_varint(packet, at + 2);
+    if entity.length <= 0 {
+        return None;
+    }
+    let after = at + 2 + entity.length as usize;
+    // The spot sits one or two bytes on, as `parse` reads it.
+    let spot = if position_at(packet, after + 1).is_some() { after + 1 } else if position_at(packet, after + 2).is_some() { after + 2 } else { return None };
+    let b = packet.get(spot + 12..spot + 14)?;
+    let turn = u16::from_le_bytes([b[0], b[1]]) as f32 * 360.0 / 65_536.0;
+    Some((entity.value, if turn > 180.0 { turn - 360.0 } else { turn }))
+}
+
+/// A skill used at a target with no spot along (`02 38` without flags & 2):
+/// caster, skill and target — a boss's frontal or targeted attack.
+pub fn cast_target(packet: &[u8]) -> Option<(i32, u32, i32)> {
+    let length = read_varint(packet, 0);
+    if length.length <= 0 {
+        return None;
+    }
+    let at = length.length as usize;
+    if packet.get(at..at + 2)? != [0x02, 0x38] {
+        return None;
+    }
+    let caster = read_varint(packet, at + 2);
+    if caster.length <= 0 {
+        return None;
+    }
+    let i = at + 2 + caster.length as usize;
+    let b = packet.get(i + 1..i + 5)?;
+    let skill = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    if packet.get(i + 6)? & 0x02 != 0 {
+        return None;
+    }
+    let target = read_varint(packet, i + 7);
+    (target.length > 0).then_some((caster.value, skill, target.value))
+}
+
 /// Whether the spot `parse` reads from this packet is where the entity is: a
 /// move, a spawn, a map load or a teleport — not an effect's (`2A 38`) or a
 /// skill target's (`02 38`) spot, which can be off (`combat::fight_track`).
@@ -162,6 +214,17 @@ pub(crate) fn position_at(packet: &[u8], i: usize) -> Option<Position> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heading_of_a_move() {
+        // Predator Saraswati walking at 11° (2026-11-18 11:27:38), then a player at −109°.
+        let (id, deg) = heading(&hex("181a37c6870100009f5cc4c6b3e407460068d8c58a07")).unwrap();
+        assert_eq!(id, 17350);
+        assert!((deg - 10.6).abs() < 0.1, "{deg}");
+        let (_, deg) = heading(&hex("181a37fe1d00004844d6c658e10e47007b094793b2")).unwrap();
+        assert!((deg + 108.9).abs() < 0.1, "{deg}");
+        assert!(heading(&hex("1E2336000000000000A0CE8BC778648DC700E40D4604000000AB7B")).is_none());
+    }
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()

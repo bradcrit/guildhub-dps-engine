@@ -343,6 +343,15 @@ impl StreamProcessor {
             if !self.data_storage.is_player(caster) {
                 self.data_storage.note_cast(caster, skill, target, pos);
             }
+        } else if let Some((caster, skill, target)) = crate::capture::positions::cast_target(packet) {
+            // Aimed at someone, no spot: at the target's spot (a frontal attack's direction).
+            if !self.data_storage.is_player(caster) {
+                self.data_storage.note_cast_at(caster, skill, target);
+            }
+        }
+        // Which way a mover faces (the replay's cones and lines).
+        if let Some((entity, degrees)) = crate::capture::positions::heading(packet) {
+            self.data_storage.note_heading(entity, degrees);
         }
         // The objects in range (the Hidden Cube hint).
         if let Some(record) = crate::capture::objects::parse(packet) {

@@ -14,6 +14,10 @@
 //! where no move was told near them, and drops a spot that goes off and comes
 //! straight back faster than anyone runs (`clean`).
 //!
+//! For a boss's cones, lines and rings: which way movers face (their move
+//! records' heading), the NPC skills aimed at a player without a spot (at
+//! that player's spot), and whom each NPC skill hit.
+//!
 //! Every spot is logged as it comes (at most one per entity every `STEP_MS`
 //! unless it jumped), for the last `KEEP_MS`; a saved fight takes its window
 //! from the log (`DataStorage::fight_track`).
@@ -35,6 +39,12 @@ pub const KEEP_MS: i64 = 20 * 60_000;
 const MAX_POINTS: usize = 400_000;
 const MAX_CASTS: usize = 40_000;
 const MAX_HP_POINTS: usize = 200_000;
+const MAX_HEADINGS: usize = 200_000;
+const MAX_NPC_HITS: usize = 100_000;
+/// A heading is kept at most this often per entity, unless it turned further than `TURN_DEG`.
+const HEADING_STEP_MS: i64 = 250;
+const TURN_DEG: f32 = 8.0;
+const MAX_SAVED_HITS: usize = 8_000;
 /// HP samples per player in a saved fight; more keep every n-th.
 const MAX_ENTITY_HP: usize = 6_000;
 /// One spot per entity this often, unless it moved further than `JUMP_CM`.
@@ -83,6 +93,8 @@ pub struct Cast {
     pub skill: u32,
     pub target: i32,
     pub pos: Position,
+    /// Aimed at `target` with no spot told: `pos` is the target's spot then.
+    pub aimed: bool,
 }
 
 #[derive(Default)]
@@ -95,9 +107,35 @@ pub struct TrackLog {
     /// (time, entity, HP, max HP — 0 when not known then).
     hp: VecDeque<(i64, i32, i32, i32)>,
     last_hp: HashMap<i32, i32>,
+    /// (time, entity, heading in degrees).
+    headings: VecDeque<(i64, i32, f32)>,
+    last_heading: HashMap<i32, (i64, f32)>,
+    /// (time, monster, skill, player hit).
+    npc_hits: VecDeque<(i64, i32, i32, i32)>,
 }
 
 impl TrackLog {
+    pub fn note_heading(&mut self, at: i64, id: i32, degrees: f32) {
+        if let Some((t, d)) = self.last_heading.get(&id) {
+            let turned = ((degrees - d + 540.0) % 360.0 - 180.0).abs();
+            if at - t < HEADING_STEP_MS && turned < TURN_DEG {
+                return;
+            }
+        }
+        self.last_heading.insert(id, (at, degrees));
+        self.headings.push_back((at, id, degrees));
+        while self.headings.front().is_some_and(|h| at - h.0 > KEEP_MS) || self.headings.len() > MAX_HEADINGS {
+            self.headings.pop_front();
+        }
+    }
+
+    pub fn note_npc_hit(&mut self, at: i64, monster: i32, skill: i32, player: i32) {
+        self.npc_hits.push_back((at, monster, skill, player));
+        while self.npc_hits.front().is_some_and(|h| at - h.0 > KEEP_MS) || self.npc_hits.len() > MAX_NPC_HITS {
+            self.npc_hits.pop_front();
+        }
+    }
+
     /// An entity's HP as the game told it; only changes are kept.
     pub fn note_hp(&mut self, at: i64, id: i32, hp: i32, max: i32) {
         if self.last_hp.insert(id, hp) == Some(hp) {
@@ -141,6 +179,7 @@ impl TrackLog {
         self.last.clear();
         self.kinds.clear();
         self.last_hp.clear();
+        self.last_heading.clear();
     }
 
     fn kind(&self, id: i32) -> (Kind, i32) {
@@ -154,8 +193,9 @@ pub struct FightTrack {
     /// The format: 1.
     pub v: u8,
     pub ents: Vec<TrackEntity>,
-    /// NPC casts at a spot, `t,caster,skill,x,y,z;…` — `t` in ms from the
-    /// fight's start, the spot in decimetres (the game's units / 10).
+    /// NPC casts at a spot, `t,caster,skill,x,y,z,target,aimed;…` — `t` in ms
+    /// from the fight's start, the spot in decimetres (the game's units / 10);
+    /// `aimed` 1: cast at `target` with no spot, the spot is the target's.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub casts: String,
     /// Each player's HP over the fight, by actor id: `t,permille;…` — the
@@ -163,6 +203,14 @@ pub struct FightTrack {
     /// the window, when known, comes first at the window's start.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub hp: std::collections::BTreeMap<i32, String>,
+    /// Which way each entity faced, by id: `t,degrees;…` — `atan2(dy, dx)`
+    /// on the map, from its move records (players' others than yours, bosses
+    /// and mobs that walk; a boss standing still has none).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hdg: std::collections::BTreeMap<i32, String>,
+    /// Whom the NPCs' skills hit: `t,monster,skill,player;…`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hits: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -365,10 +413,44 @@ pub fn for_fight(
         if !cast_text.is_empty() {
             cast_text.push(';');
         }
-        cast_text.push_str(&format!("{},{},{},{},{},{}", c.at - start, c.caster, c.skill, dm(c.pos.x), dm(c.pos.y), dm(c.pos.z)));
+        cast_text.push_str(&format!(
+            "{},{},{},{},{},{},{},{}",
+            c.at - start,
+            c.caster,
+            c.skill,
+            dm(c.pos.x),
+            dm(c.pos.y),
+            dm(c.pos.z),
+            c.target,
+            c.aimed as u8
+        ));
     }
     let hp = hp_tracks(log, from, to, start, me, actors, max_hp_of);
-    (!ents.is_empty()).then_some(FightTrack { v: 1, ents, casts: cast_text, hp })
+    // Headings of the entities kept.
+    let kept: std::collections::HashSet<i32> = ents.iter().map(|e| e.id).collect();
+    let mut hdg: std::collections::BTreeMap<i32, String> = std::collections::BTreeMap::new();
+    for &(at, id, deg) in log.headings.iter().filter(|h| h.0 >= from && h.0 <= to && kept.contains(&h.1)) {
+        let text = hdg.entry(id).or_default();
+        if !text.is_empty() {
+            text.push(';');
+        }
+        text.push_str(&format!("{},{}", at - start, deg.round() as i32));
+    }
+    // Whom the NPCs hit: the fight's players, by monsters that aren't players.
+    let players = |id: i32| actors.contains(&id) || Some(id) == me;
+    let mut hits = String::new();
+    for &(at, monster, skill, player) in log
+        .npc_hits
+        .iter()
+        .filter(|h| h.0 >= from && h.0 <= to && players(h.3) && !players(h.1))
+        .take(MAX_SAVED_HITS)
+    {
+        if !hits.is_empty() {
+            hits.push(';');
+        }
+        hits.push_str(&format!("{},{},{},{}", at - start, monster, skill, player));
+    }
+    (!ents.is_empty()).then_some(FightTrack { v: 1, ents, casts: cast_text, hp, hdg, hits })
 }
 
 /// The players' HP in the window, as thousandths of their max HP.
@@ -452,7 +534,7 @@ mod tests {
             log.note(t, 61, at(900_000.0, 2_100.0), Kind::Mob, 124, true);
             log.note(t, 99, at(1_400.0, 2_000.0), Kind::Player, 0, true);
         }
-        log.note_cast(Cast { at: 11_000, caster: 70, skill: 1801182, target: 70, pos: at(1_650.0, 2_050.0) });
+        log.note_cast(Cast { at: 11_000, caster: 70, skill: 1801182, target: 70, pos: at(1_650.0, 2_050.0), aimed: false });
         log.note_hp(4_000, 5, 900, 1_000);
         log.note_hp(11_000, 5, 450, 0);
         log.note_hp(11_500, 5, 450, 0);
@@ -464,7 +546,7 @@ mod tests {
         assert_eq!(kinds, vec![("you", 5), ("player", 7), ("boss", 50), ("mob", 60)]);
         assert_eq!(track.ents[2].code, 2300371);
         assert!(track.ents[0].pts.starts_with("-500,100,200,10;"));
-        assert_eq!(track.casts, "500,70,1801182,165,205,10");
+        assert_eq!(track.casts, "500,70,1801182,165,205,10,70,0");
     }
 
     #[test]

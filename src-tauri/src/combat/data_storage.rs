@@ -2392,7 +2392,29 @@ impl DataStorage {
     /// times from its start, summons resolved to their owners.
     /// An NPC's skill cast at a spot (`capture::positions::cast`), for a fight's replay.
     pub fn note_cast(&self, caster: i32, skill: u32, target: i32, pos: Position) {
-        self.track.lock().note_cast(crate::combat::fight_track::Cast { at: now_ms(), caster, skill, target, pos });
+        self.track.lock().note_cast(crate::combat::fight_track::Cast { at: now_ms(), caster, skill, target, pos, aimed: false });
+    }
+
+    /// An NPC's skill aimed at `target` with no spot told: logged at the
+    /// target's last spot (yours, or as `note_spotted` kept it), for the
+    /// replay's direction of a frontal attack. Nothing when it isn't known.
+    pub fn note_cast_at(&self, caster: i32, skill: u32, target: i32) {
+        let pos = {
+            let inner = self.inner.read();
+            if inner.local_player_id == Some(i64::from(target)) {
+                inner.self_position.map(|(p, _)| p)
+            } else {
+                inner.entity_positions.get(&target).copied()
+            }
+        };
+        if let Some(pos) = pos {
+            self.track.lock().note_cast(crate::combat::fight_track::Cast { at: now_ms(), caster, skill, target, pos, aimed: true });
+        }
+    }
+
+    /// The way a mover faces (`capture::positions::heading`), for the replay.
+    pub fn note_heading(&self, entity: i32, degrees: f32) {
+        self.track.lock().note_heading(now_ms(), entity, degrees);
     }
 
     /// Where everyone was in the fight from `start_ms` to `end_ms` (first and
@@ -3493,6 +3515,8 @@ impl DataStorage {
                 if dmg > 0 {
                     let npc = inner.mob_storage.get(&actor_id).copied().unwrap_or(0);
                     note_incoming_hit(&mut inner, resolved_target, IncomingHit { at_ms: pdp.timestamp(), npc, skill: skill_code, damage: dmg });
+                    // Who a monster skill hit, for the replay (and to learn its shape).
+                    self.track.lock().note_npc_hit(now_ms(), actor_id, skill_code, resolved_target);
                 }
                 if let Some(actor_data) = fight_of(&mut inner, resolved_target, Some(actor_id)) {
                     actor_data.damage_received += dmg;
