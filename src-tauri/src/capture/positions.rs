@@ -108,7 +108,8 @@ fn skill_target(packet: &[u8], i: usize) -> Option<Spotted> {
     position_at(packet, i + 7 + target.length as usize + 4).map(|pos| Spotted::Entity(target.value, pos))
 }
 
-/// The way a mover faces, from its move record (`1A/1B/1C/3C 37`): a `u16`
+/// The way a mover faces, from its move record (`1A/1B/1C/3C 37`) — or a
+/// spawn's (`41 36`, below): a `u16`
 /// right after the spot, a full turn in 65,536 steps, counted as
 /// `atan2(dy, dx)` on the map (x right, y down). Read off the capture of
 /// 2026-11-18: Predator Saraswati's `0x078A` = 10.6° while it walked at 11°,
@@ -120,7 +121,30 @@ pub fn heading(packet: &[u8]) -> Option<(i32, f32)> {
         return None;
     }
     let at = length.length as usize;
-    if !matches!(packet.get(at..at + 2)?, [0x1A | 0x1B | 0x1C | 0x3C, 0x37]) {
+    let op = packet.get(at..at + 2)?;
+    // A spawn (`41 36 <entity> <u8> <u16> <u32> 00 02 <spot>`) has the way it
+    // faces as an f32 in degrees right after the spot (Divine Auldor's tornado
+    // spots, 2026-11-24: `00 00 8C 42` = 70°, every one a multiple of 20°,
+    // each pointing into the arena — the way its tornado flies).
+    if op == [0x41, 0x36] {
+        let entity = read_varint(packet, at + 2);
+        if entity.length <= 0 {
+            return None;
+        }
+        let after = at + 2 + entity.length as usize;
+        if packet.get(after + 8) != Some(&0x02) {
+            return None;
+        }
+        position_at(packet, after + 9)?;
+        let b = packet.get(after + 21..after + 25)?;
+        let deg = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        if !deg.is_finite() || deg.abs() > 360.0 {
+            return None;
+        }
+        let deg = deg.rem_euclid(360.0);
+        return Some((entity.value, if deg > 180.0 { deg - 360.0 } else { deg }));
+    }
+    if !matches!(op, [0x1A | 0x1B | 0x1C | 0x3C, 0x37]) {
         return None;
     }
     let entity = read_varint(packet, at + 2);
