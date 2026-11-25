@@ -1901,6 +1901,15 @@ impl StreamProcessor {
                     let max_hp = read_varint(packet, hp_scan + 1 + current_hp.length as usize);
                     if max_hp.length > 0 && max_hp.value >= current_hp.value {
                         self.data_storage.append_mob_hp(real_actor_id, max_hp.value);
+                        // A boss's HP now, too: one that comes back into sight
+                        // at full after a wipe sends no live HP until it is hit,
+                        // and that first reading can lie under the reset mark —
+                        // the pulls ran into one fight (Devouring Klawfly and
+                        // Black Blood Blatt, Corroded Decontamination Facility,
+                        // 2026-11-25). Its spawn says it reset.
+                        if self.npc_lookup.is_boss(mob_type_id) && !self.npc_lookup.is_training_dummy(mob_type_id) {
+                            self.data_storage.set_mob_current_hp(real_actor_id, current_hp.value);
+                        }
                         break;
                     }
                 }
@@ -5287,6 +5296,36 @@ mod tests {
         // The same spawn read again (its own frame, then the scan) changes nothing.
         p.scan_for_embedded_40_36(&data);
         assert_eq!(storage.mob_code(29091), Some(2_100_077));
+    }
+
+    /// Terminator Bargott's spawn (Corroded Decontamination Facility,
+    /// 2026-11-25 15:50:07, entity 20273): 244,944,000 of 244,944,000. Seen
+    /// again at full while his fight stands at 64 %, he reset — a wipe: the
+    /// fight so far ends and the next hit starts a new one.
+    #[test]
+    fn a_dungeon_boss_spawning_at_full_ends_its_fight() {
+        let storage = Arc::new(DataStorage::new());
+        let npcs = NpcLookup::new();
+        let table = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/data/i18n/npcs/en.json");
+        npcs.load_from_json(&std::fs::read_to_string(table).unwrap());
+        let mut p = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(npcs));
+        storage.set_current_dungeon(620011);
+        storage.note_map_load(620011);
+        let spawn = hex("4136B19E010C2000181D23000002C0C4B8C6AFF809470070AF450078704300AB018099E6748099E6746400000064000000000000000000000000000000000000002C0100002C01000001000000000000000000000000000000000000000602110181969800FFFFFFFFFFFFFFFF8075D52ABB030000B19E010104C0C4B8C6AFF809470070AF45110284969800FFFFFFFFFFFFFFFF8075D52ABB030000B19E0101C0C4B8C6AFF809470070AF45060046000000D5F18BD200");
+        p.parse_summon_spawn_at(&spawn, 2);
+        assert_eq!(storage.mob_code(20273), Some(2_301_208));
+        assert_eq!(storage.get_mob_current_hp(20273), Some(244_944_000), "his HP now, from the spawn");
+        let mut hit = ParsedDamagePacket::new();
+        hit.set_actor_id(3677);
+        hit.set_target_id(20273);
+        hit.set_skill_code(11010000);
+        hit.set_damage(86_000_000);
+        hit.set_timestamp(1_000);
+        storage.append_damage(hit);
+        storage.set_mob_current_hp(20273, 158_944_000);
+        assert_eq!(storage.get_combat_snapshot_light()[&20273].total_damage, 86_000_000);
+        p.parse_summon_spawn_at(&spawn, 2);
+        assert!(storage.get_combat_snapshot_light().get(&20273).is_none_or(|t| t.total_damage == 0), "back at full: a wipe");
     }
 
     /// A Training Scarecrow's live HP (2026-10-07, entity 25839, whose spawn
