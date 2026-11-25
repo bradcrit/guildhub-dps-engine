@@ -263,7 +263,61 @@
     },
     "hpsChart": "Healing per second",
     "sectionChart": "Chart",
-    "showSections": "Show sections"
+    "showSections": "Show sections",
+    "zoom": {
+      "label": "Zoom",
+      "in": "Zoom in",
+      "out": "Zoom out",
+      "fit": "Fit",
+      "fitTitle": "Show the whole fight",
+      "hint": "Ctrl + mouse wheel zooms around the pointer; drag the lanes to move.",
+      "position": "Visible part of the fight"
+    },
+    "compare": {
+      "button": "Compare two players",
+      "party": "Party",
+      "vs": "A vs B",
+      "why": "Why",
+      "skills": "Skills",
+      "name": "Name",
+      "damage": "Damage",
+      "dps": "DPS",
+      "share": "Share",
+      "hits": "Hits",
+      "crit": "Crit",
+      "avg": "Avg",
+      "back": "Back",
+      "perfect": "Perfect",
+      "double": "Double",
+      "multi": "Multi",
+      "maxHit": "Max hit",
+      "diff": "Diff",
+      "swap": "Swap",
+      "pickHint": "Pick the two to compare with A / B on each row",
+      "noData": "No damage recorded",
+      "needTwo": "Comparing needs two players",
+      "ahead": "{winner} out-damages {loser} by {pct}",
+      "even": "About the same DPS",
+      "uptime": "Uptime (time spent attacking)",
+      "pace": "Pace (hits per active second)",
+      "hitsF": "Hits",
+      "perHit": "Damage per hit",
+      "dots": "DoT share of the damage",
+      "factorHint": "The DPS gap as factors that multiply together, seen from the leader. Bars are scaled to the largest factor; Diff is how far that factor alone puts the leader ahead (+) or behind (-). DoT ticks are left out of uptime, pace and damage per hit.",
+      "rateTitle": "Hit quality",
+      "rateHint": "The rates behind damage per hit",
+      "mainCause": "Mainly: {list}",
+      "counter": "{name} is ahead on: {list}",
+      "factor": "{factor} ({pct})",
+      "driver": "Skill behind the gap: {skill}, {who} {diff}, {why}",
+      "unused": "{name} never used it",
+      "causeHits": "more uses ({ahead} vs {behind} hits)",
+      "causeAvg": "harder hits (average {ahead} vs {behind})",
+      "deaths": "{name} died {count}x ({sec}s down)",
+      "otherClass": "Different classes: each player's skills are listed side by side",
+      "perSec": "/s",
+      "pt": "pt"
+    }
   },
   "history": {
     "title": "Battle History",
@@ -624,6 +678,12 @@
         "off": "No limit"
       }
     },
+    "historyLimit": {
+      "label": "Fights kept in history",
+      "options": {
+        "unlimited": "No limit"
+      }
+    },
     "showSupporterColors": "Show supporter colours",
     "showSupporterColorsHint": "Supporters' names render gold. Cosmetic only — it never changes any number.",
     "account": {
@@ -692,6 +752,7 @@
       "textureOffset": "Each bar starts its texture at a different place, so the bars don't all look alike.",
       "trainingMode": "In Train mode, which dummies the Details window shows: all of them together, or only the one you hit hardest.",
       "trainTimeLimit": "In Train mode, hits on training dummies count for this long after your first one. The meter then stops until you press refresh, which starts the time again.",
+      "historyLimit": "How many fights the history keeps. Older ones are deleted as new ones are saved, except fights holding a personal best. A fight takes about 70 KB, so 5,000 take about 350 MB. Lowering it deletes the oldest fights beyond the new limit at the next save.",
       "allTargetsWindow": "In All Targets mode, the meter adds up every target hit within this time of the latest hit.",
       "updateRate": "How often the meter's numbers refresh. Faster shows hits sooner but uses more CPU.",
       "partyPresence": "Party members who also use A2Tools see a small A2 tag beside your name, and you see theirs. Anyone in your party using A2Tools can see it, so they'll know you use a third-party meter. Only hashes of character names and servers are sent.",

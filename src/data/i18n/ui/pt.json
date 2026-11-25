@@ -259,10 +259,64 @@
     "hpsChart": "Cura por segundo",
     "sectionChart": "Gráfico",
     "showSections": "Seções visíveis",
+    "zoom": {
+      "label": "Zoom",
+      "in": "Aproximar",
+      "out": "Afastar",
+      "fit": "Tudo",
+      "fitTitle": "Mostrar a luta inteira",
+      "hint": "Ctrl + roda do mouse aproxima em torno do ponteiro; arraste as faixas para mover.",
+      "position": "Parte visível da luta"
+    },
     "hoverTooltip": {
       "loading": "Carregando...",
       "empty": "Sem dados de habilidades desta luta",
       "error": "Não foi possível carregar as habilidades"
+    },
+    "compare": {
+      "button": "Comparar dois jogadores",
+      "party": "Grupo",
+      "vs": "A contra B",
+      "why": "Por quê",
+      "skills": "Habilidades",
+      "name": "Nome",
+      "damage": "Dano",
+      "dps": "DPS",
+      "share": "Parte",
+      "hits": "Golpes",
+      "crit": "Crít",
+      "avg": "Média",
+      "back": "Cost",
+      "perfect": "Perf",
+      "double": "Dup",
+      "multi": "Múlt.",
+      "maxHit": "Golpe máx.",
+      "diff": "Dif.",
+      "swap": "Trocar",
+      "pickHint": "Escolha os dois para comparar com A / B em cada linha",
+      "noData": "Nenhum dano registrado",
+      "needTwo": "Para comparar são precisos dois jogadores",
+      "ahead": "{winner} causa {pct} mais dano que {loser}",
+      "even": "DPS quase igual",
+      "uptime": "Tempo ativo (tempo atacando)",
+      "pace": "Ritmo (golpes por segundo ativo)",
+      "hitsF": "Golpes",
+      "perHit": "Dano por golpe",
+      "dots": "Parte do dano vinda de DoT",
+      "factorHint": "A diferença de DPS como fatores que se multiplicam, vista de quem está à frente. As barras estão na escala do maior fator; Dif. é quanto esse fator sozinho o deixa à frente (+) ou atrás (-). Os ticks de DoT ficam fora do tempo ativo, do ritmo e do dano por golpe.",
+      "rateTitle": "Qualidade dos golpes",
+      "rateHint": "As taxas por trás do dano por golpe",
+      "mainCause": "Principalmente: {list}",
+      "counter": "{name} está à frente em: {list}",
+      "factor": "{factor} ({pct})",
+      "driver": "Habilidade por trás da diferença: {skill}, {who} {diff}, {why}",
+      "unused": "{name} nunca a usou",
+      "causeHits": "mais usos ({ahead} contra {behind} golpes)",
+      "causeAvg": "golpes mais fortes (média {ahead} contra {behind})",
+      "deaths": "{name} morreu {count}x ({sec} s caído)",
+      "otherClass": "Classes diferentes: as habilidades de cada um lado a lado",
+      "perSec": "/s",
+      "pt": "pt"
     }
   },
   "history": {
@@ -616,6 +670,12 @@
         "off": "Sem limite"
       }
     },
+    "historyLimit": {
+      "label": "Combates mantidos no histórico",
+      "options": {
+        "unlimited": "Sem limite"
+      }
+    },
     "showSupporterColors": "Mostrar cores dos apoiadores",
     "showSupporterColorsHint": "Os nomes dos apoiadores aparecem em dourado. Apenas estético — não altera nenhum número.",
     "account": {
@@ -683,6 +743,7 @@
       "textureOffset": "Cada barra começa a textura num ponto diferente, para que não fiquem todas iguais.",
       "trainingMode": "No modo treino, quais bonecos a janela de detalhes mostra: todos juntos ou só o que você mais acerta.",
       "trainTimeLimit": "No modo Treino, os golpes nos bonecos contam por este tempo após o primeiro. Depois o medidor para até você pressionar Atualizar, que reinicia o tempo.",
+      "historyLimit": "Quantos combates o histórico mantém. Os mais antigos são apagados quando novos são salvos, exceto os que têm um recorde pessoal. Um combate ocupa cerca de 70 KB, então 5.000 ocupam cerca de 350 MB. Diminuir o limite apaga no próximo salvamento os combates mais antigos além dele.",
       "allTargetsWindow": "No modo Todos os alvos, o medidor soma cada alvo atingido dentro deste tempo antes do último golpe.",
       "updateRate": "Com que frequência os números do medidor atualizam. Mais rápido mostra os golpes antes, mas usa mais CPU.",
       "partyPresence": "Membros do grupo que também usam o A2Tools veem uma pequena etiqueta A2 ao lado do seu nome, e você vê a deles. Qualquer pessoa do grupo usando o A2Tools pode vê-la e saberá que você usa um medidor de terceiros. Só são enviados hashes de nomes de personagem e servidores.",

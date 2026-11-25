@@ -419,6 +419,12 @@
                   </div>
                   <button class="buffChip buffPassivesBtn" type="button" aria-pressed="false" data-i18n="details.buffs.showPassives">Passives</button>
                 </div>
+                <div class="buffSegmented ftlZoom" role="group" aria-label="Zoom" data-i18n-aria-label="details.zoom.label" title="Ctrl + mouse wheel zooms around the pointer; drag the lanes to move." data-i18n-title="details.zoom.hint">
+                  <button class="buffChip ftlZoomBtn" type="button" data-ftl-zoom="out" title="Zoom out" aria-label="Zoom out" data-i18n-title="details.zoom.out" data-i18n-aria-label="details.zoom.out" disabled>−</button>
+                  <span class="ftlZoomLevel" aria-hidden="true">1×</span>
+                  <button class="buffChip ftlZoomBtn" type="button" data-ftl-zoom="in" title="Zoom in" aria-label="Zoom in" data-i18n-title="details.zoom.in" data-i18n-aria-label="details.zoom.in">+</button>
+                  <button class="buffChip" type="button" data-ftl-zoom="fit" title="Show the whole fight" data-i18n-title="details.zoom.fitTitle" data-i18n="details.zoom.fit" disabled>Fit</button>
+                </div>
                 <div class="buffSegmented ftlSectionToggles" role="group" aria-label="Show sections" data-i18n-aria-label="details.showSections">
                   <button class="buffChip" type="button" aria-pressed="true" data-ftl-section="dps" data-i18n="details.sectionChart">Chart</button>
                   <button class="buffChip" type="button" aria-pressed="true" data-ftl-section="buffs" data-i18n="details.buffs.title">Buffs</button>
@@ -456,6 +462,9 @@
                 <div class="fightTimelineCursor" hidden></div>
               </div>
               <div class="fightTimelineAxis"><div class="fightTimelineAxisLane"></div></div>
+              <div class="fightTimelineZoomBar">
+                <div class="ftlZoomTrack" role="scrollbar" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-label="Visible part of the fight" data-i18n-aria-label="details.zoom.position" tabindex="-1"><div class="ftlZoomThumb"></div></div>
+              </div>
               <div class="buffTooltip" hidden></div>
             </section>
           </div>
@@ -1263,6 +1272,18 @@
                   </div>
                   <div class="settingsRow settingsRowSelect">
                     <div class="settingsInfo">
+                      <div class="settingsLabel" data-i18n="settings.historyLimit.label" title="How many fights the history keeps. Older ones are deleted as new ones are saved, except fights holding a personal best. A fight takes about 70 KB, so 5,000 take about 350 MB. Lowering it deletes the oldest fights beyond the new limit at the next save." data-i18n-title="settings.tips.historyLimit">Fights kept in history</div>
+                    </div>
+                    <div class="settingsDropdownWrapper historyLimitDropdownWrapper">
+                      <button class="settingsDropdownBtn historyLimitDropdownBtn" type="button">
+                        <span class="settingsDropdownText">-</span>
+                        <span class="settingsDropdownCaret" aria-hidden="true">▾</span>
+                      </button>
+                      <div class="settingsDropdownMenu historyLimitDropdownMenu" role="menu"></div>
+                    </div>
+                  </div>
+                  <div class="settingsRow settingsRowSelect">
+                    <div class="settingsInfo">
                       <div class="settingsLabel" data-i18n="settings.allTargetsWindow.label" title="In All Targets mode, the meter adds up every target hit within this time of the latest hit." data-i18n-title="settings.tips.allTargetsWindow">All Targets time window</div>
                     </div>
                     <div class="settingsDropdownWrapper allTargetsWindowDropdownWrapper">
@@ -1784,8 +1805,9 @@
     <script src="/src/js/skillIcons.js"></script>
     <script src="/src/js/buffTimeline.js"></script>
     <script src="/src/js/staggerPanel.js"></script>
-    <script src="/src/js/details.js?v=2021a"></script>
+    <script src="/src/js/details.js?v=2105a"></script>
     <script src="/src/js/fightReplay.js"></script>
+    <script src="/src/js/fightCompare.js?v=2105a"></script>
     <script src="/src/js/history.js?v=2018a"></script>
 
     <!-- 추가 -->

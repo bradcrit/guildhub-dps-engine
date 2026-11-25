@@ -259,10 +259,64 @@
     "hpsChart": "초당 치유량",
     "sectionChart": "차트",
     "showSections": "표시할 영역",
+    "zoom": {
+      "label": "확대/축소",
+      "in": "확대",
+      "out": "축소",
+      "fit": "전체",
+      "fitTitle": "전투 전체 보기",
+      "hint": "Ctrl + 마우스 휠로 포인터 위치를 확대/축소하고, 레인을 드래그해 이동합니다.",
+      "position": "전투에서 보이는 구간"
+    },
     "hoverTooltip": {
       "loading": "불러오는 중...",
       "empty": "이 전투의 스킬 데이터가 없습니다",
       "error": "스킬을 불러올 수 없습니다"
+    },
+    "compare": {
+      "button": "두 플레이어 비교",
+      "party": "파티",
+      "vs": "A 대 B",
+      "why": "차이의 이유",
+      "skills": "스킬",
+      "name": "이름",
+      "damage": "피해",
+      "dps": "DPS",
+      "share": "비중",
+      "hits": "타수",
+      "crit": "치명",
+      "avg": "평균",
+      "back": "백",
+      "perfect": "퍼펙",
+      "double": "더블",
+      "multi": "다중타",
+      "maxHit": "최대 피해",
+      "diff": "차이",
+      "swap": "바꾸기",
+      "pickHint": "각 줄의 A / B로 비교할 두 사람을 고르세요",
+      "noData": "기록된 피해가 없습니다",
+      "needTwo": "비교하려면 두 명이 필요합니다",
+      "ahead": "{winner}이(가) {loser}보다 {pct} 더 많은 피해를 줬습니다",
+      "even": "DPS가 거의 같습니다",
+      "uptime": "가동률 (공격한 시간)",
+      "pace": "공격 속도 (공격 중 초당 타수)",
+      "hitsF": "타수",
+      "perHit": "타당 피해",
+      "dots": "피해 중 DoT 비중",
+      "factorHint": "DPS 차이를 서로 곱해지는 요소로 나눈 것으로, 앞선 쪽 기준입니다. 막대는 가장 큰 요소를 기준으로 하고, 차이는 그 요소만으로 앞선 쪽이 앞서는(+) 또는 뒤지는(-) 정도입니다. DoT 틱은 가동률, 공격 속도, 타당 피해에서 제외됩니다.",
+      "rateTitle": "타격 품질",
+      "rateHint": "타당 피해를 좌우하는 발생률",
+      "mainCause": "주된 이유: {list}",
+      "counter": "{name}이(가) 앞선 부분: {list}",
+      "factor": "{factor} ({pct})",
+      "driver": "차이를 만든 스킬: {skill}, {who} {diff}, {why}",
+      "unused": "{name}은(는) 사용하지 않음",
+      "causeHits": "더 많이 사용 ({ahead} 대 {behind}회)",
+      "causeAvg": "더 강한 타격 (평균 {ahead} 대 {behind})",
+      "deaths": "{name} {count}회 사망 ({sec}초 동안)",
+      "otherClass": "직업이 달라 각자의 스킬을 나란히 보여 줍니다",
+      "perSec": "/초",
+      "pt": "%p"
     }
   },
   "history": {
@@ -616,6 +670,12 @@
         "off": "제한 없음"
       }
     },
+    "historyLimit": {
+      "label": "기록에 보관할 전투 수",
+      "options": {
+        "unlimited": "제한 없음"
+      }
+    },
     "showSupporterColors": "후원자 색상 표시",
     "showSupporterColorsHint": "후원자의 이름이 금색으로 표시됩니다. 표시 전용이며 수치에는 전혀 영향을 주지 않습니다.",
     "account": {
@@ -683,6 +743,7 @@
       "textureOffset": "막대마다 질감이 다른 위치에서 시작해 막대들이 똑같아 보이지 않습니다.",
       "trainingMode": "훈련 모드에서 상세 정보 창이 보여 줄 허수아비입니다: 전부 함께, 또는 가장 많이 때린 하나만.",
       "trainTimeLimit": "훈련 모드에서 첫 공격 후 이 시간 동안의 허수아비 공격만 기록합니다. 그 뒤로는 새로고침을 누를 때까지 멈추며, 새로고침하면 시간이 다시 시작됩니다.",
+      "historyLimit": "기록에 보관할 전투 수입니다. 새 전투가 저장될 때 오래된 전투부터 삭제되며, 개인 최고 기록이 있는 전투는 남습니다. 전투 하나는 약 70KB로, 5,000개는 약 350MB입니다. 값을 낮추면 다음 저장 때 새 한도를 넘는 오래된 전투가 삭제됩니다.",
       "allTargetsWindow": "전체 대상 모드에서 마지막 타격 전 이 시간 안에 맞힌 모든 대상을 합산합니다.",
       "updateRate": "미터 수치를 새로 고치는 간격입니다. 빠를수록 피해가 빨리 보이지만 CPU를 더 사용합니다.",
       "partyPresence": "A2Tools를 쓰는 파티원은 내 이름 옆에 작은 A2 표시를 보고, 나도 그들의 표시를 봅니다. A2Tools를 쓰는 파티원 누구나 볼 수 있으므로, 내가 외부 미터를 쓴다는 것을 알게 됩니다. 캐릭터 이름과 서버의 해시만 전송됩니다.",
