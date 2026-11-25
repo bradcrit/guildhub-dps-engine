@@ -705,7 +705,8 @@ impl Engine {
             let npc = selected.and_then(|id| self.storage.mob_code(id));
             return serde_json::json!({ "player": null, "npc": npc }).to_string();
         };
-        let enemy = self.storage.self_faction().map(|mine| mine != p.faction);
+        // Your side in an Abyss pairing of one race, not the race.
+        let enemy = self.storage.self_side().map(|mine| mine != p.faction);
         serde_json::json!({
             "player": {
                 "id": p.id,

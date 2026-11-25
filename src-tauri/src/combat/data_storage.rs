@@ -1797,6 +1797,13 @@ impl DataStorage {
         }
     }
 
+    /// Your faction or, in an Abyss pairing of one race, your side, as the
+    /// players in sight are compared with it (`NearbyPlayers::mine`) — None
+    /// while not known.
+    pub fn self_side(&self) -> Option<u8> {
+        self.nearby.lock().mine()
+    }
+
     /// Your faction, from your self record.
     pub fn note_self_faction(&self, faction: u8) {
         self.nearby.lock().set_self_faction(faction);

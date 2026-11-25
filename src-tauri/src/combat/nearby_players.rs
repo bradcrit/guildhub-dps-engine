@@ -264,13 +264,30 @@ impl NearbyPlayers {
     /// in a pairing of one race a party member's side, else the side of a
     /// player in sight whose legion is of your server (solo, 2026-10-28:
     /// 45 of them on Bradcrit's server 2313 all on side 2, the 4 of 2311 on
-    /// side 1), else your self record's faction.
-    fn mine(&self) -> Option<u8> {
-        let server_side = || {
-            let server = self.self_server?;
-            self.players.values().find(|p| p.paired && p.server == Some(server)).map(|p| p.faction)
-        };
-        self.self_side.or_else(server_side).or(self.self_faction)
+    /// side 1), else the other side than a player in sight whose legion is
+    /// of another server, else your self record's faction — but not while
+    /// players of a pairing of one race are in sight: there the self record's
+    /// faction is the race, not the side (2026-11-25: Bradcrit's server put
+    /// on side 1, the Elyos spawn, his allies on side 1 were all taken for
+    /// foes by the race's 2). Then no one is a foe until the side is known.
+    pub fn mine(&self) -> Option<u8> {
+        if let Some(side) = self.self_side {
+            return Some(side);
+        }
+        let mut paired = self.players.values().filter(|p| p.paired).peekable();
+        if paired.peek().is_none() {
+            return self.self_faction;
+        }
+        let server = self.self_server?;
+        let (mut same, mut other) = (None, None);
+        for p in paired {
+            match p.server {
+                Some(s) if s == server => same = same.or(Some(p.faction)),
+                Some(_) => other = other.or(Some(3 - p.faction)),
+                None => {}
+            }
+        }
+        same.or(other)
     }
 
     /// A player in sight of the other faction — false while your own isn't known.
@@ -777,8 +794,8 @@ mod tests {
         n.set_self_faction(2);
         n.spawn(1, "Arvein", None, None, 1, true, 0);
         n.spawn(2, "Lilin", None, None, 2, true, 0);
-        let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
-        assert_eq!(names, ["Arvein"]);
+        // Your side not known: the race says nothing of it, so no one is a foe.
+        assert!(n.enemies(100).is_empty());
         // Your server on side 1: a party member in sight says so.
         n.spawn(3, "Mate", None, None, 1, true, 0);
         n.guess_faction_from_party(|p| p.name == "Mate");
@@ -786,7 +803,7 @@ mod tests {
         assert_eq!(names, ["Lilin"]);
         // A zone load: learned again.
         n.set_self_faction(2);
-        assert!(n.is_enemy(1));
+        assert!(!n.is_enemy(1) && !n.is_enemy(2));
     }
 
     #[test]
@@ -797,10 +814,12 @@ mod tests {
         n.set_self_server(2311);
         n.spawn(1, "Raly", None, None, 1, true, 0);
         n.spawn(2, "Kronk", None, None, 2, true, 0);
-        // No one of your server in sight: the self record's 2, wrong here.
+        // No one's server known: no foe (the self record's 2 would be wrong).
+        assert!(n.enemies(100).is_empty());
+        // Kronk's legion is of another server: your side is the other one.
         n.set_server(2, Some(2313));
         let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
-        assert_eq!(names, ["Raly"]);
+        assert_eq!(names, ["Kronk"]);
         // Raly's legion is of your server: your side is his.
         n.set_server(1, Some(2311));
         let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
@@ -810,5 +829,28 @@ mod tests {
         n.guess_faction_from_party(|p| p.name == "Mate");
         let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Raly"]);
+    }
+
+    #[test]
+    fn on_the_elyos_spawn_of_a_pairing_of_one_race_allies_are_no_foes() {
+        // 2026-11-25: Bradcrit (Asmodian, server 2313) on side 1, alone, one
+        // ally of side 1 in sight out of a legion: no foe, not the race's 2.
+        let mut n = NearbyPlayers::default();
+        n.set_self_faction(2);
+        n.set_self_server(2313);
+        n.spawn(1, "Guxisar", None, None, 1, true, 0);
+        assert!(n.enemies(100).is_empty());
+        assert_eq!(n.mine(), None);
+        // A player of your server in sight: side 1, the foes are side 2.
+        n.spawn(2, "Ally", None, None, 1, true, 0);
+        n.set_server(2, Some(2313));
+        n.spawn(3, "Foe", None, None, 2, true, 0);
+        let names: Vec<_> = n.enemies(100).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["Foe"]);
+        // Out of a pairing (no paired player in sight): the race again.
+        let mut n = NearbyPlayers::default();
+        n.set_self_faction(2);
+        n.spawn(1, "Elyos", None, None, 1, false, 0);
+        assert!(n.is_enemy(1));
     }
 }
