@@ -80,6 +80,11 @@ pub struct StreamProcessor {
     /// The game's bytes out of a tunnel's envelope, for a connection that has
     /// one (`capture::tunnel`).
     tunnel: super::tunnel::Unwrapper,
+    /// The last map load's spot (`21 36`) and when it came, until a self
+    /// teleport repeats it (`is_teleport_echo`).
+    awaited_teleport: parking_lot::Mutex<Option<(i64, [u8; 12])>>,
+    /// The opcode the last self teleport came under, to log a new one once.
+    teleport_opcode: parking_lot::Mutex<Option<[u8; 2]>>,
 }
 
 /// The `42 36` flag of an entity leaving the world, a spirit unsummoned among
@@ -99,6 +104,8 @@ impl StreamProcessor {
             pending_compact_skill_context: None,
             override_timestamp: None,
             tunnel: Default::default(),
+            awaited_teleport: Default::default(),
+            teleport_opcode: Default::default(),
         }
     }
 
@@ -847,17 +854,49 @@ impl StreamProcessor {
         }
     }
 
-    // ===== ZONE CHANGE (23 36, 51 96 since 2026-11-11, F8 4E since 2026-11-18) =====
+    // ===== ZONE CHANGE (the map load's spot again, whatever the opcode) =====
 
     /// Self/world teleport packet. This fires once on entering a zone/instance
     /// (the local player is teleported in) and not during combat, so it drives a
     /// combat reset — the actual reset is gated by a lull + debounce in
     /// `note_zone_change`, so an in-combat teleport (a boss knockback/pull) never
-    /// wipes an active fight. See `is_self_teleport` for the layouts.
+    /// wipes an active fight.
+    ///
+    /// NC gives this record a new opcode with most weekly patches (`23 36 00`,
+    /// `51 96` on 2026-11-11, `F8 4E` on 2026-11-18, …), so it is found by what
+    /// it says rather than by its opcode: the spot the map load before it put
+    /// you at (`is_teleport_echo`). Every teleport comes with a map load. No
+    /// opcode is kept as a fallback: a retired one may name something else
+    /// after the next patch, and a false teleport clears the meter.
     fn parse_zone_change_packet(&self, packet: &[u8]) {
-        if is_self_teleport(packet) {
-            self.data_storage.note_zone_change();
+        let length_info = read_varint(packet, 0);
+        if length_info.length <= 0 {
+            return;
         }
+        let offset = length_info.length as usize;
+        let Some(body) = packet.get(offset..) else { return };
+        let now = self.override_timestamp.unwrap_or_else(crate::clock::now_ms);
+        {
+            let mut awaited = self.awaited_teleport.lock();
+            let Some((at, spot)) = *awaited else { return };
+            if now - at > TELEPORT_ECHO_WINDOW_MS {
+                *awaited = None;
+                tracing::info!("Self teleport: none repeated the map load's spot within {} s", TELEPORT_ECHO_WINDOW_MS / 1000);
+                return;
+            }
+            if !is_teleport_echo(body, &spot) {
+                return;
+            }
+            *awaited = None;
+        }
+        if let Some(op) = body.get(..2).and_then(|op| <[u8; 2]>::try_from(op).ok()) {
+            let mut known = self.teleport_opcode.lock();
+            if *known != Some(op) {
+                tracing::info!("Self teleport comes as {:02X} {:02X} ({} bytes)", op[0], op[1], body.len());
+                *known = Some(op);
+            }
+        }
+        self.data_storage.note_zone_change();
     }
 
     // ===== MAP LOAD (21 36) =====
@@ -876,6 +915,15 @@ impl StreamProcessor {
             return;
         }
         let map_id = parse_u32_le(packet, offset + 6) as i32;
+        // Its spot (`<u32 0> <pos>` at +14, see `positions::parse`): the self
+        // teleport after it says the same.
+        if packet.get(offset + 14..offset + 18) == Some(&[0, 0, 0, 0][..])
+            && crate::capture::positions::position_at(packet, offset + 18).is_some()
+        {
+            let spot: [u8; 12] = packet[offset + 18..offset + 30].try_into().unwrap();
+            let now = self.override_timestamp.unwrap_or_else(crate::clock::now_ms);
+            *self.awaited_teleport.lock() = Some((now, spot));
+        }
         self.data_storage.note_map_load(map_id);
     }
 
@@ -2529,36 +2577,32 @@ impl StreamProcessor {
 
 // ===== FREE FUNCTIONS =====
 
-/// Is this the local player's teleport, sent once after each map load?
+/// How long after a map load its self teleport may come: 2 to 5.5 s in every
+/// capture so far.
+const TELEPORT_ECHO_WINDOW_MS: i64 = 10_000;
+
+/// Is this record (opcode on, past the length) the local player's teleport
+/// after the map load that put you at `spot`? The layouts so far:
 ///
 /// ```text
-/// until 2026-11-10: <len> 23 36 00 <5 × 00> <x f32> <y f32> <z f32> <u32> <u16>
-/// from 2026-11-11:  <len> 51 96 <u16> <x f32> <y f32> <z f32> <u32> <6 × 00>
-/// from 2026-11-18:  <len> F8 4E <4 × 00> <u16> <x f32> <y f32> <z f32> <u32> <u16>
+/// until 2026-11-10: 23 36 00 <5 × 00> <x f32> <y f32> <z f32> <u32> <u16>
+/// from 2026-11-11:  51 96 <u16> <x f32> <y f32> <z f32> <u32> <6 × 00>
+/// from 2026-11-18:  F8 4E <4 × 00> <u16> <x f32> <y f32> <z f32> <u32> <u16>
+/// from 2026-11-25:  9E D7 <x f32> <y f32> <z f32> <u32> <6 × 00> <u16> <2 × 00>
 /// ```
 ///
-/// The old one: entity id 0 (you), as opposed to another entity's routine
-/// `23 36` position update. NC's patch of 2026-11-11 dropped `23 36`
-/// altogether; `51 96` came in its place, 26 bytes past the length, with the
-/// map load's position, 3 to 4 s after each of the 6 map loads of that
-/// morning's capture and never otherwise. The June 2026 +1 opcode shift left
-/// the old one alone. By 2026-11-18 `51 96` was gone too and `F8 4E` (27
-/// bytes) carried the map load's position, 2 to 5.5 s after each of the 5
-/// map loads of that morning's capture and never otherwise.
-fn is_self_teleport(packet: &[u8]) -> bool {
-    let length_info = read_varint(packet, 0);
-    if length_info.length <= 0 {
-        return false;
-    }
-    let offset = length_info.length as usize;
-    match packet.get(offset..offset + 3) {
-        Some([0x23, 0x36, 0x00]) => true,
-        Some([0x51, 0x96, _]) => packet.len() - offset >= 2 + 2 + 12,
-        Some([0xF8, 0x4E, 0x00]) => {
-            packet.len() - offset >= 2 + 4 + 2 + 12 && packet[offset + 2..offset + 6] == [0, 0, 0, 0]
-        }
-        _ => false,
-    }
+/// Each a short record (26 bytes) with the map load's spot, byte for byte,
+/// a few bytes past the opcode. Other records repeat that spot after a load
+/// too (effects `2A 38` at +31, `1C 92` at +26, spawns `45 36` at +24, the
+/// self record `33 36` at +182; capture of 2026-11-24), but always further
+/// in and in longer records.
+fn is_teleport_echo(body: &[u8], spot: &[u8; 12]) -> bool {
+    const MAX_LEN: usize = 40;
+    const SPOT_FROM: usize = 2;
+    const SPOT_TO: usize = 14;
+    body.len() <= MAX_LEN
+        && body.len() >= SPOT_FROM + 12
+        && (SPOT_FROM..=SPOT_TO.min(body.len() - 12)).any(|k| &body[k..k + 12] == spot)
 }
 
 /// Hit records filed under one skill's id that another skill dealt. A
@@ -6191,21 +6235,54 @@ mod tests {
         assert_eq!(storage.current_dungeon_id(), 600021);
     }
 
-    /// Teleports from the captures of 2026-11-10 (`23 36 00`) and 2026-11-11
-    /// (`51 96`, after NC's patch) and 2026-11-18 (`F8 4E`); another entity's
-    /// `23 36` is no teleport.
+    /// The teleport after a map load, whatever its opcode: the three layouts
+    /// so far (2026-11-10 `23 36 00`, 2026-11-11 `51 96`, 2026-11-18 `F8 4E`)
+    /// with their spots, and the longer records that repeat the spot further
+    /// in (capture of 2026-11-24).
     #[test]
-    fn self_teleports_old_and_new() {
+    fn a_teleport_repeats_its_map_loads_spot() {
         let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
-        assert!(is_self_teleport(&hex("1B2336000000000000D98FEF476FA33B470040F64402000000C715")));
-        assert!(is_self_teleport(&hex("1B5196963ECA8DD147C19592470040654400000100000000000000")));
-        assert!(!is_self_teleport(&hex("1B2336A10F0000D98FEF476FA33B470040F64402000000C715")));
-        assert!(!is_self_teleport(&hex("055196963E")), "too short for a position");
-        // 2026-11-18: `F8 4E`, the map load's position after 4 zero bytes.
-        assert!(is_self_teleport(&hex("1EF84E00000000CC59E72DEBC601D36BC6000C14C6020000000000")));
-        assert!(is_self_teleport(&hex("1EF84E00000000AB4E41AEEF4778F948470080F744040000000000")));
-        assert!(!is_self_teleport(&hex("1EF84E00010000CC59E72DEBC601D36BC6000C14C6020000000000")));
-        assert!(!is_self_teleport(&hex("07F84E00000000")), "too short for a position");
+        let spot = |s: &str| -> [u8; 12] { hex(s).try_into().unwrap() };
+        let at_24 = spot("d98fef476fa33e470040f644");
+        assert!(is_teleport_echo(&hex("2336000000000000D98FEF476FA33E470040F64402000000C715"), &at_24));
+        assert!(is_teleport_echo(&hex("5196963ED98FEF476FA33E470040F64400000100000000000000"), &at_24));
+        assert!(is_teleport_echo(&hex("f84e00000000e831d98fef476fa33e470040f644030000000000"), &at_24));
+        // Another spot: no.
+        assert!(!is_teleport_echo(&hex("f84e00000000ee06a14c88c64436804600803344010000000000"), &at_24));
+        // An effect on you at that spot (+31, 44 bytes) and the self record: no.
+        assert!(!is_teleport_echo(&hex("2a38d639011142122700008813000000000000707d1c0da2010000d6390100d98fef476fa33e470040f64400"), &at_24));
+        let at_load_2 = spot("113e8d47328836c700941247");
+        assert!(!is_teleport_echo(&hex("1c9224980200000004091f000000cd2709000f350100deea0000113e8d47328836c7009412472d00"), &at_load_2));
+        assert!(is_teleport_echo(&hex("f84e00000000fc09113e8d47328836c700941247040000000000"), &at_load_2));
+        // 2026-11-25: `9E D7`, the spot right after the opcode.
+        let at_25 = spot("d98fef476fa33d4700e0f644");
+        assert!(is_teleport_echo(&hex("9ed7d98fef476fa33d4700e0f644ce6b00000000000001000000"), &at_25));
+    }
+
+    /// A map load, then (3 s on) its teleport under an opcode never seen
+    /// before: counted once; the same record again, or one past the window,
+    /// is not.
+    #[test]
+    fn the_teleport_is_found_by_its_map_loads_spot() {
+        let storage = Arc::new(DataStorage::new());
+        let mut p = StreamProcessor::new(storage, Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        let load = hex("34213601000000F20300002DF7420000000000d98fef476fa33e470040f6440000A0400200000000000000000000000000");
+        let teleport = hex("1E77AA00000000e831d98fef476fa33e470040f644030000000000");
+        p.set_override_timestamp(Some(1_000_000));
+        p.parse_zone_change_packet(&load);
+        p.parse_map_load_packet(&load);
+        p.set_override_timestamp(Some(1_003_000));
+        p.parse_zone_change_packet(&teleport);
+        assert_eq!(*p.teleport_opcode.lock(), Some([0x77, 0xAA]));
+        assert!(p.awaited_teleport.lock().is_none(), "counted once");
+
+        *p.teleport_opcode.lock() = None;
+        p.set_override_timestamp(Some(1_100_000));
+        p.parse_map_load_packet(&load);
+        p.set_override_timestamp(Some(1_100_000 + TELEPORT_ECHO_WINDOW_MS + 1));
+        p.parse_zone_change_packet(&teleport);
+        assert_eq!(*p.teleport_opcode.lock(), None, "too late");
+        p.set_override_timestamp(None);
     }
 
     #[test]
