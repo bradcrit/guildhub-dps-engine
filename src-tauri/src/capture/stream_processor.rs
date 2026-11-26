@@ -334,6 +334,12 @@ impl StreamProcessor {
             self.data_storage.note_login_record(id);
             self.data_storage.note_local_dbid(dbid);
         }
+        // A character made just now goes into the world with no login record:
+        // its creation names the entity instead (BradTank, 2026-11-26).
+        if let Some((id, name)) = character_created(packet) {
+            tracing::info!("character created: '{}' -> entity {}", name, id);
+            self.data_storage.note_login_record(id);
+        }
         self.parse_death_packet(packet);
         self.parse_zone_change_packet(packet);
         self.parse_map_load_packet(packet);
@@ -2852,6 +2858,36 @@ fn timed_event(packet: &[u8]) -> Option<String> {
     };
     let times: Vec<String> = times.into_iter().map(utc).collect();
     Some(format!("{name} ({side}) {} kind {kind} state {state}: {}", event.value, times.join(" / ")))
+}
+
+/// The character you just made, as the creation's answer names it.
+///
+/// `1C 36` answers "Create": the game then goes straight into the world with
+/// it, and sends no login record (`53 20`) for that entry — only the self
+/// record follows (capture of 2026-11-26, BradTank, entity 3140, 3 s later):
+///
+/// ```text
+/// <len> 1C 36 <result u16> <entity u32> <name: varint length, UTF-8> ...
+/// ```
+///
+/// A result other than 0 (name taken, no slot) names no one.
+fn character_created(packet: &[u8]) -> Option<(i32, String)> {
+    let len = read_varint(packet, 0);
+    if len.length <= 0 {
+        return None;
+    }
+    let at = len.length as usize;
+    if packet.get(at..at + 4)? != [0x1C, 0x36, 0, 0] {
+        return None;
+    }
+    let id = i32::from_le_bytes(packet.get(at + 4..at + 8)?.try_into().ok()?);
+    let name_len = read_varint(packet, at + 8);
+    if name_len.length <= 0 || name_len.value <= 0 {
+        return None;
+    }
+    let from = at + 8 + name_len.length as usize;
+    let name = exact_name(packet.get(from..from + name_len.value as usize)?)?;
+    (100..=9_999_999).contains(&id).then_some((id, name))
 }
 
 /// The entity a login record names as you.
@@ -6601,6 +6637,27 @@ mod tests {
         processor.scan_masked_identity(&record);
         assert_eq!(storage.local_character_name().as_deref(), Some("Naicha"));
         assert!(!storage.local_name_from_login());
+    }
+
+    /// A character made just now (2026-11-26): no login record before its
+    /// first entry, so the creation's answer is the login — its self record
+    /// is you, from the login, and goes into the ToDo.
+    #[test]
+    fn a_new_characters_creation_counts_as_its_login() {
+        let created = hex("81041c360000440c0000084272616454616e6b0b0000000201010000");
+        assert_eq!(character_created(&created), Some((3140, "BradTank".to_string())));
+        // Name taken (result not 0): no one.
+        let mut refused = created.clone();
+        refused[4] = 1;
+        assert_eq!(character_created(&refused), None);
+
+        let storage = Arc::new(DataStorage::new());
+        let mut processor = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        processor.parse_perfect_packet(&created);
+        storage.set_local_identity_from_game(3140, Some("BradTank".into()));
+        assert_eq!(storage.local_character_name().as_deref(), Some("BradTank"));
+        assert!(storage.local_name_from_login());
+        assert!(storage.self_record_is_not_login(5000, "Someone"));
     }
 
     /// The start of another self record (2026-10-11): Nullception, server
