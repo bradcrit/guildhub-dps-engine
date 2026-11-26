@@ -1390,6 +1390,10 @@ struct Inner {
     /// new entity, never a new name: until the next login record, only a self
     /// record with this name is yours (`self_record_is_not_login`).
     login_name: Option<String>,
+    /// The character list (`26 36`) came: you're at character select, and the
+    /// next self record is the character you go in with (no `53 20` login
+    /// record any more for a plain Start Game, 2026-11-26).
+    login_pending: bool,
     /// The name the game stated is the login record's character's.
     local_name_from_login: bool,
     /// Who the loot records (`04 8d` after a kill) say owns the drops, and
@@ -1559,6 +1563,7 @@ impl DataStorage {
                 local_identity_from_game: false,
                 login_entity: None,
                 login_name: None,
+                login_pending: false,
                 local_name_from_login: false,
                 loot_identity: LootIdentity::default(),
                 player_servers: HashMap::new(),
@@ -2622,6 +2627,11 @@ impl DataStorage {
         }
         if inner.login_name.is_none() && inner.login_entity.is_some_and(|e| e as i64 == id) {
             inner.login_name = name.clone();
+        } else if inner.login_pending && name.is_some() {
+            // The first self record after the character list: the one you went in with.
+            inner.login_name = name.clone();
+            inner.login_entity = i32::try_from(id).ok();
+            inner.login_pending = false;
         }
         let from_login = name.is_some() && inner.login_name.is_some() && inner.login_name == name;
         changed |= inner.local_name_from_login != from_login;
@@ -2833,20 +2843,8 @@ impl DataStorage {
         let mut inner = self.inner.write();
         inner.login_entity = Some(entity_id);
         inner.login_name = None;
-        // The lists so far are the last character's: the login's own come
-        // right after (`0b 61` 0.05 s later, 2026-11-16) and wait for the self
-        // record. One that doesn't read must not leave the last one's to it —
-        // a switch Cplusplus → Bradcrit gave Bradcrit Cplusplus's 73 counts.
-        let lists = &mut inner.game_lists;
-        lists.counts.clear();
-        lists.items.clear();
-        lists.items_whole = false;
-        lists.duties = None;
-        lists.morphs_server.clear();
-        lists.morphs_character.clear();
-        lists.morphs_whole = false;
-        lists.owner = None;
-        lists.awaits_self_record = true;
+        inner.login_pending = false;
+        clear_lists_for_login(&mut inner);
         if inner.local_player_id == Some(entity_id as i64) {
             return false;
         }
@@ -2857,6 +2855,17 @@ impl DataStorage {
         );
         bind_unnamed_self(&mut inner, entity_id);
         true
+    }
+
+    /// The character list (`26 36`): you're at character select. Whoever you
+    /// go in with is named by the next self record — the login for
+    /// `local_name_from_login` and `self_record_is_not_login`.
+    pub fn note_character_list(&self) {
+        let mut inner = self.inner.write();
+        inner.login_entity = None;
+        inner.login_name = None;
+        inner.login_pending = true;
+        clear_lists_for_login(&mut inner);
     }
 
     /// Whether the UI may make `actor_id` the local player (`bind_local_actor_id`).
@@ -5701,6 +5710,23 @@ fn own_list(inner: &mut Inner, whole_list: bool) {
     } else if inner.odyle_owner.is_none() && !inner.odyle_awaits_self_record && inner.local_identity_from_game {
         inner.odyle_owner = inner.local_character_name.clone();
     }
+}
+
+/// The lists so far are the last character's: the login's own come right
+/// after (`0b 61` 0.05 s later, 2026-11-16) and wait for the self record. One
+/// that doesn't read must not leave the last one's to it — a switch
+/// Cplusplus → Bradcrit gave Bradcrit Cplusplus's 73 counts.
+fn clear_lists_for_login(inner: &mut Inner) {
+    let lists = &mut inner.game_lists;
+    lists.counts.clear();
+    lists.items.clear();
+    lists.items_whole = false;
+    lists.duties = None;
+    lists.morphs_server.clear();
+    lists.morphs_character.clear();
+    lists.morphs_whole = false;
+    lists.owner = None;
+    lists.awaits_self_record = true;
 }
 
 fn set_game_identity(inner: &mut Inner, id: i64, name: Option<String>) {

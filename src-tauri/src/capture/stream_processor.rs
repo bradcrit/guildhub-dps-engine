@@ -334,6 +334,11 @@ impl StreamProcessor {
             self.data_storage.note_login_record(id);
             self.data_storage.note_local_dbid(dbid);
         }
+        // Character select: the next self record is whoever you go in with.
+        if character_list(packet) {
+            tracing::info!("character list: the next self record is the login's character");
+            self.data_storage.note_character_list();
+        }
         // A character made just now goes into the world with no login record:
         // its creation names the entity instead (BradTank, 2026-11-26).
         if let Some((id, name)) = character_created(packet) {
@@ -2858,6 +2863,18 @@ fn timed_event(packet: &[u8]) -> Option<String> {
     };
     let times: Vec<String> = times.into_iter().map(utc).collect();
     Some(format!("{name} ({side}) {} kind {kind} state {state}: {}", event.value, times.join(" / ")))
+}
+
+/// The account's character list (`26 36`, 5–6 KB, every character with its
+/// name): sent at character select only — at the start and on every switch
+/// (capture of 2026-11-26), never in the world. A plain Start Game no longer
+/// sends a login record (`53 20`) since then, so this is what says the next
+/// self record is yours.
+fn character_list(packet: &[u8]) -> bool {
+    let len = read_varint(packet, 0);
+    len.length > 0
+        && packet.len() >= 512
+        && packet.get(len.length as usize..len.length as usize + 4) == Some(&[0x26, 0x36, 0, 0][..])
 }
 
 /// The character you just made, as the creation's answer names it.
@@ -6658,6 +6675,29 @@ mod tests {
         assert_eq!(storage.local_character_name().as_deref(), Some("BradTank"));
         assert!(storage.local_name_from_login());
         assert!(storage.self_record_is_not_login(5000, "Someone"));
+    }
+
+    /// A character switch (2026-11-26): the list `26 36`, then the self record
+    /// of whoever you went in with — no login record any more. That one is you
+    /// from the login; another character's record after it isn't.
+    #[test]
+    fn after_the_character_list_the_next_self_record_is_the_login() {
+        let mut list = hex("a2302636000004");
+        list.resize(6176, 0);
+        assert!(character_list(&list));
+        assert!(!character_list(&list[..100]));
+
+        let storage = Arc::new(DataStorage::new());
+        let mut processor = StreamProcessor::new(storage.clone(), Arc::new(SkillLookup::new()), Arc::new(NpcLookup::new()));
+        // In the world as Cplusplus (no login seen), then the switch to BradTank.
+        storage.set_local_identity_from_game(16263, Some("Cplusplus".into()));
+        assert!(!storage.local_name_from_login());
+        processor.parse_perfect_packet(&list);
+        storage.set_local_identity_from_game(7838, Some("BradTank".into()));
+        assert_eq!(storage.local_character_name().as_deref(), Some("BradTank"));
+        assert!(storage.local_name_from_login());
+        assert!(storage.self_record_is_not_login(9000, "Cplusplus"));
+        assert!(!storage.self_record_is_not_login(9001, "BradTank"));
     }
 
     /// The start of another self record (2026-10-11): Nullception, server
