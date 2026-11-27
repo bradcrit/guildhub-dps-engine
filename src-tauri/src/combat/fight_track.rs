@@ -62,6 +62,11 @@ pub const SELF_KEY: i32 = 0;
 const AROUND_CM: f32 = 9_000.0;
 /// At most this many mobs and NPCs in a saved fight, the most spots first.
 const MAX_OTHERS: usize = 80;
+/// Mobs and NPCs that cast in the fight are kept on top of those, up to this
+/// many: a raid boss's mechanic helpers come by the dozen with a spot or two
+/// each (Abyssal Wings Ketu, 2026-11-27: 52 + 88 feather helpers, an add wave
+/// of 80 mobs) — with them cut, a replay lost who cast half its mechanics.
+const MAX_CASTERS: usize = 400;
 /// Spots per entity in a saved fight; a longer track keeps every n-th.
 const MAX_ENTITY_POINTS: usize = 8_000;
 const MAX_SAVED_CASTS: usize = 6_000;
@@ -405,7 +410,9 @@ pub fn for_fight(
         .take(MAX_SAVED_CASTS)
         .collect();
     others.sort_by(|a, b| b.0.cmp(&a.0));
-    ents.extend(others.into_iter().take(MAX_OTHERS).map(|(_, e)| e));
+    let (casting, plain): (Vec<_>, Vec<_>) = others.into_iter().partition(|(_, e)| casters.contains(&e.id));
+    ents.extend(casting.into_iter().take(MAX_CASTERS).map(|(_, e)| e));
+    ents.extend(plain.into_iter().take(MAX_OTHERS).map(|(_, e)| e));
     ents.sort_by_key(|e| (["you", "player", "boss", "mob", "npc"].iter().position(|k| *k == e.kind), e.id));
 
     let mut cast_text = String::new();
